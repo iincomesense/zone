@@ -1,40 +1,52 @@
-"""Single-file Streamlit scanner porting the supplied Pine Script v6 Zone MTF.
-
-All local modules (NSE/global universes, Yahoo/NSE adapters, optional Dhan
-read-only quotes, timeframe aggregation, Pine candidate/state/swing/MTF engine
-and dashboard) are inlined below. Keep requirements.txt for third-party libs;
-this app has no local scanner-package import.
-
-CHANGELOG (bug-fix / speed pass — Pine v6 rules/params/logic untouched):
-  * FIX: `pine_settings` / `run_pine_engine` names were used but never defined
-    (only `settings` / `scan_zones` existed) -> every scan crashed with
-    NameError. Added aliases right after the engine definitions.
-  * SPEED: equity/global zone scan now runs only on the selected display
-    timeframes (MTF table still always scans its own fixed 9 contexts).
-  * SPEED: added a "Universe size" control (Top 50/100/150/All) so large
-    F&O universes don't time out on free hosting.
-  * CLEAN: suppressed yfinance's noisy failed-download console spam.
-"""
+# Pine Zone MTF scanner - single-file Streamlit app (Pine v6 rules / inputs / logic unchanged)
+#
+# CHANGELOG (speed + clean-UI pass)
+#  * FIX : module-level docstrings in the middle of the file were rendered by Streamlit
+#          "magic" as page text (see screenshots). They are plain comments now.
+#  * FIX : the scan used to restart on EVERY widget click (that is why it hung at
+#          "202 NSE futures x 13 timeframes"). Now it runs only on Scan / Refresh.
+#  * FAST: lazy compute - only the selected view (NSE / Global / MTF) is scanned.
+#  * FAST: only the Yahoo layers needed by the selected timeframes are downloaded.
+#  * FAST: scan results cached (st.cache_data); filters / sort / state / side are instant.
+#  * FAST: NSE bhavcopy lookup runs in parallel + new NSE file name added.
+#  * FAST: broken zones are skipped in the per-bar state loop (identical output).
+#  * FAST: no pandas Styler; native dataframe column_config + emoji colouring.
+#  * UI  : table first; every control sits in one strip above it; Pine inputs in sidebar form.
 from __future__ import annotations
 
 import logging as _logging
 _logging.getLogger("yfinance").setLevel(_logging.CRITICAL)
 
+import os
+import re
+import time
+import zipfile
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
+from datetime import time as dtime
+from io import BytesIO, StringIO
+from typing import Any, Dict, List, Optional
+from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
-# ===== Inlined from scanner/universe.py =====
+import numpy as np
+import pandas as pd
+import requests
+import streamlit as st
 
-"""Instrument universe and timeframe definitions.
+st.set_page_config(page_title="Pine Zone MTF", page_icon="🎯",
+                   layout="wide", initial_sidebar_state="collapsed")
 
-The current NSE stock-futures universe is taken from the latest FO bhavcopy
-when available.  The list below is only an offline fallback; it is deliberately
-not used to claim that every fallback symbol still has a listed future.
-"""
+IST = ZoneInfo("Asia/Kolkata")
+
+# ===================================================================== universe
 TIMEFRAMES: tuple[str, ...] = (
     "3m", "5m", "10m", "15m", "30m", "75m",
     "1h", "2h", "4h", "6h", "1d", "1w", "1M",
 )
 
-# Broad offline fallback. The latest NSE derivative bhavcopy overrides this.
+# Offline fallback; the latest NSE derivative bhavcopy overrides this.
 FNO_FALLBACK: tuple[str, ...] = tuple(sorted(set("""
 AARTIIND ABB ABBOTINDIA ABCAPITAL ABFRL ACC ADANIENSOL ADANIENT ADANIGREEN
 ADANIPORTS ALKEM AMBUJACEM ANGELONE APOLLOHOSP APOLLOTYRE ASHOKLEY ASIANPAINT
@@ -61,9 +73,6 @@ TVSMOTOR UBL ULTRACEMCO UNIONBANK UNITDSPR UPL VBL VEDL VOLTAS
 WIPRO YESBANK ZYDUSLIFE
 """.split())))
 
-# These are zone-only instruments: each Yahoo ticker is paired with its
-# TradingView symbol and a human-readable label. Global rows do not need to
-# have an NSE futures contract.
 GLOBAL_INSTRUMENTS: tuple[dict[str, str], ...] = (
     {"key": "NIFTY 50", "yahoo": "^NSEI", "tv": "NSE:NIFTY", "label": "NIFTY 50"},
     {"key": "NIFTY BANK", "yahoo": "^NSEBANK", "tv": "NSE:BANKNIFTY", "label": "NIFTY BANK"},
@@ -77,29 +86,11 @@ GLOBAL_INSTRUMENTS: tuple[dict[str, str], ...] = (
     {"key": "DOLLAR INDEX", "yahoo": "DX-Y.NYB", "tv": "TVC:DXY", "label": "US Dollar Index"},
 )
 
-# Yahoo interval/period pairs used as compact source layers. Non-native periods
-# (3m, 10m, 75m, 2h, 4h, 6h, weekly and monthly) are built from these candles.
-YAHOO_LAYERS: tuple[tuple[str, str, str], ...] = (
-    ("minute", "1m", "7d"),
-    ("hour", "60m", "2y"),
-    ("daily", "1d", "5y"),
-)
+MINUTE_TFS = {"3m", "5m", "10m", "15m", "30m", "75m"}
+HOUR_TFS = {"1h", "2h", "4h", "6h"}
+DAY_TFS = {"1d", "1w", "1M"}
 
-
-# ===== Inlined from scanner/zones.py =====
-
-"""OHLCV normalization and candle aggregation for zone_core.py.
-
-Zone detection, EOD gating, scoring and state transitions live in
-``scanner.zone_core``; this module only prepares requested timeframe candles.
-"""
-from datetime import datetime, time as dtime
-from typing import Any
-from zoneinfo import ZoneInfo
-
-import pandas as pd
-
-IST = ZoneInfo("Asia/Kolkata")
+# ===================================================================== candles
 OHLCV = ("Open", "High", "Low", "Close", "Volume")
 
 
@@ -109,7 +100,6 @@ def normalize_ohlcv(frame: pd.DataFrame | None) -> pd.DataFrame:
         return pd.DataFrame(columns=list(OHLCV))
     df = frame.copy()
     if isinstance(df.columns, pd.MultiIndex):
-        # A single-ticker yfinance response can still have a MultiIndex.
         df.columns = [str(c[-1] if str(c[-1]).lower() in {x.lower() for x in OHLCV}
                            else c[0]) for c in df.columns]
     rename: dict[Any, str] = {}
@@ -120,8 +110,6 @@ def normalize_ohlcv(frame: pd.DataFrame | None) -> pd.DataFrame:
         if key in aliases:
             rename[col] = aliases[key]
     df = df.rename(columns=rename)
-    # Yahoo may expose both Close and Adj Close; after alias normalization these
-    # can collide. Keep the first (unadjusted Close) column only.
     df = df.loc[:, ~df.columns.duplicated(keep="first")]
     if "Close" not in df.columns:
         return pd.DataFrame(columns=list(OHLCV))
@@ -147,24 +135,10 @@ def normalize_ohlcv(frame: pd.DataFrame | None) -> pd.DataFrame:
     return df
 
 
-def _aggregate(frame: pd.DataFrame) -> pd.DataFrame:
-    if frame.empty:
-        return pd.DataFrame(columns=list(OHLCV))
-    result = frame.resample(
-        "1min", origin="start_day", label="left", closed="left"
-    ).agg({
-        "Open": "first", "High": "max", "Low": "min",
-        "Close": "last", "Volume": "sum",
-    })
-    return result
-
-
 def _session_filter(frame: pd.DataFrame, market: str) -> pd.DataFrame:
     df = normalize_ohlcv(frame)
     if df.empty:
         return df
-    # Indian cash market hours. Global instruments use their own Yahoo exchange
-    # timestamps, so only weekdays are filtered for them.
     weekday = df.index.dayofweek < 5
     df = df.loc[weekday]
     if market.upper() == "NSE":
@@ -200,8 +174,6 @@ def _resample_intraday(frame: pd.DataFrame, minutes: int, market: str,
         if market.upper() == "NSE":
             close_time = pd.Timestamp(datetime.combine(day, dtime(15, 30)), tz=IST)
         else:
-            # This is only an incomplete-bar guard. Global market sessions vary;
-            # the source candle timestamp remains the exchange-local timestamp.
             close_time = None
         keep = []
         for stamp in bars.index:
@@ -257,13 +229,12 @@ def timeframe_candles(data: dict[str, pd.DataFrame], timeframe: str,
                       market: str = "NSE", now: datetime | None = None) -> pd.DataFrame:
     """Create requested timeframe from the three compact Yahoo data layers."""
     market = market.upper()
-    if timeframe in {"3m", "5m", "10m", "15m", "30m", "75m"}:
+    if timeframe in MINUTE_TFS:
         source = data.get("minute")
         if source is None or source.empty:
-            # No synthetic minute bars: return empty rather than implying a scan.
             return pd.DataFrame(columns=list(OHLCV))
         return _resample_intraday(source, int(timeframe[:-1]), market, now=now)
-    if timeframe in {"1h", "2h", "4h", "6h"}:
+    if timeframe in HOUR_TFS:
         source = data.get("hour")
         if source is None or source.empty:
             return pd.DataFrame(columns=list(OHLCV))
@@ -281,23 +252,8 @@ def timeframe_candles(data: dict[str, pd.DataFrame], timeframe: str,
     raise ValueError(f"Unsupported timeframe: {timeframe}")
 
 
-# ===== Inlined from scanner/pine_zone_core.py =====
-
-"""Python port of the user-supplied Pine Script v6 Zone MTF engine.
-
-Candidate validity, score, pattern, zone levels and state transitions follow
-f_candidate(), the chart-zone engine and f_mtf_engine(). EOD buffer inputs are
-retained exactly as in Pine but are not used as zone filters in this script.
-Chart-mode results retain broken boxes up to maxStored; MTF mode removes broken
-zones and can return only the latest active demand/supply line per timeframe.
-"""
-from dataclasses import dataclass
-from datetime import datetime
-from typing import Any, Dict, List, Optional
-
-import numpy as np
-import pandas as pd
-
+# ===================================================================== Pine engine
+# Python port of the Pine Script v6 Zone MTF engine (rules / inputs unchanged).
 PINE_DEFAULTS: Dict[str, Any] = {
     "accountCapital": 25000.0,
     "riskPct": 0.5,
@@ -346,7 +302,7 @@ PINE_DEFAULTS: Dict[str, Any] = {
     "hqBaseColourProbabilityPct": 90.0,
     "enableWhiteAreaCheck": True,
 
-    # Pine Script groups 1–3: MTF visibility, shadow and swing settings.
+    # Pine groups 1-3: MTF visibility, shadow and swing settings.
     "showMTF": True,
     "filterDistantMTF": True,
     "mtfNearPct": 8.0,
@@ -424,7 +380,6 @@ class Zone:
 
     @property
     def breakBarIndex(self) -> Optional[int]:
-        """Compatibility alias for older table code."""
         return self.brokenAt
 
 
@@ -432,7 +387,6 @@ OHLCV_LOWER = ("open", "high", "low", "close", "volume")
 
 
 def _normalize_core_frame(frame: pd.DataFrame) -> pd.DataFrame:
-    """Normalize lowercase/Title-case OHLCV and retain the supplied index."""
     df = frame.copy()
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = [str(col[-1]) for col in df.columns]
@@ -700,8 +654,6 @@ class ZoneEngine:
             right_h = self.h[pivot + 1:i + 1]
             left_l = self.l[pivot - self.swingLeft:pivot]
             right_l = self.l[pivot + 1:i + 1]
-            # Tie handling chooses the right-most equal pivot, consistent with
-            # confirmed-pivot scanning and avoids repeated plateau pivots.
             if (len(left_h) == self.swingLeft and len(right_h) == self.swingRight
                     and self.h[pivot] >= np.max(left_h) and self.h[pivot] > np.max(right_h)):
                 self.lastSwingHigh = float(self.h[pivot])
@@ -859,6 +811,10 @@ class ZoneEngine:
         low, high = self.l[i], self.h[i]
         for k in range(len(self.active_zones) - 1, -1, -1):
             zone = self.active_zones[k]
+            # SPEED (identical output): in chart mode an already-broken zone only
+            # re-applied the same grey colours every bar; nothing else changes.
+            if self.chart_mode and zone.state == "Broken" and zone.brokenAt is not None:
+                continue
             if zone.state == "Fresh":
                 if zone.isDemand:
                     if low <= zone.distVal:
@@ -946,35 +902,11 @@ def latest_mtf_by_side(zones: List[Zone]) -> dict[str, Zone]:
     return result
 
 
-# NOTE: the rest of this file (pine_scan.py section below) calls these engine
-# functions under the names `pine_settings` / `run_pine_engine`. These aliases
-# are the actual fix for the "NameError: name 'pine_settings' is not defined"
-# crash shown in the app screenshots — the engine logic itself is unchanged.
 pine_settings = settings
 run_pine_engine = scan_zones
 
 
-# ===== Inlined from scanner/market_data.py =====
-
-"""Yahoo candles and NSE derivatives bhavcopy adapters.
-
-Yahoo Finance is the zero-key OHLC fallback used for zone history and spot
-prices. NSE FO bhavcopy supplies the official end-of-day front-month future
-close and the live stock-futures universe. Optional Dhan live quotes are in
-``scanner.dhan`` and override these fallback quotes when configured.
-"""
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, datetime, timedelta
-from io import BytesIO
-import re
-import time
-import zipfile
-from typing import Any
-
-import pandas as pd
-import requests
-
-
+# ===================================================================== market data
 YAHOO_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; ZoneScanner/1.0)"}
 NSE_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -996,8 +928,6 @@ def _clean_yahoo_block(block: pd.DataFrame | None) -> pd.DataFrame:
         return pd.DataFrame()
     frame = block.copy()
     if isinstance(frame.columns, pd.MultiIndex):
-        # The ticker has normally been selected already. Keep only the OHLCV
-        # level if yfinance returned a nested column index.
         frame.columns = [str(c[-1]) for c in frame.columns]
     wanted = {str(c).strip().lower(): c for c in frame.columns}
     cols: dict[str, Any] = {}
@@ -1010,7 +940,6 @@ def _clean_yahoo_block(block: pd.DataFrame | None) -> pd.DataFrame:
     frame = frame.rename(columns=cols)
     if "Close" not in frame.columns:
         return pd.DataFrame()
-    # Drop duplicate columns (e.g. Close and Adj Close both normalized to Close).
     frame = frame.loc[:, ~frame.columns.duplicated(keep="first")]
     return normalize_ohlcv(frame)
 
@@ -1042,7 +971,7 @@ def _download_chunk(tickers: tuple[str, ...], period: str,
                     interval: str) -> dict[str, pd.DataFrame]:
     try:
         import yfinance as yf
-    except Exception as exc:  # pragma: no cover - covered by app-level message
+    except Exception as exc:
         raise RuntimeError("yfinance is not installed; install requirements.txt") from exc
     raw = yf.download(
         tickers=list(tickers), period=period, interval=interval,
@@ -1058,8 +987,8 @@ def _download_chunk(tickers: tuple[str, ...], period: str,
 
 
 def download_yahoo_candles(tickers: tuple[str, ...] | list[str], period: str,
-                           interval: str, *, chunk_size: int = 28,
-                           workers: int = 4) -> dict[str, pd.DataFrame]:
+                           interval: str, *, chunk_size: int = 20,
+                           workers: int = 6) -> dict[str, pd.DataFrame]:
     """Download many symbols in small parallel batches, failing soft per batch."""
     clean = tuple(dict.fromkeys(str(t).strip() for t in tickers if str(t).strip()))
     if not clean:
@@ -1069,13 +998,11 @@ def download_yahoo_candles(tickers: tuple[str, ...] | list[str], period: str,
     if len(chunks) == 1:
         return _download_chunk(chunks[0], period, interval)
     with ThreadPoolExecutor(max_workers=max(1, min(workers, len(chunks)))) as pool:
-        jobs = {pool.submit(_download_chunk, part, period, interval): part for part in chunks}
-        for job in as_completed(jobs):
+        futures = [pool.submit(_download_chunk, part, period, interval) for part in chunks]
+        for fut in futures:
             try:
-                result.update(job.result())
+                result.update(fut.result())
             except Exception:
-                # A bad Yahoo batch must not erase good symbols from the other
-                # chunks. The dashboard reports coverage and remains usable.
                 continue
     return result
 
@@ -1097,7 +1024,9 @@ def _bhavcopy_urls(day: date) -> tuple[str, ...]:
     month = day.strftime("%b").upper()
     old_name = f"fo{ddmonyyyy}bhav.csv.zip"
     new_name = f"fo{ddmmyy}bhav.csv.zip"
+    udiff = f"BhavCopy_NSE_FO_0_0_0_{day:%Y%m%d}_F_0000.csv.zip"   # current NSE format
     return (
+        f"https://nsearchives.nseindia.com/content/fo/{udiff}",
         f"https://nsearchives.nseindia.com/content/fo/{new_name}",
         f"https://archives.nseindia.com/content/fo/{new_name}",
         f"https://nsearchives.nseindia.com/content/historical/DERIVATIVES/{year}/{month}/{old_name}",
@@ -1150,7 +1079,6 @@ def _parse_fo_contracts(frame: pd.DataFrame, asof: date,
     tmp["_close"] = pd.to_numeric(tmp[close_col], errors="coerce")
     if instrument_col:
         tmp["_instrument"] = tmp[instrument_col].astype(str).str.upper().str.strip()
-        # Legacy bhavcopy uses FUTSTK. Newer files can call stock futures STF.
         allowed = tmp["_instrument"].str.contains(r"FUTSTK|STF", regex=True, na=False)
         if allowed.any():
             tmp = tmp.loc[allowed]
@@ -1159,9 +1087,6 @@ def _parse_fo_contracts(frame: pd.DataFrame, asof: date,
     tmp = tmp.dropna(subset=["_expiry", "_close"])
     tmp = tmp[(tmp["_symbol"] != "") & (tmp["_close"] > 0)]
     tmp["_expiry_date"] = tmp["_expiry"].dt.date
-    # The official file may be one session old. Select contracts against today's
-    # date, not the file's date, so expiry-day contracts are not shown as current
-    # after they have expired.
     selection_date = today or datetime.now(IST).date()
     tmp = tmp[tmp["_expiry_date"] >= selection_date]
     if tmp.empty:
@@ -1181,55 +1106,46 @@ def _parse_fo_contracts(frame: pd.DataFrame, asof: date,
     return result
 
 
-def fetch_latest_fo_bhavcopy(*, max_calendar_days: int = 8,
+def fetch_latest_fo_bhavcopy(*, max_calendar_days: int = 6,
                              timeout: float = 2.5) -> dict[str, Any]:
-    """Find the newest accessible NSE FO bhavcopy and extract FUTSTK contracts."""
+    """Newest accessible NSE FO bhavcopy (all candidate URLs tried in parallel)."""
     session = _nse_session()
     today = datetime.now(IST).date()
+    jobs: list[tuple[date, str]] = []
     for offset in range(max(1, int(max_calendar_days))):
         day = today - timedelta(days=offset)
         if day.weekday() >= 5:
             continue
         for url in _bhavcopy_urls(day):
-            try:
-                response = session.get(url, timeout=timeout)
-                if response.status_code != 200 or len(response.content) < 100:
-                    continue
-                parsed = _read_bhavcopy(response.content)
-                if parsed is None or parsed.empty:
-                    continue
-                contracts = _parse_fo_contracts(parsed, asof=day)
-                if contracts:
-                    return {
-                        "contracts": contracts,
-                        "symbols": sorted(contracts),
-                        "asof": day,
-                        "source": url,
-                        "status": "ok",
-                    }
-            except requests.RequestException:
-                continue
-            except Exception:
-                continue
+            jobs.append((day, url))
+
+    def attempt(job: tuple[date, str]):
+        day, url = job
+        try:
+            response = session.get(url, timeout=timeout)
+            if response.status_code != 200 or len(response.content) < 100:
+                return None
+            parsed = _read_bhavcopy(response.content)
+            if parsed is None or parsed.empty:
+                return None
+            contracts = _parse_fo_contracts(parsed, asof=day)
+            if contracts:
+                return day, url, contracts
+        except Exception:
+            return None
+        return None
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        for outcome in pool.map(attempt, jobs):      # ordered: newest day first
+            if outcome:
+                day, url, contracts = outcome
+                return {"contracts": contracts, "symbols": sorted(contracts),
+                        "asof": day, "source": url, "status": "ok"}
     return {"contracts": {}, "symbols": [], "asof": None,
             "source": "", "status": "unavailable"}
 
 
-# ===== Inlined from scanner/dhan.py =====
-
-"""Optional DhanHQ live-quote override (NSE cash + front-month stock futures).
-
-No broker order endpoints are used anywhere in this project.
-"""
-from datetime import date, datetime
-from io import StringIO
-import re
-from typing import Any
-
-import pandas as pd
-import requests
-
-
+# ===================================================================== Dhan (optional, read-only)
 MASTER_URLS = (
     "https://images.dhan.co/api-data/api-scrip-master.csv",
     "https://images.dhan.co/api-data/api-scrip-master-detailed.csv",
@@ -1276,7 +1192,6 @@ def _underlying(row: pd.Series, trading_col: str | None,
         value = str(row.get(col, "")).strip().upper()
         if not value or value in {"NAN", "NONE"}:
             continue
-        # Dhan futures symbols are commonly UNDERLYING-DDMONYY-FUT.
         for sep in (" ", "-"):
             if sep in value:
                 value = value.split(sep, 1)[0].strip()
@@ -1320,8 +1235,6 @@ def build_security_map(master: pd.DataFrame, symbols: list[str] | tuple[str, ...
         matches = frame[frame["_underlying"] == symbol]
         if matches.empty and trade_col:
             matches = frame[frame[trade_col].astype(str).str.upper() == symbol]
-        # Equity contracts: NSE_EQ + EQUITY (or segment NSE_EQ when instrument
-        # descriptions are absent).
         eq = matches[
             matches["_segment"].str.contains("NSE_EQ|EQ", na=False)
             & ~matches["_instrument"].str.contains("FUT|OPT", na=False)
@@ -1382,8 +1295,6 @@ def fetch_dhan_quotes(client_id: str, access_token: str,
         "Content-Type": "application/json",
     }
     for segment, ids in segments.items():
-        # Dhan's marketfeed request accepts up to 1000 IDs. Keep batches small
-        # to avoid request-size or broker throttling issues.
         for start in range(0, len(ids), 100):
             batch = ids[start:start + 100]
             if not batch:
@@ -1409,16 +1320,7 @@ def fetch_dhan_quotes(client_id: str, access_token: str,
             "equity_mapped": len(equity_ids), "future_mapped": len(future_ids)}
 
 
-# ===== Inlined from scanner/pine_scan.py =====
-
-"""NSE/global zone tables and MTF-line data for the supplied Pine v6 engine."""
-from datetime import datetime
-from typing import Any
-from urllib.parse import quote
-
-import numpy as np
-import pandas as pd
-
+# ===================================================================== zone tables
 TV_INTERVAL = {
     "3m": "3", "5m": "5", "10m": "10", "15m": "15", "30m": "30",
     "75m": "75", "1h": "60", "2h": "120", "4h": "240", "6h": "360",
@@ -1605,7 +1507,6 @@ def scan_equity_zones(
                 _, zones = _scan_frame(data, timeframe, market="NSE", ltp=ltp,
                                        params=config, chart_mode=True, now=now)
             except Exception:
-                # A single bad symbol/timeframe must not abort the whole scan.
                 continue
             for zone in zones:
                 rows.append(_zone_row(symbol, timeframe, zone, ltp=ltp,
@@ -1668,61 +1569,6 @@ def scan_global_zones(
     return frame, coverage
 
 
-def mtf_lines_from_zone_frames(
-    equity_rows: pd.DataFrame, global_rows: pd.DataFrame, *, show_mtf: bool = True,
-    filter_distant: bool = True, mtf_near_pct: float = 8.0,
-) -> pd.DataFrame:
-    """Derive Pine's one current demand/supply line per MTF context from scans.
-
-    The scanner already computes the same bar/state engine for every selected
-    timeframe. Reusing those results avoids a second expensive scan pass; chart
-    storage cap only changes the rare case where >maxStored zones are retained.
-    """
-    if not show_mtf:
-        return pd.DataFrame()
-    out: list[dict[str, Any]] = []
-    sources = [
-        (equity_rows, "Equity", "Equity / TV Chart", "Equity LTP", "Equity LTP Source"),
-        (global_rows, "Instrument", "Global Instrument / TV Chart", "LTP", "LTP Source"),
-    ]
-    for frame, instrument_col, link_col, price_col, price_source_col in sources:
-        if frame is None or frame.empty or instrument_col not in frame.columns:
-            continue
-        active = frame[
-            frame["TF"].isin(PINE_MTF_TIMEFRAMES)
-            & frame["Zone State"].isin(["Fresh", "Tested"])
-        ].copy()
-        if active.empty:
-            continue
-        active = active.sort_values(["Created", "Created Bar Index"], kind="stable")
-        latest = active.groupby([instrument_col, "TF", "Zone"], sort=False, as_index=False).tail(1)
-        for _, row in latest.iterrows():
-            price = _safe_price(row.get(price_col))
-            level = float(row["Proximal"])
-            distance = _distance_pct(price, level)
-            near = price is not None and distance <= float(mtf_near_pct)
-            if filter_distant and not near:
-                continue
-            out.append({
-                "Instrument": row[instrument_col],
-                "TradingView": row[link_col],
-                "TF": row["TF"],
-                "Side": row["Zone"],
-                "Proximal Line": level,
-                "Zone State": row["Zone State"],
-                "Touch Count": row["Touch Count"],
-                "Created": row["Created"],
-                "Last Price": price,
-                "Distance %": distance,
-                "LTP Source": row.get(price_source_col, "—"),
-                "MTF Line Visible": bool(near or not filter_distant),
-            })
-    result = pd.DataFrame(out)
-    if not result.empty:
-        result = result.sort_values("Distance %", kind="stable").reset_index(drop=True)
-    return result
-
-
 def scan_mtf_levels(
     symbol_data: dict[str, dict[str, pd.DataFrame]],
     symbols: list[str] | tuple[str, ...],
@@ -1732,12 +1578,7 @@ def scan_mtf_levels(
     filter_distant: bool = True, mtf_near_pct: float = 8.0,
     now: datetime | None = None,
 ) -> pd.DataFrame:
-    """Build Pine MTF's latest active demand/supply proximal levels.
-
-    Pine MTF runs nine independent remote contexts (3/5/10/15m, 1/2/4/6h,
-    daily), takes the latest active zone on each side, then applies proximity
-    only to line visibility. This output is the table equivalent of those lines.
-    """
+    """Pine MTF's latest active demand/supply proximal level per context."""
     if not show_mtf:
         return pd.DataFrame()
     config = pine_settings(**(params or {}))
@@ -1784,40 +1625,13 @@ def scan_mtf_levels(
     return frame
 
 
-# ===== Inlined from app_v6.py =====
-
-"""Pine-v6-equivalent zone scanner UI for NSE futures and global instruments."""
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
-import os
-import time
-
-import pandas as pd
-import streamlit as st
-
-
-st.set_page_config(page_title="Pine Zone MTF Scanner", page_icon="🎯",
-                   layout="wide", initial_sidebar_state="collapsed")
-st.markdown("""
-<style>
-:root { color-scheme: dark; }
-.stApp { background:#0b1016; color:#e8edf3; }
-[data-testid="stAppViewContainer"] > .main .block-container { max-width:98vw; padding-top:1rem; }
-[data-testid="stHeader"] { background:rgba(11,16,22,.95); }
-h1,h2,h3 { letter-spacing:-.02em; }
-div[data-testid="stMetric"] { background:#111923; border:1px solid #263445; padding:.6rem .8rem; border-radius:.65rem; }
-.zone-note { background:#111923; border:1px solid #263445; border-left:3px solid #14b8a6; border-radius:7px; padding:9px 12px; color:#bdc9d5; font-size:13px; }
-.source-note { color:#8c9aaa; font-size:12px; }
-</style>
-""", unsafe_allow_html=True)
-
-
-@st.cache_data(ttl=90, show_spinner=False)
+# ===================================================================== cached data + scans
+@st.cache_data(ttl=90, show_spinner=False, max_entries=12)
 def cached_yahoo_candles(tickers: tuple[str, ...], period: str, interval: str):
     return download_yahoo_candles(tickers, period, interval)
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
 def cached_fo_bhavcopy():
     return fetch_latest_fo_bhavcopy()
 
@@ -1839,29 +1653,113 @@ def _dhan_credentials() -> tuple[str, str]:
             token or os.getenv("DHAN_ACCESS_TOKEN", "").strip())
 
 
-def _assemble_market_bundle(symbols: list[str]):
-    equity_tickers = [yahoo_ticker(symbol) for symbol in symbols]
-    global_tickers = [item["yahoo"] for item in GLOBAL_INSTRUMENTS]
-    tickers = tuple(dict.fromkeys(equity_tickers + global_tickers))
-    layers = (("minute", "7d", "1m"), ("hour", "2y", "60m"),
-              ("daily", "5y", "1d"))
-    loaded: dict[str, dict[str, pd.DataFrame]] = {}
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        jobs = {pool.submit(cached_yahoo_candles, tickers, period, interval): layer
-                for layer, period, interval in layers}
-        results = {}
-        for job, layer in ((job, jobs[job]) for job in jobs):
-            try:
-                results[layer] = job.result()
-            except Exception:
-                results[layer] = {}
-    for layer, _, _ in layers:
-        for ticker, frame in results.get(layer, {}).items():
-            loaded.setdefault(ticker, {})[layer] = frame
-    equity_data = {symbol: loaded.get(yahoo_ticker(symbol), {}) for symbol in symbols}
-    global_data = {item["key"]: loaded.get(item["yahoo"], {}) for item in GLOBAL_INSTRUMENTS}
-    return equity_data, global_data
+def _layers_for(tfs: tuple[str, ...], full: bool) -> dict[str, tuple[str, str]]:
+    """Download only the Yahoo layers the selected timeframes really need."""
+    if full:
+        return {"minute": ("7d", "1m"), "hour": ("2y", "60m"), "daily": ("5y", "1d")}
+    need_min = any(t in MINUTE_TFS for t in tfs)
+    need_hour = any(t in HOUR_TFS for t in tfs)
+    need_day = any(t in DAY_TFS for t in tfs)
+    # A short 1m / 1d layer is always fetched so LTP stays fresh and daily-coverage checks work.
+    layers = {"minute": ("7d" if need_min else "5d", "1m"),
+              "daily": ("5y" if need_day else "1mo", "1d")}
+    if need_hour:
+        layers["hour"] = ("2y", "60m")
+    return layers
 
+
+def _load_bundle(tickers: tuple[str, ...], layers: dict[str, tuple[str, str]]) -> dict[str, dict[str, pd.DataFrame]]:
+    tickers = tuple(dict.fromkeys(tickers))
+    loaded: dict[str, dict[str, pd.DataFrame]] = {}
+    with ThreadPoolExecutor(max_workers=max(1, len(layers))) as pool:
+        jobs = {layer: pool.submit(cached_yahoo_candles, tickers, period, interval)
+                for layer, (period, interval) in layers.items()}
+        for layer, job in jobs.items():
+            try:
+                result = job.result()
+            except Exception:
+                result = {}
+            for ticker, frame in result.items():
+                loaded.setdefault(ticker, {})[layer] = frame
+    return loaded
+
+
+def _global_data(loaded: dict[str, dict[str, pd.DataFrame]]):
+    return {item["key"]: loaded.get(item["yahoo"], {}) for item in GLOBAL_INSTRUMENTS}
+
+
+@st.cache_data(ttl=120, show_spinner=False, max_entries=3)
+def cached_equity_scan(symbols: tuple[str, ...], tfs: tuple[str, ...], params_items: tuple):
+    params = dict(params_items)
+    snapshot = cached_fo_bhavcopy()
+    future_quotes = dict(snapshot.get("contracts") or {})
+    loaded = _load_bundle(tuple(yahoo_ticker(s) for s in symbols), _layers_for(tfs, False))
+    equity_data = {s: loaded.get(yahoo_ticker(s), {}) for s in symbols}
+    live_quotes: dict[str, float] = {}
+    dhan_status = "NSE/Yahoo fallback"
+    client_id, access_token = _dhan_credentials()
+    if client_id and access_token:
+        try:
+            live = fetch_dhan_quotes(client_id, access_token, list(symbols), cached_dhan_master())
+            live_quotes = live.get("equity", {})
+            future_quotes.update(live.get("future", {}))
+            dhan_status = f"Dhan live · {len(live_quotes)} cash / {len(live.get('future', {}))} fut"
+        except Exception as exc:
+            dhan_status = f"Dhan unavailable · {type(exc).__name__}"
+    frame, coverage = scan_equity_zones(equity_data, list(symbols), list(tfs),
+                                        future_quotes, live_quotes, params=params)
+    return frame, coverage, dhan_status
+
+
+@st.cache_data(ttl=120, show_spinner=False, max_entries=3)
+def cached_global_scan(tfs: tuple[str, ...], params_items: tuple):
+    params = dict(params_items)
+    loaded = _load_bundle(tuple(i["yahoo"] for i in GLOBAL_INSTRUMENTS), _layers_for(tfs, False))
+    frame, coverage = scan_global_zones(_global_data(loaded), GLOBAL_INSTRUMENTS, list(tfs), params=params)
+    return frame, coverage
+
+
+@st.cache_data(ttl=120, show_spinner=False, max_entries=2)
+def cached_mtf_scan(symbols: tuple[str, ...], params_items: tuple):
+    params = dict(params_items)
+    tickers = tuple(yahoo_ticker(s) for s in symbols) + tuple(i["yahoo"] for i in GLOBAL_INSTRUMENTS)
+    loaded = _load_bundle(tickers, _layers_for((), True))
+    equity_data = {s: loaded.get(yahoo_ticker(s), {}) for s in symbols}
+    return scan_mtf_levels(
+        equity_data, list(symbols), GLOBAL_INSTRUMENTS, _global_data(loaded),
+        params=params, show_mtf=bool(params["showMTF"]),
+        filter_distant=bool(params["filterDistantMTF"]),
+        mtf_near_pct=float(params["mtfNearPct"]))
+
+
+def _clear_caches() -> None:
+    for fn in (cached_yahoo_candles, cached_fo_bhavcopy, cached_equity_scan,
+               cached_global_scan, cached_mtf_scan):
+        fn.clear()
+
+
+# ===================================================================== UI helpers
+try:
+    _ST_VER = tuple(int(p) for p in st.__version__.split(".")[:2])
+except Exception:
+    _ST_VER = (1, 0)
+_STRETCH: dict[str, Any] = {"width": "stretch"} if _ST_VER >= (1, 50) else {"use_container_width": True}
+
+st.markdown("""
+<style>
+:root { color-scheme: dark; }
+.stApp { background:#0b1016; color:#e8edf3; }
+[data-testid="stAppViewContainer"] .block-container { max-width:99vw; padding:3.1rem 1rem 1rem; }
+[data-testid="stHeader"] { background:rgba(11,16,22,.95); }
+div[data-testid="stVerticalBlockBorderWrapper"] { background:#0f161f; }
+.gap { height:1.75rem; }
+.hdr { display:flex; justify-content:space-between; align-items:baseline; margin:0 0 .35rem; }
+.hdr b { font-size:1.2rem; letter-spacing:-.02em; }
+.hdr span { color:#8c9aaa; font-size:.78rem; }
+.stat { color:#bdc9d5; font-size:.82rem; margin:.15rem 0 .35rem; }
+.src { color:#7d8a99; font-size:.72rem; }
+</style>
+""", unsafe_allow_html=True)
 
 LABELS = {
     "accountCapital": "Account Capital", "riskPct": "Risk %", "targetRR": "Target RR",
@@ -1936,150 +1834,175 @@ FLOAT_BOUNDS = {
 }
 
 
-def _pine_controls() -> dict[str, Any]:
+def _pine_controls() -> tuple[dict[str, Any], bool]:
+    """All Pine v6 inputs live in a sidebar FORM: editing never triggers a rerun/scan."""
     values: dict[str, Any] = {}
-    with st.expander("Pine Script v6 · all inputs / parameters", expanded=False):
-        st.caption("Original input names/defaults are retained. Inputs declared parity-only/inactive in the pasted Pine remain non-filters here too.")
-        for title, keys in (("Original zone inputs", CORE_KEYS),
-                            ("Parity inputs (inactive in zone validation)", PARITY_KEYS),
-                            ("MTF / shadow / swing display inputs", DISPLAY_KEYS)):
-            st.markdown(f"**{title}**")
-            for start in range(0, len(keys), 4):
-                cols = st.columns(4)
-                for col, key in zip(cols, keys[start:start + 4]):
-                    default = PINE_DEFAULTS[key]
-                    label = LABELS[key]
-                    widget_key = f"pinev6_{key}"
-                    if isinstance(default, bool):
-                        values[key] = bool(col.toggle(label, value=default, key=widget_key))
-                    elif isinstance(default, int):
-                        low, high = INT_BOUNDS.get(key, (-10000, 10000))
-                        values[key] = int(col.number_input(label, min_value=low, max_value=high,
-                                                           value=default, step=1, key=widget_key))
-                    else:
-                        low, high, step = FLOAT_BOUNDS.get(key, (-10000.0, 10000.0, 0.1))
-                        values[key] = float(col.number_input(label, min_value=float(low), max_value=float(high),
-                                                             value=float(default), step=float(step), key=widget_key))
-        st.info("Pasted Pine code में EOD High/Low buffers, maxImbalanceMult, relaxGapCapOvernight और parity flags zone validation में use नहीं होते. Exact parity के लिए ये inputs रखे हैं, filters नहीं बनाए हैं.")
-    # Any retained input not rendered above receives the Pine default.
-    return {**PINE_DEFAULTS, **values}
+    with st.sidebar:
+        st.markdown("### ⚙️ Pine v6 inputs")
+        with st.form("pine_inputs", border=False):
+            for title, keys in (("Original zone inputs", CORE_KEYS),
+                                ("Parity inputs (inactive in zone validation)", PARITY_KEYS),
+                                ("MTF / shadow / swing display inputs", DISPLAY_KEYS)):
+                st.markdown(f"**{title}**")
+                for start in range(0, len(keys), 2):
+                    cols = st.columns(2)
+                    for col, key in zip(cols, keys[start:start + 2]):
+                        default = PINE_DEFAULTS[key]
+                        label = LABELS[key]
+                        widget_key = f"pinev6_{key}"
+                        if isinstance(default, bool):
+                            values[key] = bool(col.toggle(label, value=default, key=widget_key))
+                        elif isinstance(default, int):
+                            low, high = INT_BOUNDS.get(key, (-10000, 10000))
+                            values[key] = int(col.number_input(label, min_value=low, max_value=high,
+                                                               value=default, step=1, key=widget_key))
+                        else:
+                            low, high, step = FLOAT_BOUNDS.get(key, (-10000.0, 10000.0, 0.1))
+                            values[key] = float(col.number_input(label, min_value=float(low), max_value=float(high),
+                                                                 value=float(default), step=float(step), key=widget_key))
+            applied = st.form_submit_button("Apply inputs & rescan", type="primary", **_STRETCH)
+        st.caption("EOD High/Low buffers, maxImbalanceMult, relaxGapCapOvernight और parity flags "
+                   "Pine के मूल code की तरह zone validation में use नहीं होते। "
+                   "Candle feed (Yahoo) और TradingView अलग होने से 1:1 price-data परिणाम की गारंटी नहीं।")
+    return {**PINE_DEFAULTS, **values}, bool(applied)
 
 
-def _format_table(frame: pd.DataFrame, *, global_table: bool = False,
-                  show_shadow: bool = True, show_flags: bool = True):
-    if frame.empty:
-        st.info("इस फ़िल्टर में कोई zone नहीं मिला।")
+CORE_FIELDS = ["TF", "Zone", "Pattern", "Category", "Zone State", "Density Score", "HQ",
+               "Touch Count", "Proximal", "Distal", "SL", "TP", "Nearest Gap %", "Created"]
+SHADOW_FIELDS = ["Behind", "Base Break", "Swing Break", "Swing Break Direction",
+                 "Shadow", "Shadow Top", "Shadow Bottom", "Shadow Color"]
+EXTRA_FIELDS = ["Base Count", "Zone Low", "Zone High", "Leg-out Mid", "Leg-in TR",
+                "Leg-out TR", "Overnight", "Broken At"]
+MAX_ROWS = 4000
+
+
+def _column_config(cols: list[str]) -> dict[str, Any]:
+    C = st.column_config
+    cfg: dict[str, Any] = {
+        "Equity / TV Chart": C.LinkColumn("Symbol", display_text=r"symbol=NSE%3A([^&]+)"),
+        "Current-Month Future / TV": C.LinkColumn("Future", display_text=r"symbol=NSE%3A([^&]+)"),
+        "Global Instrument / TV Chart": C.LinkColumn("Chart", display_text="📈"),
+        "Equity LTP": C.NumberColumn("LTP", format="₹%.2f"),
+        "Future LTP": C.NumberColumn("Fut LTP", format="₹%.2f"),
+        "Spot − Future Δ (₹)": C.NumberColumn("Spot−Fut Δ", format="%.2f"),
+        "LTP": C.NumberColumn("LTP", format="%.2f"),
+        "Zone State": C.TextColumn("State"),
+        "Density Score": C.NumberColumn("Score", format="%d"),
+        "Touch Count": C.NumberColumn("Touches", format="%d"),
+        "Base Count": C.NumberColumn("Base", format="%d"),
+        "Nearest Gap %": C.NumberColumn("Gap %", format="%.2f"),
+        "Created": C.DatetimeColumn("Created", format="DD MMM HH:mm"),
+        "Broken At": C.NumberColumn("Broken bar", format="%d"),
+    }
+    for key in ("Proximal", "Distal", "SL", "TP", "Zone Low", "Zone High", "Leg-out Mid",
+                "Leg-in TR", "Leg-out TR", "Shadow Top", "Shadow Bottom"):
+        cfg[key] = C.NumberColumn(key, format="%.2f")
+    return {k: v for k, v in cfg.items() if k in cols}
+
+
+def _prepare_display(view: pd.DataFrame, order: list[str]) -> pd.DataFrame:
+    cols = [c for c in order if c in view.columns]
+    disp = view.loc[:, cols].head(MAX_ROWS).copy()
+    if "Zone" in disp:
+        disp["Zone"] = disp["Zone"].map({"Demand": "🟢 Demand", "Supply": "🔴 Supply"}).fillna(disp["Zone"])
+    if "Zone State" in disp:
+        disp["Zone State"] = disp["Zone State"].map(
+            {"Fresh": "🟢 Fresh", "Tested": "🟡 Tested", "Broken": "⚪ Broken"}).fillna(disp["Zone State"])
+    if "Created" in disp:
+        disp["Created"] = pd.to_datetime(disp["Created"], errors="coerce")
+    if "Broken At" in disp:
+        disp["Broken At"] = pd.to_numeric(disp["Broken At"], errors="coerce")
+    if "Future Expiry" in disp:
+        disp["Future Expiry"] = disp["Future Expiry"].astype(str).replace({"None": "—", "NaT": "—"})
+    return disp
+
+
+def _show_zone_table(view: pd.DataFrame, *, global_table: bool, all_cols: bool,
+                     show_shadow: bool, show_flags: bool, csv_name: str) -> None:
+    if view.empty:
+        st.info("इन filters में कोई zone नहीं मिला।")
         return
-    fields = ["TF", "Zone", "Pattern", "Category", "Zone State", "Density Score", "HQ",
-              "Touch Count", "Base Count", "Zone Low", "Zone High", "Proximal", "Distal",
-              "Leg-out Mid", "SL", "TP", "Nearest Gap %", "Leg-in TR", "Leg-out TR",
-              "Overnight", "Created", "Broken At"]
-    if show_shadow:
-        fields += ["Behind", "Base Break", "Swing Break", "Swing Break Direction",
-                   "Shadow", "Shadow Top", "Shadow Bottom", "Shadow Color"]
-    if show_flags:
-        fields += ["Flag"]
     if global_table:
-        order = ["Global Instrument / TV Chart", "Instrument", "LTP", "LTP Source", *fields]
-        config = {"Global Instrument / TV Chart": st.column_config.LinkColumn(
-            "Global / TradingView", display_text=r"symbol=([^&]+)")}
+        order = ["Global Instrument / TV Chart", "Instrument", "LTP", *CORE_FIELDS]
+        if all_cols:
+            order += EXTRA_FIELDS + (SHADOW_FIELDS if show_shadow else []) + (["Flag"] if show_flags else []) + ["LTP Source"]
     else:
-        order = ["Equity / TV Chart", "Equity LTP", "Current-Month Future / TV", "Future Symbol",
-                 "Future LTP", "Spot − Future Δ (₹)", "Premium / Discount", *fields,
-                 "Future Expiry", "Future LTP Source", "Equity LTP Source"]
-        config = {
-            "Equity / TV Chart": st.column_config.LinkColumn(
-                "Equity / TradingView", display_text=r"symbol=NSE%3A([^&]+)"),
-            "Current-Month Future / TV": st.column_config.LinkColumn(
-                "Current-month future / TradingView", display_text=r"symbol=NSE%3A([^&]+)"),
-        }
-    visible = frame[[col for col in order if col in frame.columns]].copy()
-    formats = {col: "{:.2f}" for col in ["Zone Low", "Zone High", "Proximal", "Distal",
-                "Leg-out Mid", "SL", "TP", "Leg-in TR", "Leg-out TR", "Shadow Top", "Shadow Bottom"]}
-    formats.update({"Equity LTP": "₹{:.2f}", "Future LTP": "₹{:.2f}",
-                    "Spot − Future Δ (₹)": "₹{:+.2f}", "LTP": "{:.2f}",
-                    "Nearest Gap %": "{:.2f}%"})
-    formats = {key: value for key, value in formats.items() if key in visible.columns}
-    styled = visible.style.format(formats, na_rep="—")
-    if "Zone" in visible.columns:
-        styled = styled.map(lambda v: "color:#14b8a6;font-weight:700;" if v == "Demand"
-                            else ("color:#fb7185;font-weight:700;" if v == "Supply" else ""), subset=["Zone"])
-    if "Zone State" in visible.columns:
-        styled = styled.map(lambda v: "color:#34d399;font-weight:700;" if v == "Fresh"
-                            else ("color:#fbbf24;font-weight:700;" if v == "Tested"
-                                  else ("color:#9ca3af;font-weight:700;" if v == "Broken" else "")),
-                            subset=["Zone State"])
-    height = max(260, min(720, 38 * (len(visible) + 1)))
-    st.dataframe(styled, column_config=config, hide_index=True, height=height,
-                 use_container_width=True)
+        order = ["Equity / TV Chart", "Equity LTP", "Future LTP", *CORE_FIELDS]
+        if all_cols:
+            order = ["Equity / TV Chart", "Equity LTP", "Current-Month Future / TV", "Future Symbol",
+                     "Future LTP", "Spot − Future Δ (₹)", "Premium / Discount", *CORE_FIELDS,
+                     *EXTRA_FIELDS, *(SHADOW_FIELDS if show_shadow else []),
+                     *(["Flag"] if show_flags else []),
+                     "Future Expiry", "Future LTP Source", "Equity LTP Source"]
+    disp = _prepare_display(view, order)
+    height = max(260, min(760, 35 * (len(disp) + 1) + 3))
+    st.dataframe(disp, column_config=_column_config(list(disp.columns)),
+                 hide_index=True, height=height, **_STRETCH)
+    left, right = st.columns([1, 5])
+    left.download_button("⬇️ CSV", view.to_csv(index=False).encode("utf-8-sig"),
+                         file_name=csv_name, mime="text/csv")
+    if len(view) > MAX_ROWS:
+        right.caption(f"Showing first {MAX_ROWS:,} of {len(view):,} rows (CSV has all).")
 
 
-def _mtf_table(frame: pd.DataFrame):
+def _show_mtf_table(frame: pd.DataFrame) -> None:
     if frame.empty:
-        st.info("MTF में अभी कोई active proximal line नहीं दिख रहा (या MTF display बंद है)।")
+        st.info("MTF में अभी कोई active proximal line नहीं दिख रहा (या showMTF बंद है)।")
         return
     view = frame[["Instrument", "TradingView", "TF", "Side", "Proximal Line", "Zone State",
-                  "Touch Count", "Created", "Last Price", "Distance %", "LTP Source", "MTF Line Visible"]].copy()
-    styled = view.style.format({"Proximal Line": "{:.2f}", "Last Price": "{:.2f}",
-                                "Distance %": "{:.2f}%"}, na_rep="—")
-    st.dataframe(styled, column_config={
-        "TradingView": st.column_config.LinkColumn("TradingView", display_text=r"symbol=([^&]+)")
-    }, hide_index=True, height=max(250, min(650, 36 * (len(view) + 1))), use_container_width=True)
+                  "Touch Count", "Created", "Last Price", "Distance %", "LTP Source",
+                  "MTF Line Visible"]].copy()
+    view["Side"] = view["Side"].map({"Demand": "🟢 Demand", "Supply": "🔴 Supply"}).fillna(view["Side"])
+    view["Zone State"] = view["Zone State"].map(
+        {"Fresh": "🟢 Fresh", "Tested": "🟡 Tested"}).fillna(view["Zone State"])
+    view["Created"] = pd.to_datetime(view["Created"], errors="coerce")
+    C = st.column_config
+    st.dataframe(view, hide_index=True, height=max(260, min(760, 35 * (len(view) + 1) + 3)),
+                 column_config={
+                     "TradingView": C.LinkColumn("Chart", display_text="📈"),
+                     "Proximal Line": C.NumberColumn("Proximal", format="%.2f"),
+                     "Zone State": C.TextColumn("State"),
+                     "Touch Count": C.NumberColumn("Touches", format="%d"),
+                     "Last Price": C.NumberColumn("LTP", format="%.2f"),
+                     "Distance %": C.NumberColumn("Dist %", format="%.2f"),
+                     "Created": C.DatetimeColumn("Created", format="DD MMM HH:mm"),
+                 }, **_STRETCH)
+    st.download_button("⬇️ CSV", view.to_csv(index=False).encode("utf-8-sig"),
+                       file_name="mtf_proximal_lines.csv", mime="text/csv")
 
 
-st.title("🎯 Zone MTF · Pine Script v6 scanner")
-st.caption("NSE Futures + Global Instruments · Pine के वही candidate / score / state / shadow / swing rules")
-st.markdown(
-    '<div class="zone-note"><b>Parity note:</b> EOD buffer inputs Pine में compatibility-only हैं और zone validation में इस्तेमाल नहीं होते; '
-    'इसलिए यहाँ भी EOD ±10 filter सक्रिय नहीं है। Fresh→Tested midpoint touch और Tested→Broken distal / Max Tested Count से होता है. '
-    'TradingView और Yahoo candle feeds अलग होने से price-data पर 1:1 परिणाम की गारंटी नहीं होती.</div>',
-    unsafe_allow_html=True,
-)
+# ===================================================================== page
+ss = st.session_state
+UNIVERSE_N = {"50": 50, "100": 100, "150": 150, "All": None}
+DEFAULT_TFS = ["5m", "15m", "1h", "1d"]
+VIEWS = ["NSE Futures", "Global", "MTF Lines"]
 
-with st.spinner("NSE F&O contract list जाँची जा रही है…"):
-    try:
-        fo_snapshot = cached_fo_bhavcopy()
-    except Exception:
-        fo_snapshot = {"contracts": {}, "symbols": [], "asof": None, "source": "", "status": "unavailable"}
-symbols = list(fo_snapshot.get("symbols") or FNO_FALLBACK)
-contracts = fo_snapshot.get("contracts") or {}
-using_fallback = not bool(fo_snapshot.get("symbols"))
-fo_label = "static fallback" if using_fallback else f"NSE bhavcopy · {fo_snapshot.get('asof')}"
+header_slot = st.empty()
+params, form_apply = _pine_controls()
 
 with st.container(border=True):
-    top0, top1, top2, top3, top4 = st.columns([1.1, 1.3, 1.5, 1.1, 1.3])
-    with top0:
-        universe_choice = st.selectbox(
-            "Scan universe size (speed)",
-            ["Top 50 (fast)", "Top 100", "Top 150", f"All ({len(symbols)})"],
-            index=0,
-        )
-    with top1:
-        selected_tfs = st.multiselect("Display + scan timeframes", list(TIMEFRAMES), default=list(TIMEFRAMES[:6]))
-    with top2:
-        sort_mode = st.selectbox("Zone distance", ["Nearest · ascending", "Farthest · descending"])
-    with top3:
-        auto_refresh = st.toggle("Auto refresh · 2 min", value=False)
-    with top4:
-        st.caption(f"Universe: **{len(symbols)}** · {fo_label}")
-    if universe_choice.startswith("Top 50"):
-        active_symbols = symbols[:50]
-    elif universe_choice.startswith("Top 100"):
-        active_symbols = symbols[:100]
-    elif universe_choice.startswith("Top 150"):
-        active_symbols = symbols[:150]
-    else:
-        active_symbols = symbols
-    c1, c2, c3 = st.columns([1.2, 1.2, 2.0])
-    with c1:
-        selected_states = st.multiselect("Zone state", ["Fresh", "Tested", "Broken"],
-                                         default=["Fresh", "Tested", "Broken"])
-    with c2:
-        selected_sides = st.multiselect("Side", ["Demand", "Supply"], default=["Demand", "Supply"])
-    with c3:
-        symbol_query = st.text_input("Symbol / instrument filter", placeholder="RELIANCE, SBIN, Gold")
-    params = _pine_controls()
-    run_scan = st.button("🚀 Scan / Refresh", type="primary", use_container_width=True)
+    r1 = st.columns([1.0, 3.8, 1.0, 1.1])
+    universe_choice = r1[0].selectbox("Universe", list(UNIVERSE_N), index=0, key="universe")
+    selected_tfs = r1[1].multiselect("Timeframes (scan + display)", list(TIMEFRAMES),
+                                     default=DEFAULT_TFS, key="tfs")
+    with r1[2]:
+        st.markdown('<div class="gap"></div>', unsafe_allow_html=True)
+        auto_refresh = st.toggle("Auto 2 min", value=False)
+    with r1[3]:
+        st.markdown('<div class="gap"></div>', unsafe_allow_html=True)
+        run_scan = st.button("🚀 Scan / Refresh", type="primary", **_STRETCH)
+
+    r2 = st.columns([1.3, 1.6, 1.4, 1.7, 1.3, 1.0])
+    view_name = r2[0].selectbox("View", VIEWS, key="view")
+    selected_states = r2[1].multiselect("State", ["Fresh", "Tested", "Broken"],
+                                        default=["Fresh", "Tested"], key="states")
+    selected_sides = r2[2].multiselect("Side", ["Demand", "Supply"],
+                                       default=["Demand", "Supply"], key="sides")
+    symbol_query = r2[3].text_input("Filter", placeholder="RELIANCE, SBIN, Gold", key="query")
+    sort_mode = r2[4].selectbox("Distance", ["Nearest ↑", "Farthest ↓"], key="sort")
+    with r2[5]:
+        st.markdown('<div class="gap"></div>', unsafe_allow_html=True)
+        all_cols = st.toggle("All columns", value=False)
 
 if auto_refresh:
     try:
@@ -2088,140 +2011,114 @@ if auto_refresh:
     except Exception:
         st.caption("Auto-refresh package unavailable; press Scan / Refresh.")
 
-signature = (tuple(sorted(params.items())), tuple(active_symbols), tuple(selected_tfs))
-last_epoch = float(st.session_state.get("last_scan_epoch", 0.0))
-first_scan = "equity_zone_rows" not in st.session_state
-signature_changed = st.session_state.get("scan_signature") != signature
-scheduled = auto_refresh and time.time() - last_epoch >= 115
-needs_scan = first_scan or run_scan or signature_changed or scheduled
-if run_scan:
-    cached_yahoo_candles.clear()
-    cached_fo_bhavcopy.clear()
-    cached_dhan_master.clear()
+if not selected_tfs:
+    st.warning("कम-से-कम एक timeframe चुनें।")
+    st.stop()
+
+scheduled = bool(auto_refresh and time.time() - float(ss.get("last_scan_epoch", 0.0)) >= 115)
+if run_scan or scheduled:
+    _clear_caches()
+
+with st.spinner("NSE F&O contract list…"):
     try:
-        refreshed = cached_fo_bhavcopy()
-        if refreshed.get("symbols"):
-            fo_snapshot = refreshed
-            symbols = list(refreshed["symbols"])
-            contracts = refreshed.get("contracts") or {}
-            using_fallback = False
-            if universe_choice.startswith("Top 50"):
-                active_symbols = symbols[:50]
-            elif universe_choice.startswith("Top 100"):
-                active_symbols = symbols[:100]
-            elif universe_choice.startswith("Top 150"):
-                active_symbols = symbols[:150]
-            else:
-                active_symbols = symbols
+        fo_snapshot = cached_fo_bhavcopy()
     except Exception:
-        pass
-    signature = (tuple(sorted(params.items())), tuple(active_symbols), tuple(selected_tfs))
+        fo_snapshot = {"contracts": {}, "symbols": [], "asof": None, "source": "", "status": "unavailable"}
+symbols = list(fo_snapshot.get("symbols") or FNO_FALLBACK)
+using_fallback = not bool(fo_snapshot.get("symbols"))
+fo_label = "static fallback" if using_fallback else f"NSE bhavcopy {fo_snapshot.get('asof')}"
 
-if needs_scan:
-    if not selected_tfs:
-        st.warning("कम-से-कम एक timeframe चुनें।")
-    else:
-        with st.spinner(f"Pine rules scan: {len(active_symbols)} NSE futures × {len(selected_tfs)} timeframes …"):
-            try:
-                equity_data, global_data = _assemble_market_bundle(active_symbols)
-                future_quotes = dict(contracts)
-                equity_live_quotes: dict[str, float] = {}
-                client_id, access_token = _dhan_credentials()
-                dhan_status = "NSE/Yahoo fallback"
-                if client_id and access_token:
-                    try:
-                        live = fetch_dhan_quotes(client_id, access_token, active_symbols, cached_dhan_master())
-                        equity_live_quotes = live.get("equity", {})
-                        future_quotes.update(live.get("future", {}))
-                        dhan_status = f"Dhan live · {len(equity_live_quotes)} cash / {len(live.get('future', {}))} futures"
-                    except Exception as exc:
-                        dhan_status = f"Dhan unavailable · {type(exc).__name__}"
-                # Only the selected display timeframes are scanned for speed.
-                # The MTF table below always covers its own fixed 9 Pine
-                # contexts (3/5/10/15m, 1/2/4/6h, daily) independently.
-                equity_rows, equity_coverage = scan_equity_zones(
-                    equity_data, active_symbols, selected_tfs, future_quotes, equity_live_quotes, params=params)
-                global_rows, global_coverage = scan_global_zones(
-                    global_data, GLOBAL_INSTRUMENTS, selected_tfs, params=params)
-                mtf_rows = scan_mtf_levels(
-                    equity_data, active_symbols, GLOBAL_INSTRUMENTS, global_data,
-                    params=params, show_mtf=bool(params["showMTF"]),
-                    filter_distant=bool(params["filterDistantMTF"]),
-                    mtf_near_pct=float(params["mtfNearPct"]),
-                )
-                st.session_state["equity_zone_rows"] = equity_rows
-                st.session_state["global_zone_rows"] = global_rows
-                st.session_state["mtf_zone_rows"] = mtf_rows
-                st.session_state["equity_coverage"] = equity_coverage
-                st.session_state["global_coverage"] = global_coverage
-                st.session_state["dhan_status"] = dhan_status
-                st.session_state["scan_signature"] = signature
-                st.session_state["last_scan_epoch"] = time.time()
-                st.session_state["last_scan_text"] = datetime.now(IST).strftime("%d-%b-%Y %H:%M IST")
-                st.session_state["scanned_count"] = len(active_symbols)
-            except Exception as exc:
-                st.error(f"Scan failed: {type(exc).__name__}: {exc}")
-                st.caption("Check requirements.txt and market-feed availability.")
+if "applied" not in ss or run_scan or form_apply or scheduled:
+    n = UNIVERSE_N[universe_choice]
+    ss["applied"] = {
+        "symbols": tuple(symbols[:n] if n else symbols),
+        "tfs": tuple(selected_tfs),
+        "universe": universe_choice,
+        "params": tuple(sorted(params.items())),
+        "at": datetime.now(IST).strftime("%d-%b %H:%M IST"),
+    }
+    ss["last_scan_epoch"] = time.time()
+ap = ss["applied"]
+params_applied = dict(ap["params"])
 
-rows = st.session_state.get("equity_zone_rows", pd.DataFrame())
-global_rows = st.session_state.get("global_zone_rows", pd.DataFrame())
-mtf_rows = st.session_state.get("mtf_zone_rows", pd.DataFrame())
-if not isinstance(rows, pd.DataFrame): rows = pd.DataFrame(rows)
-if not isinstance(global_rows, pd.DataFrame): global_rows = pd.DataFrame(global_rows)
-if not isinstance(mtf_rows, pd.DataFrame): mtf_rows = pd.DataFrame(mtf_rows)
-last_scan = st.session_state.get("last_scan_text", "Not scanned")
-coverage = st.session_state.get("equity_coverage", {})
-scanned_count = st.session_state.get("scanned_count", len(active_symbols))
-with st.container(border=True):
-    a, b, c, d, e = st.columns(5)
-    a.metric("Scanned / Universe", f"{scanned_count} / {len(symbols)}")
-    b.metric("Chart-zone rows", f"{len(rows):,}")
-    c.metric("Fresh", int((rows["Zone State"] == "Fresh").sum()) if not rows.empty else 0)
-    d.metric("Tested", int((rows["Zone State"] == "Tested").sum()) if not rows.empty else 0)
-    e.metric("Broken", int((rows["Zone State"] == "Broken").sum()) if not rows.empty else 0)
-    st.caption(f"Coverage {coverage.get('symbols_with_daily',0)}/{coverage.get('symbols_requested',scanned_count)} daily · {coverage.get('symbols_with_minute',0)} minute · {st.session_state.get('dhan_status','NSE/Yahoo fallback')} · Last scan {last_scan}")
+header_slot.markdown(
+    f'<div class="hdr"><b>🎯 Zone MTF <span>· Pine v6</span></b>'
+    f'<span>Universe {len(ap["symbols"])}/{len(symbols)} · {fo_label} · last scan {ap["at"]}</span></div>',
+    unsafe_allow_html=True)
+
+pending = (ap["universe"] != universe_choice) or (set(ap["tfs"]) != set(selected_tfs))
+if pending:
+    st.caption("⚠️ Universe / timeframes बदले हैं — नए data के लिए **Scan / Refresh** दबाएँ।")
 
 
 def _filter_and_sort(frame: pd.DataFrame, instrument_col: str) -> pd.DataFrame:
-    view = frame.copy()
-    if view.empty:
-        return view
-    view = view[view["TF"].isin(selected_tfs)]
+    if frame is None or frame.empty:
+        return pd.DataFrame()
+    view = frame[frame["TF"].isin(selected_tfs)]
     view = view[view["Zone State"].isin(selected_states)] if selected_states else view.iloc[0:0]
-    view = view[view["Zone"].isin(selected_sides)] if selected_sides else view.iloc[0:0]
+    side_col = "Zone"
+    view = view[view[side_col].isin(selected_sides)] if selected_sides else view.iloc[0:0]
     if symbol_query.strip():
-        view = view[view[instrument_col].astype(str).str.contains(symbol_query.strip(), case=False, na=False)]
+        parts = [p.strip() for p in re.split(r"[,\s]+", symbol_query) if p.strip()]
+        pattern = "|".join(re.escape(p) for p in parts)
+        view = view[view[instrument_col].astype(str).str.contains(pattern, case=False, na=False, regex=True)]
     return view.sort_values("Nearest Gap %", ascending=sort_mode.startswith("Nearest"), kind="stable")
 
 
-st.subheader("📊 NSE Futures · Pine chart-zone states")
-view = _filter_and_sort(rows, "Equity")
-if view.empty:
-    st.info("No NSE zones match the selected filters yet. Press Scan / Refresh if needed.")
-else:
-    st.caption(f"Showing {len(view):,} rows · all Pine chart zones retained up to maxStored per symbol/timeframe.")
-    _format_table(view, show_shadow=bool(params["showShadow"]), show_flags=bool(params["showFlags"]))
-    st.download_button("⬇️ NSE zone CSV", view.to_csv(index=False).encode("utf-8-sig"),
-                       file_name="nse_pine_zone_scan.csv", mime="text/csv")
+def _counts_line(frame: pd.DataFrame, shown: int, extra: str) -> str:
+    if frame is None or frame.empty:
+        return f"0 zones · {extra}"
+    c = frame["Zone State"].value_counts()
+    return (f"<b>{shown:,}</b> shown / {len(frame):,} zones · 🟢 Fresh {int(c.get('Fresh', 0))} · "
+            f"🟡 Tested {int(c.get('Tested', 0))} · ⚪ Broken {int(c.get('Broken', 0))} · {extra}")
 
-st.divider()
-st.subheader("🌍 Global Instruments · same Pine rules")
-gview = _filter_and_sort(global_rows, "Instrument")
-if gview.empty:
-    st.info("No global zones match the selected filters/feed.")
-else:
-    _format_table(gview, global_table=True, show_shadow=bool(params["showShadow"]),
-                  show_flags=bool(params["showFlags"]))
-    st.download_button("⬇️ Global zone CSV", gview.to_csv(index=False).encode("utf-8-sig"),
-                       file_name="global_pine_zone_scan.csv", mime="text/csv")
 
-st.divider()
-st.subheader("📏 MTF Proximal Lines · Pine display equivalent")
-st.caption("Pine MTF contexts: 3/5/10/15m, 1/2/4/6h and daily — always scanned independently of the display-timeframe filter above. Proximity hides lines only; it never changes zone validity.")
-_mtf_table(mtf_rows)
+try:
+    if view_name == "NSE Futures":
+        with st.spinner(f"Scanning {len(ap['symbols'])} NSE futures × {len(ap['tfs'])} timeframes …"):
+            rows, cov, dhan_status = cached_equity_scan(ap["symbols"], ap["tfs"], ap["params"])
+        view = _filter_and_sort(rows, "Equity")
+        st.markdown(
+            f'<div class="stat">{_counts_line(rows, len(view), "")}'
+            f'coverage {cov.get("symbols_with_daily", 0)}/{cov.get("symbols_requested", 0)} daily · '
+            f'{cov.get("symbols_with_minute", 0)} minute · {dhan_status}</div>', unsafe_allow_html=True)
+        _show_zone_table(view, global_table=False, all_cols=all_cols,
+                         show_shadow=bool(params_applied["showShadow"]),
+                         show_flags=bool(params_applied["showFlags"]), csv_name="nse_pine_zone_scan.csv")
+    elif view_name == "Global":
+        with st.spinner("Scanning global instruments …"):
+            grows, gcov = cached_global_scan(ap["tfs"], ap["params"])
+        view = _filter_and_sort(grows, "Instrument")
+        st.markdown(
+            f'<div class="stat">{_counts_line(grows, len(view), "")}'
+            f'{gcov.get("instruments_with_data", 0)}/{gcov.get("instruments_requested", 0)} instruments with data</div>',
+            unsafe_allow_html=True)
+        _show_zone_table(view, global_table=True, all_cols=all_cols,
+                         show_shadow=bool(params_applied["showShadow"]),
+                         show_flags=bool(params_applied["showFlags"]), csv_name="global_pine_zone_scan.csv")
+    else:
+        with st.spinner("Scanning MTF contexts (3/5/10/15m · 1/2/4/6h · 1d) — heaviest view …"):
+            mrows = cached_mtf_scan(ap["symbols"], ap["params"])
+        if not mrows.empty:
+            if symbol_query.strip():
+                parts = [p.strip() for p in re.split(r"[,\s]+", symbol_query) if p.strip()]
+                mrows = mrows[mrows["Instrument"].astype(str).str.contains(
+                    "|".join(re.escape(p) for p in parts), case=False, na=False, regex=True)]
+            if selected_sides:
+                mrows = mrows[mrows["Side"].isin(selected_sides)]
+            else:
+                mrows = mrows.iloc[0:0]
+            if selected_states:
+                mrows = mrows[mrows["Zone State"].isin(selected_states)]
+            mrows = mrows.sort_values("Distance %", ascending=sort_mode.startswith("Nearest"), kind="stable")
+        st.markdown(f'<div class="stat"><b>{len(mrows):,}</b> MTF proximal lines · proximity hides lines only, '
+                    f'never changes zone validity</div>', unsafe_allow_html=True)
+        _show_mtf_table(mrows)
+except Exception as exc:
+    st.error(f"Scan failed: {type(exc).__name__}: {exc}")
+    st.caption("requirements.txt और market-feed availability जाँचें, फिर Scan / Refresh दबाएँ।")
 
 st.markdown(
-    '<p class="source-note">Pine logic is ported to Python; candle data comes from Yahoo Finance and may differ from TradingView exchange feeds. '
-    'Futures quotes use Dhan live if configured, otherwise NSE FO EOD close. Informational scanner only; no orders are placed.</p>',
-    unsafe_allow_html=True,
-)
+    '<p class="src">Pine logic Python में port है; candles Yahoo Finance से आते हैं और TradingView exchange feed से अलग हो सकते हैं. '
+    'Futures quote: Dhan live (अगर configured) वरना NSE FO EOD close. Informational scanner only — कोई order नहीं भेजा जाता.</p>',
+    unsafe_allow_html=True)

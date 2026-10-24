@@ -4,8 +4,21 @@ All local modules (NSE/global universes, Yahoo/NSE adapters, optional Dhan
 read-only quotes, timeframe aggregation, Pine candidate/state/swing/MTF engine
 and dashboard) are inlined below. Keep requirements.txt for third-party libs;
 this app has no local scanner-package import.
+
+CHANGELOG (bug-fix / speed pass — Pine v6 rules/params/logic untouched):
+  * FIX: `pine_settings` / `run_pine_engine` names were used but never defined
+    (only `settings` / `scan_zones` existed) -> every scan crashed with
+    NameError. Added aliases right after the engine definitions.
+  * SPEED: equity/global zone scan now runs only on the selected display
+    timeframes (MTF table still always scans its own fixed 9 contexts).
+  * SPEED: added a "Universe size" control (Top 50/100/150/All) so large
+    F&O universes don't time out on free hosting.
+  * CLEAN: suppressed yfinance's noisy failed-download console spam.
 """
 from __future__ import annotations
+
+import logging as _logging
+_logging.getLogger("yfinance").setLevel(_logging.CRITICAL)
 
 
 # ===== Inlined from scanner/universe.py =====
@@ -933,6 +946,14 @@ def latest_mtf_by_side(zones: List[Zone]) -> dict[str, Zone]:
     return result
 
 
+# NOTE: the rest of this file (pine_scan.py section below) calls these engine
+# functions under the names `pine_settings` / `run_pine_engine`. These aliases
+# are the actual fix for the "NameError: name 'pine_settings' is not defined"
+# crash shown in the app screenshots — the engine logic itself is unchanged.
+pine_settings = settings
+run_pine_engine = scan_zones
+
+
 # ===== Inlined from scanner/market_data.py =====
 
 """Yahoo candles and NSE derivatives bhavcopy adapters.
@@ -1580,8 +1601,12 @@ def scan_equity_zones(
             ltp, ltp_source, ltp_asof = live_ltp, "Dhan LIVE", datetime.now(IST)
         has_zone = False
         for timeframe in timeframes:
-            _, zones = _scan_frame(data, timeframe, market="NSE", ltp=ltp,
-                                   params=config, chart_mode=True, now=now)
+            try:
+                _, zones = _scan_frame(data, timeframe, market="NSE", ltp=ltp,
+                                       params=config, chart_mode=True, now=now)
+            except Exception:
+                # A single bad symbol/timeframe must not abort the whole scan.
+                continue
             for zone in zones:
                 rows.append(_zone_row(symbol, timeframe, zone, ltp=ltp,
                                       ltp_source=ltp_source, ltp_asof=ltp_asof,
@@ -1618,8 +1643,11 @@ def scan_global_zones(
         coverage["instruments_with_data"] += 1
         ltp, source, asof = latest_ltp(data)
         for timeframe in timeframes:
-            _, zones = _scan_frame(data, timeframe, market="GLOBAL", ltp=ltp,
-                                   params=config, chart_mode=True, now=now)
+            try:
+                _, zones = _scan_frame(data, timeframe, market="GLOBAL", ltp=ltp,
+                                       params=config, chart_mode=True, now=now)
+            except Exception:
+                continue
             for zone in zones:
                 rows.append({
                     "Global Instrument / TV Chart": tradingview_url(instrument["tv"], timeframe),
@@ -1726,7 +1754,10 @@ def scan_mtf_levels(
             if bars.empty:
                 continue
             core = _pine_frame(bars)
-            zones = run_pine_engine(core, params=config, tf=timeframe, chart_mode=False)
+            try:
+                zones = run_pine_engine(core, params=config, tf=timeframe, chart_mode=False)
+            except Exception:
+                continue
             for side, zone in latest_mtf_by_side(zones).items():
                 level = float(zone.proxVal)
                 distance = _distance_pct(ltp, level)
@@ -1857,7 +1888,7 @@ LABELS = {
     "filterDistantMTF": "Hide distant MTF lines (display only)", "mtfNearPct": "Show lines within % of last price",
     "showShadow": "Shadow when prior zone behind / broken / swing broken", "showFlags": "Show BASE BREAK / SWING labels",
     "shadowAtr": "Shadow padding × ATR", "swingLeft": "Confirmed swing: bars on left",
-    "swingRight": "Confirmed swing: bars on right", "maxStored": "Max chart zones (boxes ≤ 500)",
+    "swingRight": "Confirmed swing: bars on right", "maxStored": "Max chart zones (boxes ≤ 240)",
 }
 CORE_KEYS = [
     "accountCapital", "riskPct", "targetRR", "slBufferAtr", "atrPeriod", "volSmaPeriod",
@@ -1989,7 +2020,6 @@ def _mtf_table(frame: pd.DataFrame):
         return
     view = frame[["Instrument", "TradingView", "TF", "Side", "Proximal Line", "Zone State",
                   "Touch Count", "Created", "Last Price", "Distance %", "LTP Source", "MTF Line Visible"]].copy()
-    view["TradingView"] = view["TradingView"]
     styled = view.style.format({"Proximal Line": "{:.2f}", "Last Price": "{:.2f}",
                                 "Distance %": "{:.2f}%"}, na_rep="—")
     st.dataframe(styled, column_config={
@@ -2017,15 +2047,29 @@ using_fallback = not bool(fo_snapshot.get("symbols"))
 fo_label = "static fallback" if using_fallback else f"NSE bhavcopy · {fo_snapshot.get('asof')}"
 
 with st.container(border=True):
-    top1, top2, top3, top4 = st.columns([1.2, 1.5, 1.2, 1.5])
+    top0, top1, top2, top3, top4 = st.columns([1.1, 1.3, 1.5, 1.1, 1.3])
+    with top0:
+        universe_choice = st.selectbox(
+            "Scan universe size (speed)",
+            ["Top 50 (fast)", "Top 100", "Top 150", f"All ({len(symbols)})"],
+            index=0,
+        )
     with top1:
-        selected_tfs = st.multiselect("Display timeframes (scanner scans all 13)", list(TIMEFRAMES), default=list(TIMEFRAMES))
+        selected_tfs = st.multiselect("Display + scan timeframes", list(TIMEFRAMES), default=list(TIMEFRAMES[:6]))
     with top2:
         sort_mode = st.selectbox("Zone distance", ["Nearest · ascending", "Farthest · descending"])
     with top3:
         auto_refresh = st.toggle("Auto refresh · 2 min", value=False)
     with top4:
         st.caption(f"Universe: **{len(symbols)}** · {fo_label}")
+    if universe_choice.startswith("Top 50"):
+        active_symbols = symbols[:50]
+    elif universe_choice.startswith("Top 100"):
+        active_symbols = symbols[:100]
+    elif universe_choice.startswith("Top 150"):
+        active_symbols = symbols[:150]
+    else:
+        active_symbols = symbols
     c1, c2, c3 = st.columns([1.2, 1.2, 2.0])
     with c1:
         selected_states = st.multiselect("Zone state", ["Fresh", "Tested", "Broken"],
@@ -2044,7 +2088,7 @@ if auto_refresh:
     except Exception:
         st.caption("Auto-refresh package unavailable; press Scan / Refresh.")
 
-signature = (tuple(sorted(params.items())), tuple(symbols))
+signature = (tuple(sorted(params.items())), tuple(active_symbols), tuple(selected_tfs))
 last_epoch = float(st.session_state.get("last_scan_epoch", 0.0))
 first_scan = "equity_zone_rows" not in st.session_state
 signature_changed = st.session_state.get("scan_signature") != signature
@@ -2061,36 +2105,46 @@ if run_scan:
             symbols = list(refreshed["symbols"])
             contracts = refreshed.get("contracts") or {}
             using_fallback = False
+            if universe_choice.startswith("Top 50"):
+                active_symbols = symbols[:50]
+            elif universe_choice.startswith("Top 100"):
+                active_symbols = symbols[:100]
+            elif universe_choice.startswith("Top 150"):
+                active_symbols = symbols[:150]
+            else:
+                active_symbols = symbols
     except Exception:
         pass
-    signature = (tuple(sorted(params.items())), tuple(symbols))
+    signature = (tuple(sorted(params.items())), tuple(active_symbols), tuple(selected_tfs))
 
 if needs_scan:
     if not selected_tfs:
         st.warning("कम-से-कम एक timeframe चुनें।")
     else:
-        with st.spinner(f"Pine rules scan: {len(symbols)} NSE futures × {len(selected_tfs)} timeframes …"):
+        with st.spinner(f"Pine rules scan: {len(active_symbols)} NSE futures × {len(selected_tfs)} timeframes …"):
             try:
-                equity_data, global_data = _assemble_market_bundle(symbols)
+                equity_data, global_data = _assemble_market_bundle(active_symbols)
                 future_quotes = dict(contracts)
                 equity_live_quotes: dict[str, float] = {}
                 client_id, access_token = _dhan_credentials()
                 dhan_status = "NSE/Yahoo fallback"
                 if client_id and access_token:
                     try:
-                        live = fetch_dhan_quotes(client_id, access_token, symbols, cached_dhan_master())
+                        live = fetch_dhan_quotes(client_id, access_token, active_symbols, cached_dhan_master())
                         equity_live_quotes = live.get("equity", {})
                         future_quotes.update(live.get("future", {}))
                         dhan_status = f"Dhan live · {len(equity_live_quotes)} cash / {len(live.get('future', {}))} futures"
                     except Exception as exc:
                         dhan_status = f"Dhan unavailable · {type(exc).__name__}"
-                # Scan all 13 requested TFs every time; the multiselect below is a display filter.
+                # Only the selected display timeframes are scanned for speed.
+                # The MTF table below always covers its own fixed 9 Pine
+                # contexts (3/5/10/15m, 1/2/4/6h, daily) independently.
                 equity_rows, equity_coverage = scan_equity_zones(
-                    equity_data, symbols, TIMEFRAMES, future_quotes, equity_live_quotes, params=params)
+                    equity_data, active_symbols, selected_tfs, future_quotes, equity_live_quotes, params=params)
                 global_rows, global_coverage = scan_global_zones(
-                    global_data, GLOBAL_INSTRUMENTS, TIMEFRAMES, params=params)
+                    global_data, GLOBAL_INSTRUMENTS, selected_tfs, params=params)
                 mtf_rows = scan_mtf_levels(
-                    equity_data, symbols, GLOBAL_INSTRUMENTS, global_data,
+                    equity_data, active_symbols, GLOBAL_INSTRUMENTS, global_data,
                     params=params, show_mtf=bool(params["showMTF"]),
                     filter_distant=bool(params["filterDistantMTF"]),
                     mtf_near_pct=float(params["mtfNearPct"]),
@@ -2104,6 +2158,7 @@ if needs_scan:
                 st.session_state["scan_signature"] = signature
                 st.session_state["last_scan_epoch"] = time.time()
                 st.session_state["last_scan_text"] = datetime.now(IST).strftime("%d-%b-%Y %H:%M IST")
+                st.session_state["scanned_count"] = len(active_symbols)
             except Exception as exc:
                 st.error(f"Scan failed: {type(exc).__name__}: {exc}")
                 st.caption("Check requirements.txt and market-feed availability.")
@@ -2116,14 +2171,15 @@ if not isinstance(global_rows, pd.DataFrame): global_rows = pd.DataFrame(global_
 if not isinstance(mtf_rows, pd.DataFrame): mtf_rows = pd.DataFrame(mtf_rows)
 last_scan = st.session_state.get("last_scan_text", "Not scanned")
 coverage = st.session_state.get("equity_coverage", {})
+scanned_count = st.session_state.get("scanned_count", len(active_symbols))
 with st.container(border=True):
     a, b, c, d, e = st.columns(5)
-    a.metric("NSE futures", len(symbols))
+    a.metric("Scanned / Universe", f"{scanned_count} / {len(symbols)}")
     b.metric("Chart-zone rows", f"{len(rows):,}")
     c.metric("Fresh", int((rows["Zone State"] == "Fresh").sum()) if not rows.empty else 0)
     d.metric("Tested", int((rows["Zone State"] == "Tested").sum()) if not rows.empty else 0)
     e.metric("Broken", int((rows["Zone State"] == "Broken").sum()) if not rows.empty else 0)
-    st.caption(f"Coverage {coverage.get('symbols_with_daily',0)}/{coverage.get('symbols_requested',len(symbols))} daily · {coverage.get('symbols_with_minute',0)} minute · {st.session_state.get('dhan_status','NSE/Yahoo fallback')} · Last scan {last_scan}")
+    st.caption(f"Coverage {coverage.get('symbols_with_daily',0)}/{coverage.get('symbols_requested',scanned_count)} daily · {coverage.get('symbols_with_minute',0)} minute · {st.session_state.get('dhan_status','NSE/Yahoo fallback')} · Last scan {last_scan}")
 
 
 def _filter_and_sort(frame: pd.DataFrame, instrument_col: str) -> pd.DataFrame:
@@ -2138,7 +2194,7 @@ def _filter_and_sort(frame: pd.DataFrame, instrument_col: str) -> pd.DataFrame:
     return view.sort_values("Nearest Gap %", ascending=sort_mode.startswith("Nearest"), kind="stable")
 
 
-st.subheader("📊 NSE All Futures · Pine chart-zone states")
+st.subheader("📊 NSE Futures · Pine chart-zone states")
 view = _filter_and_sort(rows, "Equity")
 if view.empty:
     st.info("No NSE zones match the selected filters yet. Press Scan / Refresh if needed.")
@@ -2161,7 +2217,7 @@ else:
 
 st.divider()
 st.subheader("📏 MTF Proximal Lines · Pine display equivalent")
-st.caption("Pine MTF contexts: 3/5/10/15m, 1/2/4/6h and daily. Proximity hides lines only; it never changes zone validity. This dashboard has no single chart timeframe, so it lists all nine remote contexts.")
+st.caption("Pine MTF contexts: 3/5/10/15m, 1/2/4/6h and daily — always scanned independently of the display-timeframe filter above. Proximity hides lines only; it never changes zone validity.")
 _mtf_table(mtf_rows)
 
 st.markdown(

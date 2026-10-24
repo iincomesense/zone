@@ -19,6 +19,7 @@ from scanner.market_data import (
 from scanner.scan import scan_equity_zones, scan_global_zones
 from scanner.universe import FNO_FALLBACK, GLOBAL_INSTRUMENTS, TIMEFRAMES
 from scanner.zones import IST
+from scanner.zone_core import PINE_DEFAULTS
 
 st.set_page_config(
     page_title="NSE Zone Scanner",
@@ -150,12 +151,15 @@ def _format_zone_table(frame: pd.DataFrame, *, global_table: bool = False):
     if frame.empty:
         st.info("इस फ़िल्टर में कोई वैध Fresh/Tested zone नहीं मिला।")
         return
+    signal_columns = [
+        "TF", "Zone", "Pattern", "Category", "Zone State", "Density Score",
+        "Score / 10", "HQ", "Touch Count", "Base Count", "Zone Low", "Zone High",
+        "Proximal", "Distal", "SL", "TP", "Nearest Gap %", "EOD Range Low",
+        "EOD Range High", "EOD Candle", "Leg-in TR", "Leg-out TR",
+        "Genuine Gap", "Overnight",
+    ]
     if global_table:
-        order = [
-            "Global Instrument / TV Chart", "LTP", "LTP Source", "TF", "Zone",
-            "Zone Low", "Zone High", "Proximal", "Distal", "Zone State",
-            "Nearest Gap %", "Strength (ATR)", "EOD Candle",
-        ]
+        order = ["Global Instrument / TV Chart", "Instrument", "LTP", "LTP Source", *signal_columns]
         config = {
             "Global Instrument / TV Chart": st.column_config.LinkColumn(
                 "Global / TradingView", display_text=r"symbol=([^&]+)"
@@ -165,9 +169,7 @@ def _format_zone_table(frame: pd.DataFrame, *, global_table: bool = False):
         order = [
             "Equity / TV Chart", "Equity LTP", "Current-Month Future / TV",
             "Future Symbol", "Future LTP", "Spot − Future Δ (₹)",
-            "Premium / Discount", "TF", "Zone", "Zone Low", "Zone High",
-            "Proximal", "Distal", "Zone State", "Nearest Gap %", "EOD Range Low",
-            "EOD Range High", "EOD Candle", "Future Expiry", "Future LTP Source",
+            "Premium / Discount", *signal_columns, "Future Expiry", "Future LTP Source",
             "Equity LTP Source",
         ]
         config = {
@@ -183,8 +185,10 @@ def _format_zone_table(frame: pd.DataFrame, *, global_table: bool = False):
         "Equity LTP": "₹{:.2f}", "Future LTP": "₹{:.2f}",
         "Spot − Future Δ (₹)": "₹{:+.2f}", "LTP": "{:.2f}",
         "Zone Low": "{:.2f}", "Zone High": "{:.2f}",
-        "Proximal": "{:.2f}", "Distal": "{:.2f}",
-        "Nearest Gap %": "{:.2f}%", "Strength (ATR)": "{:.2f}",
+        "Proximal": "{:.2f}", "Distal": "{:.2f}", "SL": "{:.2f}",
+        "TP": "{:.2f}", "EOD Range Low": "{:.2f}", "EOD Range High": "{:.2f}",
+        "Nearest Gap %": "{:.2f}%", "Leg-in TR": "{:.2f}",
+        "Leg-out TR": "{:.2f}", "Score / 10": "{:.1f}",
     }
     number_formats = {key: value for key, value in number_formats.items()
                       if key in visible.columns}
@@ -206,16 +210,88 @@ def _format_zone_table(frame: pd.DataFrame, *, global_table: bool = False):
                  use_container_width=True)
 
 
-st.title("🎯 NSE Futures · Supply / Demand Zone Scanner")
-st.caption("सिर्फ़ ज़ोन स्कैन + Global Instruments ज़ोन · NSE F&O स्टॉक्स · TradingView chart links")
+def _zone_engine_controls() -> dict[str, object]:
+    """Expose active supplied-core inputs; preserve explicitly inert inputs."""
+    defaults = PINE_DEFAULTS
+    params: dict[str, object] = {}
+
+    def fnum(col, key, label, minimum, maximum, step, display_scale=1.0):
+        return float(col.number_input(
+            label, min_value=float(minimum), max_value=float(maximum),
+            value=float(defaults[key]) * float(display_scale), step=float(step),
+            key=f"zonecore_{key}",
+        ))
+
+    def inum(col, key, label, minimum, maximum, step=1):
+        return int(col.number_input(
+            label, min_value=int(minimum), max_value=int(maximum),
+            value=int(defaults[key]), step=int(step), key=f"zonecore_{key}",
+        ))
+
+    with st.expander("Supplied zone_core.py · active inputs / parameters", expanded=False):
+        st.caption("The EOD gate is fixed: candidate proximal must be inside that candle-day Low −10% to High +10%. All selected timeframes use the same engine.")
+        st.markdown("**Leg-in / base / leg-out and ATR**")
+        c = st.columns(4)
+        params["accountCapital"] = fnum(c[0], "accountCapital", "Account capital", 1, 1_000_000_000, 1000)
+        params["targetRR"] = fnum(c[1], "targetRR", "Target R:R", 0, 100, 0.25)
+        params["slBufferAtr"] = fnum(c[2], "slBufferAtr", "SL buffer · ATR", 0, 10, 0.01)
+        params["atrPeriod"] = inum(c[3], "atrPeriod", "ATR period", 2, 200)
+        c = st.columns(4)
+        params["volSmaPeriod"] = inum(c[0], "volSmaPeriod", "Volume SMA period", 2, 300)
+        params["legOutTrMult"] = fnum(c[1], "legOutTrMult", "Leg-out TR × ATR", 0.1, 10, 0.1)
+        params["legOutMinTrRatio"] = fnum(c[2], "legOutMinTrRatio", "Leg-out / leg-in TR min", 0, 10, 0.1)
+        params["hqLegOutTrMult"] = fnum(c[3], "hqLegOutTrMult", "HQ leg-out × leg-in", 0, 10, 0.1)
+        c = st.columns(4)
+        params["hqLegInAtrMult"] = fnum(c[0], "hqLegInAtrMult", "HQ leg-in × ATR", 0, 10, 0.1)
+        params["maxBaseAtrMult"] = fnum(c[1], "maxBaseAtrMult", "Max base TR × ATR", 0.1, 10, 0.1)
+        params["maxWickPct"] = fnum(c[2], "maxWickPct", "Max leg-out wick · %", 0, 100, 1, display_scale=100) / 100.0
+        params["minBaseCountInput"] = inum(c[3], "minBaseCountInput", "Min base candles", 1, 3)
+        c = st.columns(4)
+        params["maxBaseCountInput"] = inum(c[0], "maxBaseCountInput", "Max base candles", 1, 3)
+        params["legInMinAtrMult"] = fnum(c[1], "legInMinAtrMult", "Min leg-in × ATR", 0, 10, 0.1)
+        params["minClvPct"] = fnum(c[2], "minClvPct", "Min leg-in CLV · %", 0, 100, 1, display_scale=100) / 100.0
+        params["legInToBaseSizeMult"] = fnum(c[3], "legInToBaseSizeMult", "Leg-in / base size ×", 0, 10, 0.1)
+        c = st.columns(4)
+        params["legInMinBodyPct"] = fnum(c[0], "legInMinBodyPct", "Min leg-in body · %", 0, 100, 1, display_scale=100) / 100.0
+        params["legOutBodyHeavyPct"] = fnum(c[1], "legOutBodyHeavyPct", "Heavy leg-out body · %", 0, 100, 1, display_scale=100) / 100.0
+        params["useImbalance"] = bool(c[2].toggle("Require imbalance", value=bool(defaults["useImbalance"]), key="zonecore_useImbalance"))
+        params["genuineGapBonus"] = inum(c[3], "genuineGapBonus", "Genuine-gap score bonus", -100, 100)
+        st.markdown("**Imbalance, classification and score**")
+        c = st.columns(4)
+        params["overnightGapBonus"] = inum(c[0], "overnightGapBonus", "Overnight-gap score bonus", -100, 100)
+        params["rejectOppositeCoverPct"] = fnum(c[1], "rejectOppositeCoverPct", "Reject opposite-body cover · %", 0, 100, 1, display_scale=100) / 100.0
+        params["minValidScore"] = inum(c[2], "minValidScore", "Minimum valid score", 0, 200)
+        params["hqScoreThreshold"] = inum(c[3], "hqScoreThreshold", "HQ score threshold", 0, 200)
+        c = st.columns(4)
+        params["testedLegOutRetracePct"] = fnum(c[0], "testedLegOutRetracePct", "Leg-out retrace level ×", 0, 5, 0.05)
+        params["useEodRange"] = True
+        params["eodHighBufferPct"] = 10.0
+        params["eodLowBufferPct"] = 10.0
+        st.info("EOD filter fixed at Low −10% / High +10%; Fresh → Tested on proximal touch; Tested → Broken only on distal break.")
+        inert_keys = [
+            "riskPct", "maxImbalanceMult", "relaxGapCapOvernight", "maxTestedCount",
+            "legOutToLegInBodyMult", "baseBoringMaxBodyPct", "scanAfterCandleComplete",
+            "scanMonthlyOnce", "scanWeeklyOnce", "scanDailyOnce",
+            "enableClosingWickCheck", "legInMinClosingWickPct",
+            "enableLegOutCoverCheck", "legOutMaxCoverPct",
+            "enableHQBaseColourCheck", "hqBaseColourProbabilityPct",
+            "enableWhiteAreaCheck",
+        ]
+        st.markdown("**Pine parity fields retained but inert in supplied core**")
+        st.json({key: defaults[key] for key in inert_keys})
+    # settings() fills all retained defaults; the scanner overrides EOD back to ±10%.
+    return params
+
+
+st.title("🎯 NSE Futures · Pine Zone Core Scanner")
+st.caption("केवल NSE Futures zones + अलग Global Instruments zones · 13 timeframes · TradingView links")
 st.markdown(
-    '<div class="zone-note"><b>रेंज नियम:</b> हर symbol की आख़िरी पूर्ण EOD day candle लें → '
-    'Low से चुना हुआ % घटाएँ और High में वही % जोड़ें। केवल उस दायरे को काटने वाले '
-    'zones दिखेंगे। <b>Fresh</b> = confirmation के बाद retest नहीं; '
-    '<b>Tested</b> = zone में लौट चुका, distal close से टूटा नहीं।</div>',
+    '<div class="zone-note"><b>Supplied zone_core.py engine:</b> leg-in → 1–3 base candles → '
+    'leg-out, imbalance, engulf rejection, classification और score लागू हैं। '
+    '<b>EOD gate fixed:</b> zone का Proximal उसी candle-day के Low −10% और High +10% के भीतर होना चाहिए. '
+    '<b>Fresh → Tested:</b> reversal पर Proximal touch; <b>Tested → Broken:</b> केवल Distal break पर.</div>',
     unsafe_allow_html=True,
 )
-st.caption("मूल source app files workspace में नहीं थे; zone engine यहाँ documented compact-base/ATR-leg-out rules की standalone reconstruction है—exact hidden-logic parity का दावा नहीं।")
 
 # Fetch the official derivative file once per cache window. If NSE blocks the
 # archive, a broad fallback list is used and the missing EOD futures quotes are
@@ -234,10 +310,7 @@ fo_label = "static fallback" if using_fallback else f"NSE bhavcopy · {fo_snapsh
 
 with st.container(border=True):
     top1, top2, top3, top4 = st.columns([1.1, 1.7, 1.35, 1.35])
-    with top1:
-        range_pct = st.slider("EOD रेंज ± %", min_value=0, max_value=30,
-                              value=10, step=1,
-                              help="EOD Low × (1 − %) और EOD High × (1 + %)")
+    top1.metric("EOD Range", "Low −10% · High +10%")
     with top2:
         selected_tfs = st.multiselect("Timeframes", options=list(TIMEFRAMES),
                                       default=list(TIMEFRAMES))
@@ -259,17 +332,12 @@ with st.container(border=True):
     with adv4:
         st.caption(f"Universe: **{len(symbols)}** · {fo_label}")
 
-    with st.expander("Zone engine parameters (base / leg-out / wick rules)"):
-        p1, p2, p3 = st.columns(3)
-        legout_mult = p1.slider("Leg-out TR ×", 1.0, 3.0, 1.5, 0.1)
-        max_wick_pct = p2.slider("Max base wick %", 10, 80, 50, 5)
-        tight_base = p3.toggle("Tight base filter", value=True)
-
+    zone_params = _zone_engine_controls()
     btn_col, status_col = st.columns([1.0, 5.0])
     with btn_col:
         run_scan = st.button("🚀 Scan / Refresh", type="primary", use_container_width=True)
     with status_col:
-        st.caption("पहला scan सभी NSE stock futures और चुने गए timeframes पर चलेगा; अगली बार candles cache से मिलेंगी।")
+        st.caption("डिफ़ॉल्ट में सभी 13 timeframes चुने हैं; NSE futures और global zones पर supplied zone_core.py rules चलेंगे।")
 
 if auto_refresh:
     try:
@@ -279,8 +347,7 @@ if auto_refresh:
         st.caption("Auto refresh package उपलब्ध नहीं; Scan / Refresh दबाएँ।")
 
 signature = (
-    tuple(selected_tfs), int(range_pct), float(legout_mult), int(max_wick_pct),
-    bool(tight_base), tuple(symbols),
+    tuple(selected_tfs), tuple(sorted(zone_params.items())), tuple(symbols),
 )
 now_epoch = time.time()
 last_scan_epoch = float(st.session_state.get("last_scan_epoch", 0.0))
@@ -303,8 +370,7 @@ if run_scan:
     except Exception:
         pass
     signature = (
-        tuple(selected_tfs), int(range_pct), float(legout_mult), int(max_wick_pct),
-        bool(tight_base), tuple(symbols),
+        tuple(selected_tfs), tuple(sorted(zone_params.items())), tuple(symbols),
     )
 
 if needs_scan:
@@ -331,16 +397,14 @@ if needs_scan:
                     except Exception as exc:
                         dhan_status = f"Dhan unavailable · {type(exc).__name__}"
                 equity_rows, equity_coverage = scan_equity_zones(
-                    equity_data, symbols, selected_tfs, range_pct,
+                    equity_data, symbols, selected_tfs,
                     future_quotes=future_quotes,
                     equity_live_quotes=equity_live_quotes,
-                    legout_mult=legout_mult, max_wick_pct=max_wick_pct,
-                    tight_base=tight_base, max_zones_per_tf=3,
+                    zone_params=zone_params,
                 )
                 global_rows, global_coverage = scan_global_zones(
-                    global_data, GLOBAL_INSTRUMENTS, selected_tfs, range_pct,
-                    legout_mult=legout_mult, max_wick_pct=max_wick_pct,
-                    tight_base=tight_base, max_zones_per_tf=2,
+                    global_data, GLOBAL_INSTRUMENTS, selected_tfs,
+                    zone_params=zone_params,
                 )
                 st.session_state["equity_zone_rows"] = equity_rows
                 st.session_state["global_zone_rows"] = global_rows
@@ -380,7 +444,7 @@ with st.container(border=True):
 
 st.subheader("📊 NSE All Futures · Zones")
 st.caption(
-    f"स्कैन रेंज प्रति symbol: पिछले पूर्ण EOD Low − {range_pct}% से EOD High + {range_pct}% · "
+    "EOD gate fixed: candidate candle-day Low −10% से High +10% के भीतर Proximal होना चाहिए · "
     "स्पॉट−फ्यूचर Δ = Equity LTP − Future LTP (negative Δ का अर्थ futures premium)। "
     "चार्ट लिंक पर क्लिक करके TradingView खोलें।"
 )
@@ -411,8 +475,8 @@ else:
 st.divider()
 st.subheader("🌍 Global Instruments · Zones only")
 st.caption(
-    f"Indices, FX और commodities पर वही EOD range, Fresh/Tested, nearest sorting और "
-    f"timeframes लागू हैं · range ±{range_pct}%."
+    "Indices, FX और commodities पर वही supplied zone_core.py rules, fixed EOD ±10% gate, "
+    "Fresh/Tested state machine, nearest sorting और selected timeframes लागू हैं।"
 )
 gview = global_rows.copy()
 if not gview.empty:

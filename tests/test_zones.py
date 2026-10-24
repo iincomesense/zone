@@ -1,72 +1,77 @@
-from datetime import datetime
-
-import numpy as np
 import pandas as pd
 
-from scanner.scan import tradingview_url
-from scanner.zones import detect_zones, eod_price_range
+from scanner.scan import scan_equity_zones, tradingview_url
+from scanner.universe import TIMEFRAMES
+from scanner.zone_core import (
+    PINE_DEFAULTS, get_eod_range, latest_active_zones, scan_zones,
+)
 
 
-def _demand_frame(touch: bool = False, broken: bool = False) -> pd.DataFrame:
-    index = pd.date_range("2026-01-01 09:15", periods=28, freq="5min", tz="Asia/Kolkata")
-    rows = []
-    # Pre-base candles have normal ranges and low volatility.
-    for _ in range(18):
-        rows.append((99.2, 100.0, 99.0, 99.6, 1000))
-    # Two-candle compact base around 99.5-100.0.
-    rows.extend([(99.70, 100.00, 99.50, 99.75, 800),
-                 (99.72, 100.00, 99.50, 99.76, 750)])
-    # Decisive bullish leg-out.
-    rows.append((99.90, 104.0, 99.80, 103.5, 5000))
-    # Continue higher without retesting the demand zone.
-    for _ in range(5):
-        rows.append((103.5, 105.0, 103.0, 104.5, 1800))
-    # Optional non-breaking retest or distal close-through.
-    if touch:
-        rows.append((101.0, 101.3, 99.7, 100.8, 2500))
-    if broken:
-        rows.append((100.0, 100.2, 98.8, 99.0, 3500))
-    rows = rows[:len(index)]
-    return pd.DataFrame(rows, columns=["Open", "High", "Low", "Close", "Volume"], index=index[:len(rows)])
+def _pine_demand_frame(touch: str | None = None) -> pd.DataFrame:
+    rows = [(100.0, 101.0, 99.0, 100.0, 100.0) for _ in range(20)]
+    rows.extend([
+        (100.0, 100.5, 99.5, 100.0, 100.0),  # preceding candle
+        (100.0, 104.0, 99.5, 103.7, 110.0),   # bullish leg-in
+        (103.3, 103.5, 103.0, 103.4, 90.0),   # compact base
+        (103.6, 109.0, 103.6, 108.8, 1000.0), # bullish leg-out + imbalance
+    ])
+    if touch == "proximal":
+        rows.append((103.8, 104.2, 103.4, 103.9, 500.0))
+    elif touch == "distal":
+        rows.append((103.1, 103.2, 102.5, 102.8, 500.0))
+    else:
+        rows.extend([(108.8, 110.0, 108.0, 109.5, 150.0)] * 2)
+    index = pd.date_range("2026-10-20 09:15", periods=len(rows), freq="5min",
+                          tz="Asia/Kolkata")
+    return pd.DataFrame(rows, index=index,
+                        columns=["open", "high", "low", "close", "volume"])
 
 
-def test_demand_zone_is_fresh_until_price_retests():
-    zones = detect_zones(_demand_frame(), spot=105.0, range_low=90, range_high=110,
-                         legout_mult=1.5, max_wick_pct=95, tight_base=True)
-    assert zones
-    assert zones[0]["Zone"] == "Demand"
-    assert zones[0]["Zone State"] == "Fresh"
-    assert zones[0]["Zone Low"] < zones[0]["Zone High"]
+def test_supplied_core_creates_fresh_rbr_zone_with_pine_score():
+    zones = latest_active_zones(scan_zones(_pine_demand_frame()))
+    assert len(zones) == 1
+    zone = zones[0]
+    assert zone.patternType == "RBR"
+    assert zone.isDemand is True
+    assert zone.state == "Fresh"
+    assert zone.densityScore >= PINE_DEFAULTS["minValidScore"]
+    assert zone.proxVal == 103.5
+    assert zone.distVal == 103.0
 
 
-def test_retested_zone_is_marked_tested():
-    zones = detect_zones(_demand_frame(touch=True), spot=101.0,
-                         range_low=90, range_high=110, legout_mult=1.5,
-                         max_wick_pct=95, tight_base=True)
-    assert zones
-    assert zones[0]["Zone State"] == "Tested"
+def test_fresh_to_tested_uses_proximal_and_broken_uses_distal():
+    tested = latest_active_zones(scan_zones(_pine_demand_frame("proximal")))
+    broken = latest_active_zones(scan_zones(_pine_demand_frame("distal")))
+    assert len(tested) == 1
+    assert tested[0].state == "Tested"
+    assert tested[0].touchCount == 1
+    assert broken == []
 
 
-def test_close_through_distal_invalidates_zone():
-    zones = detect_zones(_demand_frame(broken=True), spot=99.0,
-                         range_low=90, range_high=110, legout_mult=1.5,
-                         max_wick_pct=95, tight_base=True)
-    assert zones == []
-
-
-def test_eod_range_uses_low_minus_and_high_plus_percent():
-    daily = pd.DataFrame(
-        {"Open": [99, 100], "High": [105, 110], "Low": [95, 98],
-         "Close": [101, 106], "Volume": [100, 100]},
-        index=pd.to_datetime(["2026-10-22", "2026-10-23"]).tz_localize("Asia/Kolkata"),
-    )
-    # Simulate market hours on the following day; the prior EOD candle is used.
-    now = datetime.fromisoformat("2026-10-26T11:00:00+05:30")
-    result = eod_price_range(daily, 10, market="NSE", now=now)
-    assert result is not None
-    low, high, _ = result
-    assert round(low, 2) == 88.20
+def test_core_eod_gate_is_fixed_at_ten_percent():
+    frame = _pine_demand_frame()
+    low, high = get_eod_range(frame, 23, high_buffer_pct=10, low_buffer_pct=10)
+    assert round(low, 2) == 89.10
     assert round(high, 2) == 121.00
+    assert PINE_DEFAULTS["eodLowBufferPct"] == 10.0
+    assert PINE_DEFAULTS["eodHighBufferPct"] == 10.0
+    assert PINE_DEFAULTS["useEodRange"] is True
+
+
+def test_all_requested_timeframes_are_available_and_scan_api_uses_core():
+    assert TIMEFRAMES == (
+        "3m", "5m", "10m", "15m", "30m", "75m", "1h", "2h",
+        "4h", "6h", "1d", "1w", "1M",
+    )
+    rows, coverage = scan_equity_zones(
+        {"RELIANCE": {"minute": _pine_demand_frame()}},
+        ["RELIANCE"], ["5m"],
+    )
+    assert coverage["zone_rows"] == 1
+    assert rows.iloc[0]["Pattern"] == "RBR"
+    assert rows.iloc[0]["Zone State"] == "Fresh"
+    assert round(rows.iloc[0]["EOD Range Low"], 2) == 89.1
+    assert round(rows.iloc[0]["EOD Range High"], 2) == 121.0
 
 
 def test_tradingview_links_are_built_for_cash_and_front_future():

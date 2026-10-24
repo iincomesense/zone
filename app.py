@@ -1749,14 +1749,23 @@ st.markdown("""
 <style>
 :root { color-scheme: dark; }
 .stApp { background:#0b1016; color:#e8edf3; }
-[data-testid="stAppViewContainer"] .block-container { max-width:99vw; padding:3.1rem 1rem 1rem; }
+[data-testid="stAppViewContainer"] .block-container { max-width:99vw; padding:3rem 1rem 1rem; }
 [data-testid="stHeader"] { background:rgba(11,16,22,.95); }
-div[data-testid="stVerticalBlockBorderWrapper"] { background:#0f161f; }
-.gap { height:1.75rem; }
+div[data-testid="stVerticalBlockBorderWrapper"] { background:#0f161f; border-color:#223042; border-radius:12px; }
+[data-testid="stWidgetLabel"] p { font-size:.68rem; letter-spacing:.09em; text-transform:uppercase; color:#8c9aaa; font-weight:600; }
+button[data-testid^="stBaseButton-pills"] { border-radius:999px; min-height:1.95rem; padding:.05rem .8rem; font-size:.82rem;
+  background:#101b27; border:1px solid #27425e; color:#9fb6cc; }
+button[data-testid="stBaseButton-pillsActive"] { background:#0d3252; border-color:#2f8cf0; color:#8ec8ff; font-weight:600; }
+.st-key-chip_state button[data-testid="stBaseButton-pillsActive"] { background:#0f3b2e; border-color:#14b8a6; color:#6ee7d0; }
+.st-key-chip_side button[data-testid="stBaseButton-pillsActive"] { background:#3b1d2a; border-color:#fb7185; color:#fda4af; }
+.st-key-chip_view button[data-testid="stBaseButton-pillsActive"],
+.st-key-chip_sort button[data-testid="stBaseButton-pillsActive"] { background:#2d2a12; border-color:#fbbf24; color:#fde68a; }
+.st-key-tfq button { min-height:1.6rem; padding:0 .65rem; font-size:.74rem; border-radius:999px; background:#0f161f; border:1px solid #2b3a4d; color:#9fb6cc; }
+.gap { height:1.55rem; }
 .hdr { display:flex; justify-content:space-between; align-items:baseline; margin:0 0 .35rem; }
 .hdr b { font-size:1.2rem; letter-spacing:-.02em; }
 .hdr span { color:#8c9aaa; font-size:.78rem; }
-.stat { color:#bdc9d5; font-size:.82rem; margin:.15rem 0 .35rem; }
+.stat { color:#bdc9d5; font-size:.82rem; margin:.1rem 0 .3rem; }
 .src { color:#7d8a99; font-size:.72rem; }
 </style>
 """, unsafe_allow_html=True)
@@ -1867,11 +1876,11 @@ def _pine_controls() -> tuple[dict[str, Any], bool]:
     return {**PINE_DEFAULTS, **values}, bool(applied)
 
 
-CORE_FIELDS = ["TF", "Zone", "Pattern", "Category", "Zone State", "Density Score", "HQ",
+CORE_FIELDS = ["TF", "Zone", "Pattern", "Zone State", "Density Score", "HQ",
                "Touch Count", "Proximal", "Distal", "SL", "TP", "Nearest Gap %", "Created"]
 SHADOW_FIELDS = ["Behind", "Base Break", "Swing Break", "Swing Break Direction",
                  "Shadow", "Shadow Top", "Shadow Bottom", "Shadow Color"]
-EXTRA_FIELDS = ["Base Count", "Zone Low", "Zone High", "Leg-out Mid", "Leg-in TR",
+EXTRA_FIELDS = ["Category", "Base Count", "Zone Low", "Zone High", "Leg-out Mid", "Leg-in TR",
                 "Leg-out TR", "Overnight", "Broken At"]
 MAX_ROWS = 4000
 
@@ -1879,24 +1888,30 @@ MAX_ROWS = 4000
 def _column_config(cols: list[str]) -> dict[str, Any]:
     C = st.column_config
     cfg: dict[str, Any] = {
-        "Equity / TV Chart": C.LinkColumn("Symbol", display_text=r"symbol=NSE%3A([^&]+)"),
-        "Current-Month Future / TV": C.LinkColumn("Future", display_text=r"symbol=NSE%3A([^&]+)"),
-        "Global Instrument / TV Chart": C.LinkColumn("Chart", display_text="📈"),
-        "Equity LTP": C.NumberColumn("LTP", format="₹%.2f"),
-        "Future LTP": C.NumberColumn("Fut LTP", format="₹%.2f"),
-        "Spot − Future Δ (₹)": C.NumberColumn("Spot−Fut Δ", format="%.2f"),
-        "LTP": C.NumberColumn("LTP", format="%.2f"),
-        "Zone State": C.TextColumn("State"),
-        "Density Score": C.NumberColumn("Score", format="%d"),
-        "Touch Count": C.NumberColumn("Touches", format="%d"),
-        "Base Count": C.NumberColumn("Base", format="%d"),
-        "Nearest Gap %": C.NumberColumn("Gap %", format="%.2f"),
-        "Created": C.DatetimeColumn("Created", format="DD MMM HH:mm"),
-        "Broken At": C.NumberColumn("Broken bar", format="%d"),
+        "Equity / TV Chart": C.LinkColumn("Symbol", width="medium", display_text=r"symbol=NSE%3A([^&]+)"),
+        "Current-Month Future / TV": C.LinkColumn("Future", width="medium", display_text=r"symbol=NSE%3A([^&]+)"),
+        "Global Instrument / TV Chart": C.LinkColumn("Chart", width="small", display_text="📈"),
+        "Instrument": C.TextColumn("Instrument", width="medium"),
+        "Equity LTP": C.NumberColumn("LTP", width="small", format="₹%.2f"),
+        "Future LTP": C.NumberColumn("Fut LTP", width="small", format="₹%.2f"),
+        "Spot − Future Δ (₹)": C.NumberColumn("Spot−Fut Δ", width="small", format="%.2f"),
+        "LTP": C.NumberColumn("LTP", width="small", format="%.2f"),
+        "TF": C.TextColumn("TF", width="small"),
+        "Zone": C.TextColumn("Zone", width="small"),
+        "Pattern": C.TextColumn("Pattern", width="small"),
+        "Category": C.TextColumn("Category", width="small"),
+        "Zone State": C.TextColumn("State", width="small"),
+        "Density Score": C.NumberColumn("Score", width="small", format="%d"),
+        "HQ": C.TextColumn("HQ", width="small"),
+        "Touch Count": C.NumberColumn("Touch", width="small", format="%d"),
+        "Base Count": C.NumberColumn("Base", width="small", format="%d"),
+        "Nearest Gap %": C.NumberColumn("Gap %", width="small", format="%.2f"),
+        "Created": C.DatetimeColumn("Created", width="small", format="DD MMM HH:mm"),
+        "Broken At": C.NumberColumn("Broken bar", width="small", format="%d"),
     }
     for key in ("Proximal", "Distal", "SL", "TP", "Zone Low", "Zone High", "Leg-out Mid",
                 "Leg-in TR", "Leg-out TR", "Shadow Top", "Shadow Bottom"):
-        cfg[key] = C.NumberColumn(key, format="%.2f")
+        cfg[key] = C.NumberColumn(key, width="small", format="%.2f")
     return {k: v for k, v in cfg.items() if k in cols}
 
 
@@ -1908,6 +1923,8 @@ def _prepare_display(view: pd.DataFrame, order: list[str]) -> pd.DataFrame:
     if "Zone State" in disp:
         disp["Zone State"] = disp["Zone State"].map(
             {"Fresh": "🟢 Fresh", "Tested": "🟡 Tested", "Broken": "⚪ Broken"}).fillna(disp["Zone State"])
+    if "HQ" in disp:
+        disp["HQ"] = disp["HQ"].map({True: "★", False: ""}).fillna("")
     if "Created" in disp:
         disp["Created"] = pd.to_datetime(disp["Created"], errors="coerce")
     if "Broken At" in disp:
@@ -1980,29 +1997,67 @@ VIEWS = ["NSE Futures", "Global", "MTF Lines"]
 header_slot = st.empty()
 params, form_apply = _pine_controls()
 
-with st.container(border=True):
-    r1 = st.columns([1.0, 3.8, 1.0, 1.1])
-    universe_choice = r1[0].selectbox("Universe", list(UNIVERSE_N), index=0, key="universe")
-    selected_tfs = r1[1].multiselect("Timeframes (scan + display)", list(TIMEFRAMES),
-                                     default=DEFAULT_TFS, key="tfs")
-    with r1[2]:
-        st.markdown('<div class="gap"></div>', unsafe_allow_html=True)
-        auto_refresh = st.toggle("Auto 2 min", value=False)
-    with r1[3]:
-        st.markdown('<div class="gap"></div>', unsafe_allow_html=True)
-        run_scan = st.button("🚀 Scan / Refresh", type="primary", **_STRETCH)
+_HAS_PILLS = hasattr(st, "pills")
+INTRADAY_TFS = [t for t in TIMEFRAMES if t in MINUTE_TFS or t in HOUR_TFS]
 
-    r2 = st.columns([1.3, 1.6, 1.4, 1.7, 1.3, 1.0])
-    view_name = r2[0].selectbox("View", VIEWS, key="view")
-    selected_states = r2[1].multiselect("State", ["Fresh", "Tested", "Broken"],
-                                        default=["Fresh", "Tested"], key="states")
-    selected_sides = r2[2].multiselect("Side", ["Demand", "Supply"],
-                                       default=["Demand", "Supply"], key="sides")
-    symbol_query = r2[3].text_input("Filter", placeholder="RELIANCE, SBIN, Gold", key="query")
-    sort_mode = r2[4].selectbox("Distance", ["Nearest ↑", "Farthest ↓"], key="sort")
-    with r2[5]:
+
+def _chips(label: str, options: list[str], *, default: Any, key: str, multi: bool = True):
+    """Chip-style selector (st.pills); falls back to multiselect/selectbox on old Streamlit."""
+    if key not in ss:
+        ss[key] = list(default) if multi else default
+    if _HAS_PILLS:
+        got = st.pills(label, options, selection_mode="multi" if multi else "single", key=key)
+        if multi:
+            return list(got or [])
+        return got if got is not None else default
+    if multi:
+        return st.multiselect(label, options, key=key)
+    return st.selectbox(label, options, key=key)
+
+
+def _set_tfs(values: list[str]) -> None:
+    ss["tfs"] = list(values)
+
+
+with st.container(border=True):
+    top = st.columns([1.1, 5.0, 1.7])
+    with top[0]:
+        with st.container(key="chip_universe"):
+            universe_choice = _chips("Universe", list(UNIVERSE_N), default="50", key="universe", multi=False)
+    with top[1]:
+        selected_tfs = _chips("Timeframes", list(TIMEFRAMES), default=DEFAULT_TFS, key="tfs")
+        with st.container(key="tfq"):
+            q = st.columns([1, 1, 1, 1, 8])
+            q[0].button("Intraday", key="tf_intra", on_click=_set_tfs, args=(INTRADAY_TFS,))
+            q[1].button("Daily+", key="tf_daily", on_click=_set_tfs, args=(["1d", "1w", "1M"],))
+            q[2].button("All", key="tf_all", on_click=_set_tfs, args=(list(TIMEFRAMES),))
+            q[3].button("Clear", key="tf_clear", on_click=_set_tfs, args=([],))
+    with top[2]:
+        with st.container(key="chip_state"):
+            selected_states = _chips("State", ["Fresh", "Tested", "Broken"],
+                                     default=["Fresh", "Tested"], key="states")
+
+    bot = st.columns([1.35, 2.0, 1.9, 1.6, 1.0, 0.9, 1.1])
+    with bot[0]:
+        with st.container(key="chip_side"):
+            selected_sides = _chips("Side", ["Demand", "Supply"], default=["Demand", "Supply"], key="sides")
+    with bot[1]:
+        with st.container(key="chip_view"):
+            view_name = _chips("View", VIEWS, default="NSE Futures", key="view", multi=False)
+    symbol_query = bot[2].text_input("Filter", placeholder="RELIANCE, SBIN, Gold", key="query")
+    with bot[3]:
+        with st.container(key="chip_sort"):
+            sort_mode = _chips("Distance", ["Nearest ↑", "Farthest ↓"], default="Nearest ↑",
+                               key="sort", multi=False)
+    with bot[4]:
         st.markdown('<div class="gap"></div>', unsafe_allow_html=True)
-        all_cols = st.toggle("All columns", value=False)
+        all_cols = st.toggle("All cols", value=False)
+    with bot[5]:
+        st.markdown('<div class="gap"></div>', unsafe_allow_html=True)
+        auto_refresh = st.toggle("Auto 2m", value=False)
+    with bot[6]:
+        st.markdown('<div class="gap"></div>', unsafe_allow_html=True)
+        run_scan = st.button("🚀 Scan", type="primary", **_STRETCH)
 
 if auto_refresh:
     try:

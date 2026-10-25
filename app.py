@@ -19,7 +19,7 @@ import requests
 import streamlit as st
 
 st.set_page_config(
-    page_title="Pine v6 Zone Scanner (Exact Parity)",
+    page_title="Pine v6 Zone Scanner",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -176,7 +176,6 @@ def normalize_ohlcv(df: pd.DataFrame | None) -> pd.DataFrame:
     return f.loc[~f.index.duplicated(keep="last")].sort_index()
 
 def pine_rma(src: np.ndarray, length: int) -> np.ndarray:
-    """TradingView ta.rma(src, length) का 100% सटीक गणितीय रूप"""
     alpha = 1.0 / length
     out = np.full_like(src, np.nan)
     if len(src) < length:
@@ -224,7 +223,7 @@ def resample_candles(df: pd.DataFrame, tf: str) -> pd.DataFrame:
         "Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"
     }).dropna().sort_index() if rule else df
 
-# ===================================================================== 100% PINE SCRIPT V6 COMPLIANT ENGINE
+# ===================================================================== STRICT PINE V6 ENGINE
 @dataclass
 class ZoneRecord:
     proxVal: float
@@ -239,7 +238,6 @@ class ZoneRecord:
     densityScore: int
 
 class ExactPineV6Engine:
-    """Pine Script v6 'Zone MTF' का शत-प्रतिशत सटीक Python पोर्ट"""
     def __init__(self, df: pd.DataFrame):
         self.df = df
         self.o = df["Open"].to_numpy(dtype=float)
@@ -248,10 +246,12 @@ class ExactPineV6Engine:
         self.c = df["Close"].to_numpy(dtype=float)
         self.v = df["Volume"].to_numpy(dtype=float)
         self.n = len(df)
-        self.time_ms = df.index.astype("datetime64[ns]").astype(np.int64) // 10**6
+        
+        # सुरक्षित मिलीसेकंड रूपांतरण (TypeError फिक्स)
+        self.time_ms = df.index.view("int64") // 10**6
         self.dow = df.index.dayofweek.to_numpy() if self.n else np.array([], dtype=int)
         
-        # True Range
+        # TR & ATR
         tr = np.zeros(self.n)
         if self.n > 0:
             tr[0] = self.h[0] - self.l[0]
@@ -259,8 +259,6 @@ class ExactPineV6Engine:
                 tr[i] = max(self.h[i] - self.l[i], abs(self.h[i] - self.c[i-1]), abs(self.l[i] - self.c[i-1]))
         self.tr = tr
         self.atr = pine_rma(tr, 14)
-        
-        # Volume SMA(20)
         self.vol_sma = pd.Series(self.v).rolling(20).mean().to_numpy()
 
     def tr_val(self, i: int) -> float:
@@ -314,7 +312,7 @@ class ExactPineV6Engine:
                 baseOK = False
                 break
             bt = self.tr_val(idx)
-            if bt > 1.0 * self.atr[idx]:  # maxBaseAtrMult = 1.0
+            if bt > 1.0 * self.atr[idx]:
                 baseOK = False
                 break
             baseTR = max(baseTR, bt)
@@ -324,7 +322,7 @@ class ExactPineV6Engine:
         if not baseOK or baseTR == 0:
             return None
 
-        effectiveMult = 1.5 if bc == 1 else 2.0  # legInToBaseSizeMult
+        effectiveMult = 1.5 if bc == 1 else 2.0
         if inTR < effectiveMult * baseTR or not (inTR >= 1.0 * self.atr[li]):
             return None
 
@@ -334,13 +332,12 @@ class ExactPineV6Engine:
         if not (demand or supply):
             return None
 
-        explosive = outTR >= 1.2 * self.atr[i]  # legOutTrMult = 1.2
-        wickOK = self.wick_pct(i) <= 0.30       # maxWickPct = 0.30
+        explosive = outTR >= 1.2 * self.atr[i]
+        wickOK = self.wick_pct(i) <= 0.30
         hierarchy = (outTR >= 1.0 * inTR) and (inTR > baseTR)
         volumeOK = self.v[i] > self.v[li]
         overnight = (self.dow[i] != self.dow[i-1] or self.time_ms[i] - self.time_ms[i-1] > 86400000) if i > 0 else False
 
-        # Imbalance check
         gap = False
         imbalance = True
         if demand:
@@ -362,7 +359,6 @@ class ExactPineV6Engine:
         if not ((rbr or dbr or dbd or rbd) and explosive and wickOK and hierarchy and volumeOK and imbalance):
             return None
 
-        # Pine Score Rules
         score = 0
         if bc == 1: score += 15
         if inTR >= 1.5 * self.atr[li]: score += 10
@@ -384,12 +380,11 @@ class ExactPineV6Engine:
         if gap: score += 10
         if overnight and gap: score += 15
 
-        if score < 40:  # minValidScore = 40
+        if score < 40:
             return None
 
         prox = baseHigh if demand else baseLow
         dist = baseLow if demand else baseHigh
-        # Pine v6: mid = demand ? high - testedLegOutRetracePct * (high - low) : low + testedLegOutRetracePct * (high - low)
         mid = (self.h[i] - 1.0 * (self.h[i] - self.l[i])) if demand else (self.l[i] + 1.0 * (self.h[i] - self.l[i]))
         pattern = "RBR" if rbr else ("DBR" if dbr else ("DBD" if dbd else "RBD"))
         return {
@@ -404,7 +399,7 @@ class ExactPineV6Engine:
         for i in range(self.n):
             low_i, high_i = self.l[i], self.h[i]
 
-            # 1. Update States (Pine Rule: ज़ोन बनने वाली कैंडल पर टेस्ट नहीं हो सकता, केवल अगली कैंडल्स पर)
+            # 1. State Update (केवल बाद के बार्स पर टेस्ट होगा)
             for z in active_zones:
                 if z.state == "Broken":
                     continue
@@ -435,7 +430,6 @@ class ExactPineV6Engine:
                             elif high_i >= z.legOutMidLevel:
                                 z.touchCount += 1
 
-                    # Pine v6 Rule: maxTestedCount = 1 (एक से अधिक बार छूने पर Broken)
                     if z.state == "Tested" and z.touchCount > 1:
                         z.state = "Broken"
 
@@ -450,7 +444,6 @@ class ExactPineV6Engine:
                         continue
                     found = True
 
-                    # Duplicate check: 0.25 * ATR
                     duplicate = False
                     for old in reversed(active_zones):
                         if old.state == "Broken":
@@ -461,7 +454,6 @@ class ExactPineV6Engine:
                     if duplicate:
                         continue
 
-                    # नया ज़ोन पूरी तरह 'Fresh' स्टेट में ही बनेगा
                     z = ZoneRecord(
                         proxVal=float(cand["prox"]),
                         distVal=float(cand["dist"]),
@@ -476,7 +468,6 @@ class ExactPineV6Engine:
                     )
                     active_zones.append(z)
 
-        # केवल शुद्ध सक्रिय (Fresh या Tested) ज़ोन बाहर जाएंगे, Broken ज़ोन पूरी तरह बाहर
         return [z for z in active_zones if z.state in ("Fresh", "Tested")]
 
 # ===================================================================== SAFE BATCH DATA LOADER
@@ -557,7 +548,7 @@ if not selected_tfs:
     st.warning("कृपया कम से कम एक Timeframe चुनें।")
     st.stop()
 
-# ===================================================================== SCANNING PROCESS
+# ===================================================================== SCANNING
 range_type = "Weekly" if "Weekly" in range_choice else ("Daily" if "Daily" in range_choice else "Monthly")
 tf_group = "intraday" if any(t in MINUTE_TFS or t in HOUR_TFS for t in selected_tfs) else "daily"
 
@@ -582,7 +573,6 @@ with st.spinner(f"Running Exact Pine v6 Engine across {len(live_fno_symbols)} st
             ltp = float(resampled["Close"].iloc[-1])
 
             for z in active_zones:
-                # Range Check: High+ATR and Low-ATR
                 if not (r_min <= z.proxVal <= r_max or r_min <= z.distVal <= r_max):
                     continue
 
@@ -604,9 +594,8 @@ with st.spinner(f"Running Exact Pine v6 Engine across {len(live_fno_symbols)} st
 
 df_view = pd.DataFrame(all_raw_zones)
 
-# ===================================================================== MULTI-TF HIGHLIGHT & RENDER
+# ===================================================================== DISPLAY
 if not df_view.empty:
-    # Confluence: यदि एक ही स्टॉक का ज़ोन 2 या अधिक टाइमफ्रेम में ओवरलैप हो रहा है
     tf_counts = df_view.groupby(["Equity_Name", "Zone Side"])["TF"].transform("nunique")
     df_view["Multi-TF Zone"] = tf_counts.apply(
         lambda count: f"🔥 Confluence ({count}x TF)" if count >= 3 else (f"⭐ Multi-TF (2x)" if count == 2 else "—")

@@ -9,6 +9,7 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
@@ -26,7 +27,7 @@ st.set_page_config(
 
 IST = ZoneInfo("Asia/Kolkata")
 
-# ===================================================================== CSS
+# ===================================================================== CSS (Google Sheets Layout)
 st.markdown("""
 <style>
 :root { color-scheme: dark; }
@@ -150,7 +151,7 @@ def get_verified_nse_fno_list() -> tuple[str, ...]:
     UBL ULTRACEMCO UNIONBANK UNITDSPR UPL VBL VEDL VOLTAS WIPRO YESBANK ZOMATO ZYDUSLIFE
     """.split())))
 
-# ===================================================================== PINE SCRIPT V6 MATH & RMA
+# ===================================================================== DATA ENGINE
 OHLCV = ("Open", "High", "Low", "Close", "Volume")
 
 def normalize_ohlcv(df: pd.DataFrame | None) -> pd.DataFrame:
@@ -222,22 +223,21 @@ def resample_candles(df: pd.DataFrame, tf: str) -> pd.DataFrame:
         "Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"
     }).dropna().sort_index() if rule else df
 
-# ===================================================================== PINE SCRIPT V6 CANDIDATE & STATE ENGINE
+# ===================================================================== STRICT PINE V6 ENGINE
 @dataclass
-class PineCandidate:
-    valid: bool
-    baseCount: int
-    prox: float
-    dist: float
-    mid: float
-    demand: bool
-    score: int
-    pattern: str
-    category: str
-    outHigh: float
-    outLow: float
+class ZoneRecord:
+    proxVal: float
+    distVal: float
+    isDemand: bool
+    patternType: str
+    state: str
+    touchCount: int
+    createdBarIndex: int
+    legOutMidLevel: float
+    timestamp: Any
+    densityScore: int
 
-class PineV6ZoneEngine:
+class StrictPineV6Engine:
     def __init__(self, df: pd.DataFrame):
         self.df = df
         self.o = df["Open"].to_numpy(dtype=float)
@@ -246,6 +246,7 @@ class PineV6ZoneEngine:
         self.c = df["Close"].to_numpy(dtype=float)
         self.v = df["Volume"].to_numpy(dtype=float)
         self.n = len(df)
+        self.dow = df.index.dayofweek.to_numpy() if self.n else np.array([], dtype=int)
         
         # TR & RMA ATR(14)
         tr = np.zeros(self.n)
@@ -255,10 +256,7 @@ class PineV6ZoneEngine:
                 tr[i] = max(self.h[i] - self.l[i], abs(self.h[i] - self.c[i-1]), abs(self.l[i] - self.c[i-1]))
         self.tr = tr
         self.atr = pine_rma(tr, 14)
-        
-        # Volume SMA(20)
-        vol_s = pd.Series(self.v).rolling(20).mean().to_numpy()
-        self.vol_sma = vol_s
+        self.vol_sma = pd.Series(self.v).rolling(20).mean().to_numpy()
 
     def wick_pct(self, i: int) -> float:
         r = self.h[i] - self.l[i]
@@ -271,11 +269,11 @@ class PineV6ZoneEngine:
     def is_bull(self, i: int) -> bool: return self.c[i] > self.o[i]
     def is_bear(self, i: int) -> bool: return self.o[i] > self.c[i]
 
-    def evaluate_candidate(self, i: int, bc: int) -> PineCandidate:
+    def _candidate(self, i: int, bc: int) -> Optional[dict]:
         li = i - (bc + 1)
         pi = li - 1
         if pi < 0 or np.isnan(self.atr[li]):
-            return PineCandidate(False, bc, 0, 0, 0, False, 0, "", "", 0, 0)
+            return None
 
         inTR = self.tr[li]
         inLow, inHigh, inClose = self.l[li], self.h[li], self.c[li]
@@ -283,20 +281,18 @@ class PineV6ZoneEngine:
         inBull, inBear = self.is_bull(li), self.is_bear(li)
 
         if inRange == 0 or self.body_pct(li) < 0.60:
-            return PineCandidate(False, bc, 0, 0, 0, False, 0, "", "", 0, 0)
+            return None
 
-        # Opposite Cover Check
         opposite = (inBull and self.is_bear(pi)) or (inBear and self.is_bull(pi))
         prevHi = max(self.o[pi], self.c[pi])
         prevLo = min(self.o[pi], self.c[pi])
         overlap = max(0.0, min(prevHi, inHigh) - max(prevLo, inLow))
         if opposite and (overlap / inRange) >= 0.50:
-            return PineCandidate(False, bc, 0, 0, 0, False, 0, "", "", 0, 0)
+            return None
 
         bullClv = (inClose - inLow) / inRange
         bearClv = (inHigh - inClose) / inRange
 
-        # Base candles check
         baseOK = True
         baseTR = 0.0
         baseHigh = -1.0
@@ -311,24 +307,24 @@ class PineV6ZoneEngine:
             baseLow = min(baseLow, self.l[idx])
 
         if not baseOK or baseTR == 0:
-            return PineCandidate(False, bc, 0, 0, 0, False, 0, "", "", 0, 0)
+            return None
 
         effectiveMult = 1.5 if bc == 1 else 2.0
         if inTR < effectiveMult * baseTR or not (inTR >= 1.0 * self.atr[li]):
-            return PineCandidate(False, bc, 0, 0, 0, False, 0, "", "", 0, 0)
+            return None
 
         outTR = self.tr[i]
         demand = self.is_bull(i)
         supply = self.is_bear(i)
         if not (demand or supply):
-            return PineCandidate(False, bc, 0, 0, 0, False, 0, "", "", 0, 0)
+            return None
 
         explosive = outTR >= 1.2 * self.atr[i]
         wickOK = self.wick_pct(i) <= 0.30
         hierarchy = (outTR >= 1.0 * inTR) and (inTR > baseTR)
         volumeOK = self.v[i] > self.v[li]
+        overnight = (self.dow[i] != self.dow[i-1]) if i > 0 else False
 
-        # Imbalance
         if demand:
             gap = self.l[i] > baseHigh
             imbalance = gap or (self.c[i] > inHigh)
@@ -338,7 +334,7 @@ class PineV6ZoneEngine:
 
         bodyEngulf = min(self.o[i], self.c[i]) <= baseLow and max(self.o[i], self.c[i]) >= baseHigh
         if bodyEngulf and not gap:
-            return PineCandidate(False, bc, 0, 0, 0, False, 0, "", "", 0, 0)
+            return None
 
         rbr = inBull and bullClv >= 0.60 and demand
         dbr = inBear and bearClv >= 0.60 and demand
@@ -346,9 +342,8 @@ class PineV6ZoneEngine:
         rbd = inBull and bullClv >= 0.60 and supply
 
         if not ((rbr or dbr or dbd or rbd) and explosive and wickOK and hierarchy and volumeOK and imbalance):
-            return PineCandidate(False, bc, 0, 0, 0, False, 0, "", "", 0, 0)
+            return None
 
-        # Pine Score Rules
         score = 0
         if bc == 1: score += 15
         if inTR >= 1.5 * self.atr[li]: score += 10
@@ -368,84 +363,99 @@ class PineV6ZoneEngine:
         if oppositeBase: score += 10
         score += 10
         if gap: score += 10
+        if overnight and gap: score += 15
 
         if score < 40:
-            return PineCandidate(False, bc, 0, 0, 0, False, 0, "", "", 0, 0)
+            return None
 
         prox = baseHigh if demand else baseLow
         dist = baseLow if demand else baseHigh
         mid = (self.h[i] - 1.0 * (self.h[i] - self.l[i])) if demand else (self.l[i] + 1.0 * (self.h[i] - self.l[i]))
         pattern = "RBR" if rbr else ("DBR" if dbr else ("DBD" if dbd else "RBD"))
-        category = "Continuation" if (rbr or dbd) else "Reversal"
-        return PineCandidate(True, bc, prox, dist, mid, demand, score, pattern, category, self.h[i], self.l[i])
+        return {
+            "prox": prox, "dist": dist, "mid": mid, "demand": demand,
+            "score": score, "pattern": pattern, "bc": bc
+        }
 
-    def scan_active_zones(self, range_min: float, range_max: float) -> list[dict]:
-        zones = []
-        ltp = self.c[-1]
-        start_bar = max(14, 3 + 3, 11)
+    def run_pine_engine(self) -> List[ZoneRecord]:
+        active_zones: List[ZoneRecord] = []
+        min_bar = max(14, 3 + 3, 11)
 
-        # Scanning bars
-        for i in range(start_bar, self.n):
-            for bc in range(1, 4):
-                cand = self.evaluate_candidate(i, bc)
-                if not cand.valid:
-                    continue
+        for i in range(self.n):
+            # 1. Bar Scan
+            if i >= min_bar and not np.isnan(self.atr[i]):
+                found = False
+                for bc in range(1, 4):
+                    if found:
+                        break
+                    cand = self._candidate(i, bc)
+                    if cand is None:
+                        continue
+                    found = True
+                    
+                    # Duplicate check
+                    duplicate = False
+                    for old in reversed(active_zones):
+                        if old.state == "Broken":
+                            continue
+                        if old.isDemand == cand["demand"] and abs(old.proxVal - cand["prox"]) < self.atr[i] * 0.25:
+                            duplicate = True
+                            break
+                    if duplicate:
+                        continue
 
-                # Pine duplicate check (atr * 0.25)
-                dup = any(z["demand"] == cand.demand and abs(z["prox"] - cand.prox) < self.atr[i] * 0.25 for z in zones if z["state"] != "Broken")
-                if dup:
-                    continue
+                    z = ZoneRecord(
+                        proxVal=float(cand["prox"]),
+                        distVal=float(cand["dist"]),
+                        isDemand=bool(cand["demand"]),
+                        patternType=str(cand["pattern"]),
+                        state="Fresh",
+                        touchCount=0,
+                        createdBarIndex=i,
+                        legOutMidLevel=float(cand["mid"]),
+                        timestamp=self.df.index[i],
+                        densityScore=int(cand["score"])
+                    )
+                    active_zones.append(z)
 
-                # Scan Range Filter (High+ATR, Low-ATR)
-                if not (range_min <= cand.prox <= range_max or range_min <= cand.dist <= range_max):
-                    continue
-
-                zones.append({
-                    "prox": cand.prox, "dist": cand.dist, "mid": cand.mid,
-                    "demand": cand.demand, "score": cand.score, "pattern": cand.pattern,
-                    "state": "Fresh", "touches": 0, "time": self.df.index[i],
-                    "outHigh": cand.outHigh, "outLow": cand.outLow
-                })
-                break
-
-            # State Update Loop (Fresh -> Tested -> Broken)
+            # 2. Update States (Fresh -> Tested -> Broken)
             low_i, high_i = self.l[i], self.h[i]
-            for z in zones:
-                if z["state"] == "Fresh":
-                    if z["demand"]:
-                        if low_i <= z["dist"]: z["state"] = "Broken"
-                        elif low_i <= z["mid"]: z["state"] = "Tested"; z["touches"] += 1
+            for z in active_zones:
+                if z.state == "Broken":
+                    continue
+                if z.state == "Fresh":
+                    if z.isDemand:
+                        if low_i <= z.distVal:
+                            z.state = "Broken"
+                        elif low_i <= z.legOutMidLevel:
+                            z.state = "Tested"
+                            z.touchCount += 1
                     else:
-                        if high_i >= z["dist"]: z["state"] = "Broken"
-                        elif high_i >= z["mid"]: z["state"] = "Tested"; z["touches"] += 1
-                elif z["state"] == "Tested":
-                    if z["demand"]:
-                        if low_i <= z["dist"]: z["state"] = "Broken"
-                        elif low_i <= z["mid"]: z["touches"] += 1
+                        if high_i >= z.distVal:
+                            z.state = "Broken"
+                        elif high_i >= z.legOutMidLevel:
+                            z.state = "Tested"
+                            z.touchCount += 1
+                elif z.state == "Tested":
+                    if z.isDemand:
+                        if low_i <= z.distVal:
+                            z.state = "Broken"
+                        elif low_i <= z.legOutMidLevel:
+                            z.touchCount += 1
                     else:
-                        if high_i >= z["dist"]: z["state"] = "Broken"
-                        elif high_i >= z["mid"]: z["touches"] += 1
-                if z["state"] == "Tested" and z["touches"] > 1:
-                    z["state"] = "Broken"
+                        if high_i >= z.distVal:
+                            z.state = "Broken"
+                        elif high_i >= z.legOutMidLevel:
+                            z.touchCount += 1
 
-        # केवल सक्रिय (Fresh या Tested) ज़ोन लौटाएं
-        active = [z for z in zones if z["state"] in ("Fresh", "Tested")]
-        out = []
-        for z in active:
-            dist_pct = round(abs(ltp - z["prox"]) / ltp * 100, 2)
-            out.append({
-                "prox": round(z["prox"], 2),
-                "dist": round(z["dist"], 2),
-                "demand": z["demand"],
-                "pattern": z["pattern"],
-                "state": z["state"],
-                "ltp": round(ltp, 2),
-                "dist_pct": dist_pct,
-                "created": z["time"].strftime("%d-%b %H:%M")
-            })
-        return out
+                # Pine v6 Rule: maxTestedCount = 1
+                if z.state == "Tested" and z.touchCount > 1:
+                    z.state = "Broken"
 
-# ===================================================================== SAFE DATA LOADER
+        # केवल शुद्ध Active Zones (Fresh & Tested) ही बाहर जाएंगे, Broken पूरी तरह बाहर
+        return [z for z in active_zones if z.state in ("Fresh", "Tested")]
+
+# ===================================================================== SAFE BATCH DATA
 def _download_safe_batch(tickers: list[str], period: str, interval: str) -> dict[str, pd.DataFrame]:
     import yfinance as yf
     out = {}
@@ -527,7 +537,7 @@ if not selected_tfs:
 range_type = "Weekly" if "Weekly" in range_choice else ("Daily" if "Daily" in range_choice else "Monthly")
 tf_group = "intraday" if any(t in MINUTE_TFS or t in HOUR_TFS for t in selected_tfs) else "daily"
 
-with st.spinner(f"Running Pine v6 Engine across {len(live_fno_symbols)} stocks in {range_type} ATR Range..."):
+with st.spinner(f"Running Exact Pine v6 Engine across {len(live_fno_symbols)} stocks in {range_type} ATR Range..."):
     tf_bundle, daily_bundle = load_all_market_data(tf_group, live_fno_symbols)
     all_raw_zones = []
 
@@ -542,33 +552,39 @@ with st.spinner(f"Running Pine v6 Engine across {len(live_fno_symbols)} stocks i
             resampled = resample_candles(raw_df, tf)
             if len(resampled) < 20:
                 continue
-            engine = PineV6ZoneEngine(resampled)
-            detected = engine.scan_active_zones(range_min=r_min, range_max=r_max)
-            for z in detected:
+            
+            engine = StrictPineV6Engine(resampled)
+            active_zones = engine.run_pine_engine()
+            ltp = float(resampled["Close"].iloc[-1])
+
+            for z in active_zones:
+                # Range check: High+ATR and Low-ATR
+                if not (r_min <= z.proxVal <= r_max or r_min <= z.distVal <= r_max):
+                    continue
+
+                dist_pct = round(abs(ltp - z.proxVal) / ltp * 100, 2)
                 all_raw_zones.append({
                     "Equity_Name": sym,
                     "Equity_Link": tradingview_link(sym, tf, is_future=False),
                     "Future_Link": tradingview_link(sym, tf, is_future=True),
                     "TF": tf,
-                    "Zone Side": "🟢 Demand" if z["demand"] else "🔴 Supply",
-                    "Pattern": z["pattern"],
-                    "Status": z["state"],
-                    "Proximal (₹)": z["prox"],
-                    "Distal (₹)": z["dist"],
-                    "Current LTP": z["ltp"],
-                    "Distance Gap %": z["dist_pct"],
-                    "Created Date": z["created"],
+                    "Zone Side": "🟢 Demand" if z.isDemand else "🔴 Supply",
+                    "Pattern": z.patternType,
+                    "Status": z.state,
+                    "Proximal (₹)": round(z.proxVal, 2),
+                    "Distal (₹)": round(z.distVal, 2),
+                    "Current LTP": round(ltp, 2),
+                    "Distance Gap %": dist_pct,
+                    "Created Date": z.timestamp.strftime("%d-%b %H:%M"),
                 })
 
 df_view = pd.DataFrame(all_raw_zones)
 
-# ===================================================================== MULTI-TF ZONE CONFLUENCE & DISPLAY
+# ===================================================================== MULTI-TF HIGHLIGHT & RENDER
 if not df_view.empty:
-    # एक ही स्टॉक के ज़ोन अगर 2 या उससे अधिक टाइमफ्रेम में हैं तो उन्हें पहचानें
-    tf_overlap_counts = df_view.groupby(["Equity_Name", "Zone Side"])["TF"].transform("nunique")
-    
-    # स्कोर की जगह 'Multi-TF Zone' कॉलम
-    df_view["Multi-TF Zone"] = tf_overlap_counts.apply(
+    # कन्फ्लुएंस: यदि एक ही स्टॉक का ज़ोन 2 या अधिक टाइमफ्रेम में है
+    tf_counts = df_view.groupby(["Equity_Name", "Zone Side"])["TF"].transform("nunique")
+    df_view["Multi-TF Zone"] = tf_counts.apply(
         lambda count: f"🔥 Confluence ({count}x TF)" if count >= 3 else (f"⭐ Multi-TF (2x)" if count == 2 else "—")
     )
 
@@ -606,7 +622,6 @@ if not df_view.empty:
             "Zone Side": st.column_config.TextColumn("Zone Side", width="small"),
             "Pattern": st.column_config.TextColumn("Pattern", width="small"),
             "Status": st.column_config.TextColumn("Status", width="small"),
-            # नया कन्फ्लुएंस हाइलाइट कॉलम
             "Multi-TF Zone": st.column_config.TextColumn("Multi-TF Highlight", width="medium"),
             "Proximal (₹)": st.column_config.NumberColumn("Proximal (₹)", format="%.2f"),
             "Distal (₹)": st.column_config.NumberColumn("Distal (₹)", format="%.2f"),
@@ -626,9 +641,9 @@ if not df_view.empty:
 
     st.markdown(f"""
     <div class="sheet-statusbar">
-        <span>Active Zones: <b>{len(display_df)}</b> | Range: <b>{range_type} ATR(14) RMA</b> | MTF Overlays Disabled in TradingView Charts</span>
-        <span>Score column replaced with Multi-TF Confluence Highlights (🔥 3x+ TF | ⭐ 2x TF)</span>
+        <span>Active Valid Zones: <b>{len(display_df)}</b> | Engine: <b>Strict Pine v6 (Broken Zones Fully Removed)</b></span>
+        <span>TradingView charts open cleanly on exact timeframe without MTF indicator line clutters</span>
     </div>
     """, unsafe_allow_html=True)
 else:
-    st.info("चयनित फिल्टर के आधार पर कोई ज़ोन नहीं मिला।")
+    st.info("चयनित फ़िल्टर और ATR रेंज में कोई सक्रिय वैध ज़ोन नहीं मिला।")

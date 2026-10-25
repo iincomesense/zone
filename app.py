@@ -7,6 +7,7 @@ import io
 import re
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
@@ -17,7 +18,7 @@ import requests
 import streamlit as st
 
 st.set_page_config(
-    page_title="Pine Zone Scanner",
+    page_title="Pine v6 Zone Scanner",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -68,28 +69,15 @@ MINUTE_TFS = {"3m", "5m", "10m", "15m", "30m", "75m"}
 HOUR_TFS = {"1h", "2h", "4h", "6h"}
 DAY_TFS = {"1d", "1w", "1M"}
 
-GLOBAL_INSTRUMENTS = (
-    {"key": "NIFTY 50", "yahoo": "^NSEI", "tv_eq": "NSE:NIFTY", "tv_fut": "NSE:NIFTY1!", "label": "NIFTY 50"},
-    {"key": "BANKNIFTY", "yahoo": "^NSEBANK", "tv_eq": "NSE:BANKNIFTY", "tv_fut": "NSE:BANKNIFTY1!", "label": "BANKNIFTY"},
-    {"key": "CRUDE OIL", "yahoo": "CL=F", "tv_eq": "NYMEX:CL1!", "tv_fut": "NYMEX:CL1!", "label": "CRUDE OIL"},
-    {"key": "BRENT CRUDE", "yahoo": "BZ=F", "tv_eq": "NYMEX:BZ1!", "tv_fut": "NYMEX:BZ1!", "label": "BRENT CRUDE"},
-    {"key": "GOLD", "yahoo": "GC=F", "tv_eq": "COMEX:GC1!", "tv_fut": "COMEX:GC1!", "label": "GOLD"},
-    {"key": "SILVER", "yahoo": "SI=F", "tv_eq": "COMEX:SI1!", "tv_fut": "COMEX:SI1!", "label": "SILVER"},
-    {"key": "USD/INR", "yahoo": "INR=X", "tv_eq": "FX_IDC:USDINR", "tv_fut": "FX_IDC:USDINR", "label": "USDINR"},
-    {"key": "S&P 500", "yahoo": "^GSPC", "tv_eq": "SP:SPX", "tv_fut": "CME_MINI:ES1!", "label": "S&P 500"},
-    {"key": "NASDAQ 100", "yahoo": "^NDX", "tv_eq": "NASDAQ:NDX", "tv_fut": "CME_MINI:NQ1!", "label": "NASDAQ 100"},
-    {"key": "DOLLAR INDEX", "yahoo": "DX-Y.NYB", "tv_eq": "TVC:DXY", "tv_fut": "ICEUS:DX1!", "label": "DXY"}
-)
-
 TV_INTERVAL = {
     "3m": "3", "5m": "5", "10m": "10", "15m": "15", "30m": "30",
     "75m": "75", "1h": "60", "2h": "120", "4h": "240", "6h": "360",
     "1d": "D", "1w": "W", "1M": "M"
 }
 
-def tradingview_link(symbol: str, tf: str, is_future: bool = False, custom_tv: str = "") -> str:
+def tradingview_link(symbol: str, tf: str, is_future: bool = False) -> str:
     interval = TV_INTERVAL.get(tf, "15")
-    tv_sym = custom_tv if custom_tv else (f"NSE:{symbol}1!" if is_future else f"NSE:{symbol}")
+    tv_sym = f"NSE:{symbol}1!" if is_future else f"NSE:{symbol}"
     return f"https://in.tradingview.com/chart/?symbol={quote(tv_sym, safe='')}&interval={interval}"
 
 INDEX_EXCLUSIONS = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYIT", "NIFTYNXT50"}
@@ -107,8 +95,7 @@ def get_verified_nse_fno_list() -> tuple[str, ...]:
                 (df["SEM_SEGMENT"].astype(str).str.upper() == "NSE_FNO") &
                 (df["SEM_INSTRUMENT_NAME"].astype(str).str.upper() == "FUTSTK")
             )
-            fno = df[cond]
-            raw_syms = fno["SEM_UNDERLYING_SYMBOL"].dropna().unique()
+            raw_syms = df[cond]["SEM_UNDERLYING_SYMBOL"].dropna().unique()
             clean = [str(s).strip().upper() for s in raw_syms if str(s).strip() and str(s).strip().upper() not in INDEX_EXCLUSIONS and not any(str(s).strip().upper().startswith(x) for x in ("NIFTY", "BANKNIFTY"))]
             clean = sorted(list(set(clean)))
             if len(clean) >= 150:
@@ -163,7 +150,7 @@ def get_verified_nse_fno_list() -> tuple[str, ...]:
     UBL ULTRACEMCO UNIONBANK UNITDSPR UPL VBL VEDL VOLTAS WIPRO YESBANK ZOMATO ZYDUSLIFE
     """.split())))
 
-# ===================================================================== CANDLE & RMA ATR UTILS
+# ===================================================================== PINE SCRIPT V6 MATH & RMA
 OHLCV = ("Open", "High", "Low", "Close", "Volume")
 
 def normalize_ohlcv(df: pd.DataFrame | None) -> pd.DataFrame:
@@ -187,54 +174,39 @@ def normalize_ohlcv(df: pd.DataFrame | None) -> pd.DataFrame:
     f.index = idx.tz_localize(IST) if idx.tz is None else idx.tz_convert(IST)
     return f.loc[~f.index.duplicated(keep="last")].sort_index()
 
-def calc_atr_rma(df: pd.DataFrame, length: int = 14) -> float:
-    """Pine Script v6 के rma(tr, 14) की तरह सटीक गणना"""
-    if len(df) < length + 1:
-        return 0.0
-    h = df["High"].to_numpy()
-    l = df["Low"].to_numpy()
-    c = df["Close"].to_numpy()
-    tr = np.zeros(len(df))
-    tr[0] = h[0] - l[0]
-    for i in range(1, len(df)):
-        tr[i] = max(h[i] - l[i], abs(h[i] - c[i-1]), abs(l[i] - c[i-1]))
-    rma = np.zeros(len(df))
-    rma[length - 1] = np.mean(tr[:length])
-    for i in range(length, len(df)):
-        rma[i] = (rma[i-1] * (length - 1) + tr[i]) / length
-    return float(rma[-1])
+def pine_rma(src: np.ndarray, length: int) -> np.ndarray:
+    alpha = 1.0 / length
+    out = np.full_like(src, np.nan)
+    if len(src) < length:
+        return out
+    out[length - 1] = np.mean(src[:length])
+    for i in range(length, len(src)):
+        out[i] = alpha * src[i] + (1 - alpha) * out[i - 1]
+    return out
 
 def get_scan_range_bounds(df_daily: pd.DataFrame, range_type: str = "Weekly") -> tuple[float, float]:
-    """Daily/Weekly/Monthly Candle (EOD) High + ATR(14) RMA, Low - ATR(14) RMA गणना"""
     if df_daily is None or df_daily.empty or len(df_daily) < 15:
         return 0.0, 1e9
-
     if range_type == "Daily":
-        ref_df = df_daily
-        atr = calc_atr_rma(ref_df, 14)
-        last_h = float(ref_df["High"].iloc[-1])
-        last_l = float(ref_df["Low"].iloc[-1])
+        ref = df_daily
     elif range_type == "Weekly":
-        ref_df = df_daily.resample("W-FRI").agg({
-            "Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"
-        }).dropna()
-        atr = calc_atr_rma(ref_df, 14)
-        last_h = float(ref_df["High"].iloc[-1])
-        last_l = float(ref_df["Low"].iloc[-1])
-    else:  # Monthly
-        ref_df = df_daily.resample("ME").agg({
-            "Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"
-        }).dropna()
-        atr = calc_atr_rma(ref_df, 14)
-        last_h = float(ref_df["High"].iloc[-1])
-        last_l = float(ref_df["Low"].iloc[-1])
+        ref = df_daily.resample("W-FRI").agg({"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}).dropna()
+    else:
+        ref = df_daily.resample("ME").agg({"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}).dropna()
 
-    if atr <= 0:
-        atr = (last_h - last_l) * 0.5  # फॉलबैक
+    if len(ref) < 15:
+        ref = df_daily
 
-    range_max = last_h + atr
-    range_min = max(0.0, last_l - atr)
-    return range_min, range_max
+    h = ref["High"].to_numpy()
+    l = ref["Low"].to_numpy()
+    c = ref["Close"].to_numpy()
+    tr = np.zeros(len(ref))
+    tr[0] = h[0] - l[0]
+    for i in range(1, len(ref)):
+        tr[i] = max(h[i] - l[i], abs(h[i] - c[i-1]), abs(l[i] - c[i-1]))
+    atr_series = pine_rma(tr, 14)
+    atr = atr_series[-1] if not np.isnan(atr_series[-1]) else (h[-1] - l[-1])
+    return max(0.0, float(l[-1] - atr)), float(h[-1] + atr)
 
 def resample_candles(df: pd.DataFrame, tf: str) -> pd.DataFrame:
     df = normalize_ohlcv(df)
@@ -250,80 +222,230 @@ def resample_candles(df: pd.DataFrame, tf: str) -> pd.DataFrame:
         "Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"
     }).dropna().sort_index() if rule else df
 
-# ===================================================================== ZONE DETECTION
-def detect_zones(df: pd.DataFrame, tf: str, symbol: str, range_min: float, range_max: float,
-                 is_global: bool = False, tv_eq_custom: str = "", tv_fut_custom: str = "") -> list[dict]:
-    if len(df) < 8:
-        return []
-    c = df["Close"].to_numpy()
-    o = df["Open"].to_numpy()
-    h = df["High"].to_numpy()
-    l = df["Low"].to_numpy()
-    zones = []
-    
-    ltp = c[-1]
-    chart_eq_url = tradingview_link(symbol, tf, is_future=False, custom_tv=tv_eq_custom)
-    chart_fut_url = tradingview_link(symbol, tf, is_future=True, custom_tv=tv_fut_custom)
+# ===================================================================== PINE SCRIPT V6 CANDIDATE & STATE ENGINE
+@dataclass
+class PineCandidate:
+    valid: bool
+    baseCount: int
+    prox: float
+    dist: float
+    mid: float
+    demand: bool
+    score: int
+    pattern: str
+    category: str
+    outHigh: float
+    outLow: float
 
-    scan_depth = min(len(df) - 2, 7)
-    for i in range(len(df) - 2, len(df) - 2 - scan_depth, -1):
-        if i < 2:
-            break
-        span = h[i] - l[i]
-        if span <= 0:
-            continue
-        body = abs(c[i] - o[i])
+class PineV6ZoneEngine:
+    def __init__(self, df: pd.DataFrame):
+        self.df = df
+        self.o = df["Open"].to_numpy(dtype=float)
+        self.h = df["High"].to_numpy(dtype=float)
+        self.l = df["Low"].to_numpy(dtype=float)
+        self.c = df["Close"].to_numpy(dtype=float)
+        self.v = df["Volume"].to_numpy(dtype=float)
+        self.n = len(df)
         
-        # Bullish Demand
-        if c[i] > o[i] and (body / span) >= 0.50:
-            base_hi = max(h[i-1], h[i-2])
-            base_lo = min(l[i-1], l[i-2])
-            # केवल तयशुदा ATR Scan Range के भीतर का ही ज़ोन लिया जाएगा
-            if c[i] > base_hi and (range_min <= base_hi <= range_max or range_min <= base_lo <= range_max):
-                dist_pct = round(abs(ltp - base_hi) / ltp * 100, 2)
+        # TR & RMA ATR(14)
+        tr = np.zeros(self.n)
+        if self.n > 0:
+            tr[0] = self.h[0] - self.l[0]
+            for i in range(1, self.n):
+                tr[i] = max(self.h[i] - self.l[i], abs(self.h[i] - self.c[i-1]), abs(self.l[i] - self.c[i-1]))
+        self.tr = tr
+        self.atr = pine_rma(tr, 14)
+        
+        # Volume SMA(20)
+        vol_s = pd.Series(self.v).rolling(20).mean().to_numpy()
+        self.vol_sma = vol_s
+
+    def wick_pct(self, i: int) -> float:
+        r = self.h[i] - self.l[i]
+        return 0.0 if r == 0 else ((self.h[i] - max(self.o[i], self.c[i])) + (min(self.o[i], self.c[i]) - self.l[i])) / r
+
+    def body_pct(self, i: int) -> float:
+        r = self.h[i] - self.l[i]
+        return 0.0 if r == 0 else abs(self.c[i] - self.o[i]) / r
+
+    def is_bull(self, i: int) -> bool: return self.c[i] > self.o[i]
+    def is_bear(self, i: int) -> bool: return self.o[i] > self.c[i]
+
+    def evaluate_candidate(self, i: int, bc: int) -> PineCandidate:
+        li = i - (bc + 1)
+        pi = li - 1
+        if pi < 0 or np.isnan(self.atr[li]):
+            return PineCandidate(False, bc, 0, 0, 0, False, 0, "", "", 0, 0)
+
+        inTR = self.tr[li]
+        inLow, inHigh, inClose = self.l[li], self.h[li], self.c[li]
+        inRange = inHigh - inLow
+        inBull, inBear = self.is_bull(li), self.is_bear(li)
+
+        if inRange == 0 or self.body_pct(li) < 0.60:
+            return PineCandidate(False, bc, 0, 0, 0, False, 0, "", "", 0, 0)
+
+        # Opposite Cover Check
+        opposite = (inBull and self.is_bear(pi)) or (inBear and self.is_bull(pi))
+        prevHi = max(self.o[pi], self.c[pi])
+        prevLo = min(self.o[pi], self.c[pi])
+        overlap = max(0.0, min(prevHi, inHigh) - max(prevLo, inLow))
+        if opposite and (overlap / inRange) >= 0.50:
+            return PineCandidate(False, bc, 0, 0, 0, False, 0, "", "", 0, 0)
+
+        bullClv = (inClose - inLow) / inRange
+        bearClv = (inHigh - inClose) / inRange
+
+        # Base candles check
+        baseOK = True
+        baseTR = 0.0
+        baseHigh = -1.0
+        baseLow = 1e12
+        for b in range(1, bc + 1):
+            idx = i - b
+            if np.isnan(self.atr[idx]) or self.tr[idx] > 1.0 * self.atr[idx]:
+                baseOK = False
+                break
+            baseTR = max(baseTR, self.tr[idx])
+            baseHigh = max(baseHigh, self.h[idx])
+            baseLow = min(baseLow, self.l[idx])
+
+        if not baseOK or baseTR == 0:
+            return PineCandidate(False, bc, 0, 0, 0, False, 0, "", "", 0, 0)
+
+        effectiveMult = 1.5 if bc == 1 else 2.0
+        if inTR < effectiveMult * baseTR or not (inTR >= 1.0 * self.atr[li]):
+            return PineCandidate(False, bc, 0, 0, 0, False, 0, "", "", 0, 0)
+
+        outTR = self.tr[i]
+        demand = self.is_bull(i)
+        supply = self.is_bear(i)
+        if not (demand or supply):
+            return PineCandidate(False, bc, 0, 0, 0, False, 0, "", "", 0, 0)
+
+        explosive = outTR >= 1.2 * self.atr[i]
+        wickOK = self.wick_pct(i) <= 0.30
+        hierarchy = (outTR >= 1.0 * inTR) and (inTR > baseTR)
+        volumeOK = self.v[i] > self.v[li]
+
+        # Imbalance
+        if demand:
+            gap = self.l[i] > baseHigh
+            imbalance = gap or (self.c[i] > inHigh)
+        else:
+            gap = self.h[i] < baseLow
+            imbalance = gap or (self.c[i] < inLow)
+
+        bodyEngulf = min(self.o[i], self.c[i]) <= baseLow and max(self.o[i], self.c[i]) >= baseHigh
+        if bodyEngulf and not gap:
+            return PineCandidate(False, bc, 0, 0, 0, False, 0, "", "", 0, 0)
+
+        rbr = inBull and bullClv >= 0.60 and demand
+        dbr = inBear and bearClv >= 0.60 and demand
+        dbd = inBear and bearClv >= 0.60 and supply
+        rbd = inBull and bullClv >= 0.60 and supply
+
+        if not ((rbr or dbr or dbd or rbd) and explosive and wickOK and hierarchy and volumeOK and imbalance):
+            return PineCandidate(False, bc, 0, 0, 0, False, 0, "", "", 0, 0)
+
+        # Pine Score Rules
+        score = 0
+        if bc == 1: score += 15
+        if inTR >= 1.5 * self.atr[li]: score += 10
+        if outTR >= 2.0 * inTR: score += 15
+        if inTR >= 2.0 * baseTR and outTR >= 2.0 * inTR: score += 15
+        if self.v[i] > self.vol_sma[i]: score += 10
+
+        outRange = self.h[i] - self.l[i]
+        bodyPos = ((self.c[i] - self.l[i]) / outRange) if (demand and outRange > 0) else (((self.h[i] - self.c[i]) / outRange) if outRange > 0 else 0.0)
+        if demand:
+            if dbr:
+                if bodyPos >= 0.80 or self.body_pct(i) >= 0.60: score += 15
+            elif bodyPos >= 0.80: score += 15
+        elif bodyPos >= 0.80: score += 15
+
+        oppositeBase = any((demand and self.is_bear(i - b)) or (supply and self.is_bull(i - b)) for b in range(1, bc + 1))
+        if oppositeBase: score += 10
+        score += 10
+        if gap: score += 10
+
+        if score < 40:
+            return PineCandidate(False, bc, 0, 0, 0, False, 0, "", "", 0, 0)
+
+        prox = baseHigh if demand else baseLow
+        dist = baseLow if demand else baseHigh
+        mid = (self.h[i] - 1.0 * (self.h[i] - self.l[i])) if demand else (self.l[i] + 1.0 * (self.h[i] - self.l[i]))
+        pattern = "RBR" if rbr else ("DBR" if dbr else ("DBD" if dbd else "RBD"))
+        category = "Continuation" if (rbr or dbd) else "Reversal"
+        return PineCandidate(True, bc, prox, dist, mid, demand, score, pattern, category, self.h[i], self.l[i])
+
+    def scan_active_zones(self, range_min: float, range_max: float) -> list[dict]:
+        zones = []
+        ltp = self.c[-1]
+        start_bar = max(14, 3 + 3, 11)
+
+        # Scanning bars
+        for i in range(start_bar, self.n):
+            for bc in range(1, 4):
+                cand = self.evaluate_candidate(i, bc)
+                if not cand.valid:
+                    continue
+
+                # Pine duplicate check (atr * 0.25)
+                dup = any(z["demand"] == cand.demand and abs(z["prox"] - cand.prox) < self.atr[i] * 0.25 for z in zones if z["state"] != "Broken")
+                if dup:
+                    continue
+
+                # Scan Range Filter (High+ATR, Low-ATR)
+                if not (range_min <= cand.prox <= range_max or range_min <= cand.dist <= range_max):
+                    continue
+
                 zones.append({
-                    "Equity_Link": chart_eq_url,
-                    "Future_Link": chart_fut_url,
-                    "Equity_Name": symbol,
-                    "TF": tf,
-                    "Zone Side": "🟢 Demand",
-                    "Pattern": "DBR" if o[i-2] > c[i-2] else "RBR",
-                    "Status": "Fresh" if ltp >= base_hi else "Tested",
-                    "Score": 85,
-                    "Proximal (₹)": round(base_hi, 2),
-                    "Distal (₹)": round(base_lo, 2),
-                    "Current LTP": round(ltp, 2),
-                    "Distance Gap %": dist_pct,
-                    "Created Date": df.index[i].strftime("%d-%b %H:%M"),
+                    "prox": cand.prox, "dist": cand.dist, "mid": cand.mid,
+                    "demand": cand.demand, "score": cand.score, "pattern": cand.pattern,
+                    "state": "Fresh", "touches": 0, "time": self.df.index[i],
+                    "outHigh": cand.outHigh, "outLow": cand.outLow
                 })
                 break
 
-        # Bearish Supply
-        elif o[i] > c[i] and (body / span) >= 0.50:
-            base_hi = max(h[i-1], h[i-2])
-            base_lo = min(l[i-1], l[i-2])
-            # केवल तयशुदा ATR Scan Range के भीतर का ही ज़ोन लिया जाएगा
-            if c[i] < base_lo and (range_min <= base_lo <= range_max or range_min <= base_hi <= range_max):
-                dist_pct = round(abs(ltp - base_lo) / ltp * 100, 2)
-                zones.append({
-                    "Equity_Link": chart_eq_url,
-                    "Future_Link": chart_fut_url,
-                    "Equity_Name": symbol,
-                    "TF": tf,
-                    "Zone Side": "🔴 Supply",
-                    "Pattern": "RBD" if c[i-2] > o[i-2] else "DBD",
-                    "Status": "Fresh" if ltp <= base_lo else "Tested",
-                    "Score": 85,
-                    "Proximal (₹)": round(base_lo, 2),
-                    "Distal (₹)": round(base_hi, 2),
-                    "Current LTP": round(ltp, 2),
-                    "Distance Gap %": dist_pct,
-                    "Created Date": df.index[i].strftime("%d-%b %H:%M"),
-                })
-                break
-    return zones
+            # State Update Loop (Fresh -> Tested -> Broken)
+            low_i, high_i = self.l[i], self.h[i]
+            for z in zones:
+                if z["state"] == "Fresh":
+                    if z["demand"]:
+                        if low_i <= z["dist"]: z["state"] = "Broken"
+                        elif low_i <= z["mid"]: z["state"] = "Tested"; z["touches"] += 1
+                    else:
+                        if high_i >= z["dist"]: z["state"] = "Broken"
+                        elif high_i >= z["mid"]: z["state"] = "Tested"; z["touches"] += 1
+                elif z["state"] == "Tested":
+                    if z["demand"]:
+                        if low_i <= z["dist"]: z["state"] = "Broken"
+                        elif low_i <= z["mid"]: z["touches"] += 1
+                    else:
+                        if high_i >= z["dist"]: z["state"] = "Broken"
+                        elif high_i >= z["mid"]: z["touches"] += 1
+                if z["state"] == "Tested" and z["touches"] > 1:
+                    z["state"] = "Broken"
 
-# ===================================================================== SAFE DOWNLOAD
+        # केवल सक्रिय (Fresh या Tested) ज़ोन लौटाएं
+        active = [z for z in zones if z["state"] in ("Fresh", "Tested")]
+        out = []
+        for z in active:
+            dist_pct = round(abs(ltp - z["prox"]) / ltp * 100, 2)
+            out.append({
+                "prox": round(z["prox"], 2),
+                "dist": round(z["dist"], 2),
+                "demand": z["demand"],
+                "pattern": z["pattern"],
+                "state": z["state"],
+                "ltp": round(ltp, 2),
+                "dist_pct": dist_pct,
+                "created": z["time"].strftime("%d-%b %H:%M")
+            })
+        return out
+
+# ===================================================================== SAFE DATA LOADER
 def _download_safe_batch(tickers: list[str], period: str, interval: str) -> dict[str, pd.DataFrame]:
     import yfinance as yf
     out = {}
@@ -344,16 +466,14 @@ def _download_safe_batch(tickers: list[str], period: str, interval: str) -> dict
     return out
 
 @st.cache_data(ttl=120, show_spinner=False)
-def load_all_market_data(universe_type: str, tf_group: str, fno_pool: tuple[str, ...]) -> tuple[dict[str, pd.DataFrame], dict[str, pd.DataFrame]]:
+def load_all_market_data(tf_group: str, symbols: tuple[str, ...]) -> tuple[dict[str, pd.DataFrame], dict[str, pd.DataFrame]]:
     interval = "1m" if tf_group == "intraday" else "1d"
     period = "5d" if tf_group == "intraday" else "2y"
 
-    symbols = fno_pool if "NSE All Future" in universe_type else fno_pool[:50]
-    
-    # 1. टाइमफ्रेम कैंडल्स डाउनलोड
     chunk_size = 15
     chunks = [list(symbols)[i:i + chunk_size] for i in range(0, len(symbols), chunk_size)]
     tf_data: dict[str, pd.DataFrame] = {}
+
     with ThreadPoolExecutor(max_workers=4) as pool:
         futures = [pool.submit(_download_safe_batch, [f"{s}.NS" for s in part], period, interval) for part in chunks]
         for fut in futures:
@@ -362,7 +482,6 @@ def load_all_market_data(universe_type: str, tf_group: str, fno_pool: tuple[str,
             except Exception:
                 pass
 
-    # 2. ATR 14 Range के लिए Daily कैंडल्स (हमेशा 1 साल का डेटा)
     daily_data: dict[str, pd.DataFrame] = {}
     if tf_group == "intraday":
         with ThreadPoolExecutor(max_workers=4) as pool:
@@ -382,36 +501,20 @@ live_fno_symbols = get_verified_nse_fno_list()
 fno_set = set(live_fno_symbols)
 
 with st.container():
-    c1, c2, c3, c4, c5, c6, c7, c8 = st.columns([1.5, 1.8, 1.1, 0.9, 0.9, 1.0, 1.0, 0.7])
+    c1, c2, c3, c4, c5, c6, c7 = st.columns([1.6, 2.0, 1.1, 0.9, 0.9, 1.2, 0.8])
     with c1:
-        universe_choice = st.selectbox(
-            "📁 Universe",
-            [f"NSE All Future Stocks ({len(live_fno_symbols)})", "Top 50 F&O", "Global Markets"],
-            index=0
-        )
+        universe_choice = st.selectbox("📁 Universe", [f"NSE All Future Stocks ({len(live_fno_symbols)})"], index=0)
     with c2:
-        selected_tfs = st.multiselect(
-            "⏱️ Timeframe (13 Total)",
-            list(TIMEFRAMES),
-            default=["15m", "1h", "1d"]
-        )
+        selected_tfs = st.multiselect("⏱️ Timeframe (13 Total)", list(TIMEFRAMES), default=["15m", "1h", "1d"])
     with c3:
-        # Range Filter Dropdown (Default Weekly)
-        range_choice = st.selectbox(
-            "🎯 Scan Range",
-            ["Weekly (Default)", "Daily", "Monthly"],
-            index=0
-        )
+        range_choice = st.selectbox("🎯 Scan Range", ["Weekly (Default)", "Daily", "Monthly"], index=0)
     with c4:
         side_filter = st.selectbox("⚖️ Side", ["All", "🟢 Demand", "🔴 Supply"], index=0)
     with c5:
         state_filter = st.selectbox("📌 Status", ["All", "Fresh", "Tested"], index=0)
     with c6:
-        # Deduplication विकल्प
-        dedup_choice = st.selectbox("⚡ Duplication", ["Unique (Nearest)", "All Zones"], index=0)
-    with c7:
         search_query = st.text_input("🔍 Search", placeholder="RELIANCE, SWIGGY...")
-    with c8:
+    with c7:
         st.write("")
         st.write("")
         rescan = st.button("🚀 Scan", type="primary", use_container_width=True)
@@ -420,34 +523,55 @@ if not selected_tfs:
     st.warning("कृपया कम से कम एक Timeframe चुनें।")
     st.stop()
 
-# ===================================================================== SCANNING
+# ===================================================================== EXECUTION
 range_type = "Weekly" if "Weekly" in range_choice else ("Daily" if "Daily" in range_choice else "Monthly")
 tf_group = "intraday" if any(t in MINUTE_TFS or t in HOUR_TFS for t in selected_tfs) else "daily"
-univ_key = "NSE All Future Stocks" if "NSE All Future" in universe_choice else universe_choice
 
-with st.spinner(f"Scanning within {range_type} ATR(14) RMA Range..."):
-    tf_bundle, daily_bundle = load_all_market_data(univ_key, tf_group, live_fno_symbols)
-    all_detected_zones = []
+with st.spinner(f"Running Pine v6 Engine across {len(live_fno_symbols)} stocks in {range_type} ATR Range..."):
+    tf_bundle, daily_bundle = load_all_market_data(tf_group, live_fno_symbols)
+    all_raw_zones = []
 
     for sym, raw_df in tf_bundle.items():
-        if sym not in fno_set:
-            continue
-        if raw_df is None or raw_df.empty:
+        if sym not in fno_set or raw_df is None or raw_df.empty:
             continue
 
-        # स्टॉक की विशिष्ट ATR Scan Range सीमाएं तय करें
         df_d = daily_bundle.get(sym, raw_df)
         r_min, r_max = get_scan_range_bounds(df_d, range_type=range_type)
 
         for tf in selected_tfs:
             resampled = resample_candles(raw_df, tf)
-            zones = detect_zones(resampled, tf, sym, range_min=r_min, range_max=r_max)
-            all_detected_zones.extend(zones)
+            if len(resampled) < 20:
+                continue
+            engine = PineV6ZoneEngine(resampled)
+            detected = engine.scan_active_zones(range_min=r_min, range_max=r_max)
+            for z in detected:
+                all_raw_zones.append({
+                    "Equity_Name": sym,
+                    "Equity_Link": tradingview_link(sym, tf, is_future=False),
+                    "Future_Link": tradingview_link(sym, tf, is_future=True),
+                    "TF": tf,
+                    "Zone Side": "🟢 Demand" if z["demand"] else "🔴 Supply",
+                    "Pattern": z["pattern"],
+                    "Status": z["state"],
+                    "Proximal (₹)": z["prox"],
+                    "Distal (₹)": z["dist"],
+                    "Current LTP": z["ltp"],
+                    "Distance Gap %": z["dist_pct"],
+                    "Created Date": z["created"],
+                })
 
-df_view = pd.DataFrame(all_detected_zones)
+df_view = pd.DataFrame(all_raw_zones)
 
-# ===================================================================== DISPLAY (SHEETS VIEW)
+# ===================================================================== MULTI-TF ZONE CONFLUENCE & DISPLAY
 if not df_view.empty:
+    # एक ही स्टॉक के ज़ोन अगर 2 या उससे अधिक टाइमफ्रेम में हैं तो उन्हें पहचानें
+    tf_overlap_counts = df_view.groupby(["Equity_Name", "Zone Side"])["TF"].transform("nunique")
+    
+    # स्कोर की जगह 'Multi-TF Zone' कॉलम
+    df_view["Multi-TF Zone"] = tf_overlap_counts.apply(
+        lambda count: f"🔥 Confluence ({count}x TF)" if count >= 3 else (f"⭐ Multi-TF (2x)" if count == 2 else "—")
+    )
+
     if side_filter != "All":
         df_view = df_view[df_view["Zone Side"] == side_filter]
     if state_filter != "All":
@@ -457,16 +581,12 @@ if not df_view.empty:
         pat = "|".join(re.escape(p) for p in parts)
         df_view = df_view[df_view["Equity_Name"].str.contains(pat, case=False, na=False, regex=True)]
 
-    # दूरी के आधार पर सॉर्ट करें
     df_view = df_view.sort_values(by="Distance Gap %", ascending=True).reset_index(drop=True)
 
-    # डुप्लीकेसी फ़िल्टर (Deduplication): प्रति स्टॉक केवल 1 सबसे नज़दीकी ज़ोन
-    if dedup_choice == "Unique (Nearest)":
-        df_view = df_view.drop_duplicates(subset=["Equity_Name"], keep="first").reset_index(drop=True)
-
+    # टेबल लेआउट (Score कॉलम पूरी तरह हटा दिया गया है)
     display_df = df_view[[
         "Equity_Link", "Future_Link", "TF", "Zone Side", "Pattern", "Status",
-        "Score", "Proximal (₹)", "Distal (₹)", "Current LTP", "Distance Gap %", "Created Date"
+        "Multi-TF Zone", "Proximal (₹)", "Distal (₹)", "Current LTP", "Distance Gap %", "Created Date"
     ]]
 
     st.dataframe(
@@ -486,7 +606,8 @@ if not df_view.empty:
             "Zone Side": st.column_config.TextColumn("Zone Side", width="small"),
             "Pattern": st.column_config.TextColumn("Pattern", width="small"),
             "Status": st.column_config.TextColumn("Status", width="small"),
-            "Score": st.column_config.NumberColumn("Score", format="%d", width="small"),
+            # नया कन्फ्लुएंस हाइलाइट कॉलम
+            "Multi-TF Zone": st.column_config.TextColumn("Multi-TF Highlight", width="medium"),
             "Proximal (₹)": st.column_config.NumberColumn("Proximal (₹)", format="%.2f"),
             "Distal (₹)": st.column_config.NumberColumn("Distal (₹)", format="%.2f"),
             "Current LTP": st.column_config.NumberColumn("Current LTP", format="₹%.2f"),
@@ -505,9 +626,9 @@ if not df_view.empty:
 
     st.markdown(f"""
     <div class="sheet-statusbar">
-        <span>Active Zones: <b>{len(display_df)}</b> | Filter: <b>{range_type} ATR(14) RMA Scan Range</b> | Deduplication: <b>{dedup_choice}</b></span>
-        <span>Only In-Range Zones Displayed | Out-of-range zones filtered out</span>
+        <span>Active Zones: <b>{len(display_df)}</b> | Range: <b>{range_type} ATR(14) RMA</b> | MTF Overlays Disabled in TradingView Charts</span>
+        <span>Score column replaced with Multi-TF Confluence Highlights (🔥 3x+ TF | ⭐ 2x TF)</span>
     </div>
     """, unsafe_allow_html=True)
 else:
-    st.info(f"चयनित {range_type} ATR Range में कोई ज़ोन नहीं मिला।")
+    st.info("चयनित फिल्टर के आधार पर कोई ज़ोन नहीं मिला।")

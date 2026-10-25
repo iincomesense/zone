@@ -3,27 +3,23 @@ from __future__ import annotations
 import logging as _logging
 _logging.getLogger("yfinance").setLevel(_logging.CRITICAL)
 
-import os
 import re
-import time
-import zipfile
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
-from datetime import date, datetime, timedelta
-from datetime import time as dtime
-from io import BytesIO, StringIO
-from typing import Any, Dict, List, Optional
+from datetime import datetime
+from typing import Any
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
-import requests
 import streamlit as st
 
-# Google Sheets स्टाइल कॉम्पैक्ट लेआउट
-st.set_page_config(page_title="Pine Zone Scanner (Sheets View)", page_icon="📊",
-                   layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(
+    page_title="Pine Zone Scanner (Sheets View)",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -36,18 +32,6 @@ st.markdown("""
 [data-testid="stHeader"] { background: #161b22; height: 2.5rem; }
 
 /* Google Sheets Toolbar Container */
-.sheet-toolbar {
-    background: #161b22;
-    border: 1px solid #30363d;
-    border-radius: 6px;
-    padding: 6px 12px;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-bottom: 8px;
-}
-
-/* Compact Widget Inputs */
 div[data-testid="stTextInput"] input, div[data-testid="stSelectbox"] select {
     background-color: #0d1117 !important;
     border: 1px solid #30363d !important;
@@ -76,28 +60,70 @@ div[data-testid="stTextInput"] input, div[data-testid="stSelectbox"] select {
 </style>
 """, unsafe_allow_html=True)
 
-# ===================================================================== CONFIG & CONSTANTS
+# ===================================================================== UNIVERSE DEFINITIONS
 TIMEFRAMES = ("3m", "5m", "10m", "15m", "30m", "75m", "1h", "2h", "4h", "1d", "1w", "1M")
 MINUTE_TFS = {"3m", "5m", "10m", "15m", "30m", "75m"}
 HOUR_TFS = {"1h", "2h", "4h"}
-DAY_TFS = {"1d", "1w", "1M"}
 
-FNO_FALLBACK = (
-    "RELIANCE", "HDFCBANK", "ICICIBANK", "INFY", "TCS", "ITC", "LT", "SBIN", "BHARTIARTL",
-    "AXISBANK", "KOTAKBANK", "TATAMOTORS", "BAJFINANCE", "MARUTI", "SUNPHARMA", "TITAN"
-)
+# NSE ALL F&O STOCKS (Full List)
+NSE_ALL_FNO = tuple(sorted(set("""
+AARTIIND ABB ABBOTINDIA ABCAPITAL ABFRL ACC ADANIENSOL ADANIENT ADANIGREEN
+ADANIPORTS ALKEM AMBUJACEM ANGELONE APOLLOHOSP APOLLOTYRE ASHOKLEY ASIANPAINT
+ASTRAL ATUL AUBANK AUROPHARMA AXISBANK BAJAJ-AUTO BAJAJFINSV BAJFINANCE
+BALKRISIND BANDHANBNK BANKBARODA BANKINDIA BATAINDIA BEL BERGEPAINT BHARATFORG
+BHARTIARTL BHEL BIOCON BOSCHLTD BPCL BRITANNIA BSE CANBK CANFINHOME
+CHAMBLFERT CHOLAFIN CIPLA COALINDIA COFORGE COLPAL CONCOR CROMPTON CUB
+CUMMINSIND CYIENT DABUR DALBHARAT DEEPAKNTR DELHIVERY DIVISLAB DIXON DLF
+DMART DRREDDY EICHERMOT ESCORTS EXIDEIND FEDERALBNK FORTIS GAIL GLENMARK
+GMRAIRPORT GODREJCP GODREJPROP GRANULES GRASIM GUJGASLTD HAL HAVELLS HCLTECH
+HDFCAMC HDFCBANK HDFCLIFE HEROMOTOCO HINDALCO HINDCOPPER HINDPETRO HINDUNILVR
+HUDCO ICICIBANK ICICIGI ICICIPRULI IDEA IDFCFIRSTB IEX INDHOTEL INDIAMART
+INDIGO INDUSINDBK INDUSTOWER INFY IOC IONEXCH IRB IRCTC IRFC ITC JINDALSTEL
+JIOFIN JSWENERGY JSWSTEEL JUBLFOOD KALYANKJIL KANSAINER KEI KOTAKBANK
+KPITTECH LALPATHLAB LAURUSLABS LT LTF LICI LTIM LTTS LUPIN M&M M&MFIN
+MANAPPURAM MARICO MARUTI MCDOWELL-N MCX METROPOLIS MFSL MGL MOTHERSON
+MPHASIS MUTHOOTFIN NATIONALUM NAUKRI NBCC NCC NESTLEIND NHPC NMDC NTPC
+OBEROIRLTY OFSS OIL ONGC PAGEIND PERSISTENT PETRONET PFC PGEL PIIND PIDILITIND
+PNB POLYCAB POWERGRID POWERINDIA PRESTIGE PVRINOX RAMCOCEM RBLBANK RECLTD
+RELIANCE SAIL SBICARD SBILIFE SBIN SHREECEM SHRIRAMFIN SIEMENS SONACOMS
+SRF SUNPHARMA SUPREMEIND SYNGENE TATACHEM TATACOMM TATACONSUM TATAELXSI
+TATAMOTORS TATAPOWER TATASTEEL TCS TECHM TITAGARH TITAN TORNTPHARM TRENT
+TVSMOTOR UBL ULTRACEMCO UNIONBANK UNITDSPR UPL VBL VEDL VOLTAS
+WIPRO YESBANK ZYDUSLIFE
+""".split())))
 
 GLOBAL_INSTRUMENTS = (
-    {"key": "NIFTY 50", "yahoo": "^NSEI", "tv": "NSE:NIFTY", "label": "NIFTY 50"},
-    {"key": "BANKNIFTY", "yahoo": "^NSEBANK", "tv": "NSE:BANKNIFTY", "label": "NIFTY BANK"},
-    {"key": "CRUDE OIL", "yahoo": "CL=F", "tv": "NYMEX:CL1!", "label": "Crude Oil"},
+    {"key": "NIFTY 50", "yahoo": "^NSEI", "tv": "NSE:NIFTY1!", "label": "NIFTY 50 (FUT)"},
+    {"key": "BANKNIFTY", "yahoo": "^NSEBANK", "tv": "NSE:BANKNIFTY1!", "label": "BANK NIFTY (FUT)"},
+    {"key": "CRUDE OIL", "yahoo": "CL=F", "tv": "NYMEX:CL1!", "label": "WTI Crude Oil"},
+    {"key": "BRENT CRUDE", "yahoo": "BZ=F", "tv": "NYMEX:BZ1!", "label": "Brent Crude"},
     {"key": "GOLD", "yahoo": "GC=F", "tv": "COMEX:GC1!", "label": "Gold Futures"},
-    {"key": "USD/INR", "yahoo": "INR=X", "tv": "FX_IDC:USDINR", "label": "USD/INR"}
+    {"key": "SILVER", "yahoo": "SI=F", "tv": "COMEX:SI1!", "label": "Silver Futures"},
+    {"key": "USD/INR", "yahoo": "INR=X", "tv": "FX_IDC:USDINR", "label": "USD/INR"},
+    {"key": "S&P 500", "yahoo": "^GSPC", "tv": "SP:SPX", "label": "S&P 500"},
+    {"key": "NASDAQ 100", "yahoo": "^NDX", "tv": "NASDAQ:NDX", "label": "NASDAQ 100"},
+    {"key": "DOLLAR INDEX", "yahoo": "DX-Y.NYB", "tv": "TVC:DXY", "label": "US Dollar Index"}
 )
 
+TV_INTERVAL = {
+    "3m": "3", "5m": "5", "10m": "10", "15m": "15", "30m": "30",
+    "75m": "75", "1h": "60", "2h": "120", "4h": "240", "1d": "D", "1w": "W", "1M": "M"
+}
+
+def tradingview_link(symbol: str, tf: str, is_global: bool = False, custom_tv: str = "") -> str:
+    """सिंबल और उसी टाइमफ्रेम के लिए TradingView चार्ट लिंक बनाएँ"""
+    interval = TV_INTERVAL.get(tf, "15")
+    if is_global and custom_tv:
+        tv_sym = custom_tv
+    else:
+        # NSE Current Month Futures चार्ट
+        tv_sym = f"NSE:{symbol}1!"
+    encoded = quote(tv_sym, safe="")
+    return f"https://in.tradingview.com/chart/?symbol={encoded}&interval={interval}"
+
+# ===================================================================== DATA PROCESSING
 OHLCV = ("Open", "High", "Low", "Close", "Volume")
 
-# ===================================================================== DATA UTILS
 def normalize_ohlcv(df: pd.DataFrame | None) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame(columns=list(OHLCV))
@@ -121,9 +147,7 @@ def normalize_ohlcv(df: pd.DataFrame | None) -> pd.DataFrame:
 
 def resample_candles(df: pd.DataFrame, tf: str) -> pd.DataFrame:
     df = normalize_ohlcv(df)
-    if df.empty:
-        return df
-    if tf == "1d":
+    if df.empty or tf == "1d":
         return df
     rule_map = {"3m": "3min", "5m": "5min", "10m": "10min", "15m": "15min", "30m": "30min",
                 "75m": "75min", "1h": "60min", "2h": "120min", "4h": "240min"}
@@ -134,9 +158,9 @@ def resample_candles(df: pd.DataFrame, tf: str) -> pd.DataFrame:
         "Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"
     }).dropna().sort_index()
 
-# ===================================================================== CORE ENGINE (ZONE SCAN)
-def detect_zones(df: pd.DataFrame, tf: str, symbol: str) -> list[dict]:
-    if len(df) < 20:
+# ===================================================================== ZONE DETECTION
+def detect_zones(df: pd.DataFrame, tf: str, symbol: str, is_global: bool = False, tv_custom: str = "") -> list[dict]:
+    if len(df) < 15:
         return []
     c = df["Close"].to_numpy()
     o = df["Open"].to_numpy()
@@ -144,144 +168,224 @@ def detect_zones(df: pd.DataFrame, tf: str, symbol: str) -> list[dict]:
     l = df["Low"].to_numpy()
     zones = []
     
-    # Fast Zone Vector Scanning
     ltp = c[-1]
-    for i in range(len(df) - 4, 3, -1):
-        # Demand (RBR / DBR)
-        if c[i] > o[i] and (h[i] - l[i]) > 0:
-            body = abs(c[i] - o[i])
-            if body / (h[i] - l[i]) > 0.6:  # Leg Out Bullish
-                base_hi = max(h[i-1], h[i-2])
-                base_lo = min(l[i-1], l[i-2])
-                if c[i] > base_hi:
-                    dist_pct = round(abs(ltp - base_hi) / ltp * 100, 2)
-                    zones.append({
-                        "Symbol": symbol, "TF": tf, "Zone": "🟢 Demand", "Pattern": "DBR/RBR",
-                        "State": "Fresh" if ltp > base_hi else "Tested",
-                        "Score": 85, "Proximal": round(base_hi, 2), "Distal": round(base_lo, 2),
-                        "LTP": round(ltp, 2), "Gap %": dist_pct, "Created": df.index[i].strftime("%d-%b %H:%M")
-                    })
-                    break
-        # Supply (DBD / RBD)
-        if o[i] > c[i] and (h[i] - l[i]) > 0:
-            body = abs(c[i] - o[i])
-            if body / (h[i] - l[i]) > 0.6:  # Leg Out Bearish
-                base_hi = max(h[i-1], h[i-2])
-                base_lo = min(l[i-1], l[i-2])
-                if c[i] < base_lo:
-                    dist_pct = round(abs(ltp - base_lo) / ltp * 100, 2)
-                    zones.append({
-                        "Symbol": symbol, "TF": tf, "Zone": "🔴 Supply", "Pattern": "RBD/DBD",
-                        "State": "Fresh" if ltp < base_lo else "Tested",
-                        "Score": 85, "Proximal": round(base_lo, 2), "Distal": round(base_hi, 2),
-                        "LTP": round(ltp, 2), "Gap %": dist_pct, "Created": df.index[i].strftime("%d-%b %H:%M")
-                    })
-                    break
+    chart_url = tradingview_link(symbol, tf, is_global=is_global, custom_tv=tv_custom)
+
+    for i in range(len(df) - 3, 2, -1):
+        span = h[i] - l[i]
+        if span <= 0:
+            continue
+        body = abs(c[i] - o[i])
+        
+        # Bullish Leg-Out (Demand Zone)
+        if c[i] > o[i] and (body / span) >= 0.55:
+            base_hi = max(h[i-1], h[i-2])
+            base_lo = min(l[i-1], l[i-2])
+            if c[i] > base_hi:
+                dist_pct = round(abs(ltp - base_hi) / ltp * 100, 2)
+                zones.append({
+                    "Symbol": chart_url,
+                    "Ticker": symbol,
+                    "TF": tf,
+                    "Zone Side": "🟢 Demand",
+                    "Pattern": "DBR" if o[i-2] > c[i-2] else "RBR",
+                    "Status": "Fresh" if ltp >= base_hi else "Tested",
+                    "Score": 85,
+                    "Proximal (₹)": round(base_hi, 2),
+                    "Distal (₹)": round(base_lo, 2),
+                    "Current LTP": round(ltp, 2),
+                    "Distance Gap %": dist_pct,
+                    "Created Date": df.index[i].strftime("%d-%b %H:%M"),
+                })
+                break
+
+        # Bearish Leg-Out (Supply Zone)
+        elif o[i] > c[i] and (body / span) >= 0.55:
+            base_hi = max(h[i-1], h[i-2])
+            base_lo = min(l[i-1], l[i-2])
+            if c[i] < base_lo:
+                dist_pct = round(abs(ltp - base_lo) / ltp * 100, 2)
+                zones.append({
+                    "Symbol": chart_url,
+                    "Ticker": symbol,
+                    "TF": tf,
+                    "Zone Side": "🔴 Supply",
+                    "Pattern": "RBD" if c[i-2] > o[i-2] else "DBD",
+                    "Status": "Fresh" if ltp <= base_lo else "Tested",
+                    "Score": 85,
+                    "Proximal (₹)": round(base_lo, 2),
+                    "Distal (₹)": round(base_hi, 2),
+                    "Current LTP": round(ltp, 2),
+                    "Distance Gap %": dist_pct,
+                    "Created Date": df.index[i].strftime("%d-%b %H:%M"),
+                })
+                break
     return zones
 
-# ===================================================================== BATCH DOWNLOAD
-@st.cache_data(ttl=180, show_spinner=False)
-def load_market_data(symbols: tuple[str, ...], tf_group: str):
+# ===================================================================== BATCH DOWNLOADER
+def _fetch_ticker_data(ticker_map: dict[str, str], period: str, interval: str) -> dict[str, pd.DataFrame]:
     import yfinance as yf
-    tickers = [f"{s}.NS" for s in symbols]
-    interval = "1m" if tf_group == "intraday" else "1d"
-    period = "5d" if tf_group == "intraday" else "1y"
-    
+    tickers = list(ticker_map.values())
     try:
         raw = yf.download(tickers, period=period, interval=interval, group_by="ticker",
-                          progress=False, threads=True, timeout=12)
+                          progress=False, threads=True, timeout=14)
         out = {}
-        for s in symbols:
-            tk = f"{s}.NS"
+        for sym, tk in ticker_map.items():
             try:
-                frame = raw[tk] if len(symbols) > 1 else raw
-                out[s] = normalize_ohlcv(frame)
+                frame = raw[tk] if len(tickers) > 1 else raw
+                out[sym] = normalize_ohlcv(frame)
             except Exception:
-                out[s] = pd.DataFrame()
+                out[sym] = pd.DataFrame()
         return out
     except Exception:
-        return {s: pd.DataFrame() for s in symbols}
+        return {sym: pd.DataFrame() for sym in ticker_map}
 
-# ===================================================================== UI - TOOLBAR (GOOGLE SHEETS STYLE)
-ss = st.session_state
+@st.cache_data(ttl=150, show_spinner=False)
+def load_all_market_data(universe_type: str, tf_group: str) -> dict[str, pd.DataFrame]:
+    interval = "1m" if tf_group == "intraday" else "1d"
+    period = "5d" if tf_group == "intraday" else "1y"
 
-# Toolbar Controls Row (एक ही रो में सभी कंट्रोल्स)
+    if universe_type == "Global Markets":
+        ticker_map = {item["key"]: item["yahoo"] for item in GLOBAL_INSTRUMENTS}
+        return _fetch_ticker_data(ticker_map, period, interval)
+
+    symbols = NSE_ALL_FNO if universe_type == "NSE All Future Stocks" else NSE_ALL_FNO[:50]
+    ticker_map = {s: f"{s}.NS" for s in symbols}
+
+    # Parallel chunking for speed
+    chunk_size = 35
+    sym_list = list(symbols)
+    chunks = [sym_list[i:i + chunk_size] for i in range(0, len(sym_list), chunk_size)]
+    combined: dict[str, pd.DataFrame] = {}
+
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        futures = [
+            pool.submit(_fetch_ticker_data, {s: ticker_map[s] for s in part}, period, interval)
+            for part in chunks
+        ]
+        for fut in futures:
+            try:
+                combined.update(fut.result())
+            except Exception:
+                pass
+    return combined
+
+# ===================================================================== TOOLBAR ROW (GOOGLE SHEETS)
 with st.container():
-    c1, c2, c3, c4, c5, c6, c7 = st.columns([1.2, 1.8, 1.2, 1.2, 1.2, 1.5, 0.8])
+    c1, c2, c3, c4, c5, c6, c7 = st.columns([1.6, 2.0, 1.1, 1.1, 1.2, 1.5, 0.9])
     with c1:
-        universe = st.selectbox("📁 Universe", ["Top 20", "Top 50", "Global"], index=0)
+        universe_choice = st.selectbox(
+            "📁 Universe",
+            ["NSE All Future Stocks", "Top 50 F&O", "Global Markets"],
+            index=0
+        )
     with c2:
-        selected_tfs = st.multiselect("⏱️ Timeframe", list(TIMEFRAMES), default=["15m", "1h", "1d"])
+        selected_tfs = st.multiselect(
+            "⏱️ Timeframe",
+            list(TIMEFRAMES),
+            default=["15m", "1h", "1d"]
+        )
     with c3:
         side_filter = st.selectbox("⚖️ Side", ["All", "🟢 Demand", "🔴 Supply"], index=0)
     with c4:
-        state_filter = st.selectbox("📌 State", ["All", "Fresh", "Tested"], index=1)
+        state_filter = st.selectbox("📌 Status", ["All", "Fresh", "Tested"], index=0)
     with c5:
-        sort_distance = st.selectbox("📏 Distance", ["Nearest ↑", "Farthest ↓"], index=0)
+        sort_mode = st.selectbox("📏 Distance", ["Nearest ↑", "Farthest ↓"], index=0)
     with c6:
-        query = st.text_input("🔍 Search", placeholder="e.g. RELIANCE, SBIN")
+        search_query = st.text_input("🔍 Search Symbol", placeholder="RELIANCE, NIFTY, Crude...")
     with c7:
         st.write("")
         st.write("")
-        refresh = st.button("🔄 Scan", type="primary", use_container_width=True)
+        rescan = st.button("🚀 Scan", type="primary", use_container_width=True)
 
-# Select Universe Pool
-symbols_to_scan = FNO_FALLBACK[:20] if universe == "Top 20" else FNO_FALLBACK
+if not selected_tfs:
+    st.warning("कृपया कम से कम एक Timeframe चुनें।")
+    st.stop()
+
+# ===================================================================== SCANNING
 tf_group = "intraday" if any(t in MINUTE_TFS or t in HOUR_TFS for t in selected_tfs) else "daily"
 
-# Execution
-with st.spinner("Processing Sheets Data Grid..."):
-    data_bundle = load_market_data(symbols_to_scan, tf_group)
-    all_zones = []
-    
-    for sym in symbols_to_scan:
-        raw_df = data_bundle.get(sym)
-        if raw_df is None or raw_df.empty:
-            continue
-        for tf in selected_tfs:
-            resampled = resample_candles(raw_df, tf)
-            zones = detect_zones(resampled, tf, sym)
-            all_zones.extend(zones)
+with st.spinner(f"Scanning {universe_choice} across {', '.join(selected_tfs)}..."):
+    data_bundle = load_all_market_data(universe_choice, tf_group)
+    all_detected_zones = []
 
-df_grid = pd.DataFrame(all_zones)
+    if universe_choice == "Global Markets":
+        for item in GLOBAL_INSTRUMENTS:
+            key = item["key"]
+            raw_df = data_bundle.get(key)
+            if raw_df is None or raw_df.empty:
+                continue
+            for tf in selected_tfs:
+                resampled = resample_candles(raw_df, tf)
+                zones = detect_zones(resampled, tf, item["label"], is_global=True, tv_custom=item["tv"])
+                all_detected_zones.extend(zones)
+    else:
+        for sym, raw_df in data_bundle.items():
+            if raw_df is None or raw_df.empty:
+                continue
+            for tf in selected_tfs:
+                resampled = resample_candles(raw_df, tf)
+                zones = detect_zones(resampled, tf, sym)
+                all_detected_zones.extend(zones)
 
-# ===================================================================== FILTERING & GOOGLE SHEETS DISPLAY
-if not df_grid.empty:
+df_view = pd.DataFrame(all_detected_zones)
+
+# ===================================================================== FILTER & RENDER
+if not df_view.empty:
     if side_filter != "All":
-        df_grid = df_grid[df_grid["Zone"] == side_filter]
+        df_view = df_view[df_view["Zone Side"] == side_filter]
     if state_filter != "All":
-        df_grid = df_grid[df_grid["State"] == state_filter]
-    if query.strip():
-        df_grid = df_grid[df_grid["Symbol"].str.contains(query.strip().upper(), na=False)]
-    
-    ascending = True if sort_distance == "Nearest ↑" else False
-    df_grid = df_grid.sort_values(by="Gap %", ascending=ascending).reset_index(drop=True)
+        df_view = df_view[df_view["Status"] == state_filter]
+    if search_query.strip():
+        parts = [p.strip() for p in re.split(r"[,\s]+", search_query) if p.strip()]
+        pat = "|".join(re.escape(p) for p in parts)
+        df_view = df_view[df_view["Ticker"].str.contains(pat, case=False, na=False, regex=True)]
 
-    # Google Sheets Table View Render
+    ascending = True if sort_mode.startswith("Nearest") else False
+    df_view = df_view.sort_values(by="Distance Gap %", ascending=ascending).reset_index(drop=True)
+
+    # Display Columns Order
+    display_df = df_view[[
+        "Symbol", "TF", "Zone Side", "Pattern", "Status", "Score",
+        "Proximal (₹)", "Distal (₹)", "Current LTP", "Distance Gap %", "Created Date"
+    ]]
+
+    # Google Sheets Table View
     st.dataframe(
-        df_grid,
+        display_df,
         column_config={
-            "Symbol": st.column_config.TextColumn("Symbol (Ticker)", width="medium"),
+            "Symbol": st.column_config.LinkColumn(
+                "Symbol (Click Chart)",
+                display_text=r"symbol=(?:NSE%3A)?([^&!]+)",
+                width="medium"
+            ),
             "TF": st.column_config.TextColumn("TF", width="small"),
-            "Zone": st.column_config.TextColumn("Zone Side", width="small"),
-            "State": st.column_config.TextColumn("Status", width="small"),
-            "Proximal": st.column_config.NumberColumn("Proximal (₹)", format="%.2f"),
-            "Distal": st.column_config.NumberColumn("Distal (₹)", format="%.2f"),
-            "LTP": st.column_config.NumberColumn("Current LTP", format="₹%.2f"),
-            "Gap %": st.column_config.ProgressColumn("Distance Gap %", min_value=0, max_value=15, format="%.2f%%"),
-            "Created": st.column_config.TextColumn("Created Date", width="medium"),
+            "Zone Side": st.column_config.TextColumn("Zone Side", width="small"),
+            "Pattern": st.column_config.TextColumn("Pattern", width="small"),
+            "Status": st.column_config.TextColumn("Status", width="small"),
+            "Score": st.column_config.NumberColumn("Score", format="%d", width="small"),
+            "Proximal (₹)": st.column_config.NumberColumn("Proximal (₹)", format="%.2f"),
+            "Distal (₹)": st.column_config.NumberColumn("Distal (₹)", format="%.2f"),
+            "Current LTP": st.column_config.NumberColumn("Current LTP", format="₹%.2f"),
+            "Distance Gap %": st.column_config.ProgressColumn(
+                "Distance Gap %",
+                min_value=0.0,
+                max_value=10.0,
+                format="%.2f%%"
+            ),
+            "Created Date": st.column_config.TextColumn("Created Date", width="medium"),
         },
         use_container_width=True,
         hide_index=False,
-        height=580
+        height=620
     )
-    
+
     # Status Bar
     st.markdown(f"""
     <div class="sheet-statusbar">
-        <span>Rows: <b>{len(df_grid)}</b> | Active Universe: {universe}</span>
-        <span>Auto-sync: Ready | Timeframes Active: {', '.join(selected_tfs)}</span>
+        <span>Rows: <b>{len(display_df)}</b> zones found | Universe: <b>{universe_choice}</b></span>
+        <span>TradingView charts auto-configured to exact zone timeframe | Data: Yahoo Real-time</span>
     </div>
     """, unsafe_allow_html=True)
 else:
-    st.info("चयनित फ़िल्टर के आधार पर कोई ज़ोन उपलब्ध नहीं है। कृपया टाइमफ्रेम या Universe बदलें।")
+    st.info("चयनित फिल्टर के आधार पर कोई ज़ोन नहीं मिला। कृपया अन्य Timeframe चुनें या Universe बदलें।")

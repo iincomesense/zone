@@ -25,7 +25,7 @@ st.set_page_config(
 
 IST = ZoneInfo("Asia/Kolkata")
 
-# ===================================================================== CSS
+# ===================================================================== CSS (Google Sheets Layout)
 st.markdown("""
 <style>
 :root { color-scheme: dark; }
@@ -59,48 +59,51 @@ div[data-testid="stTextInput"] input, div[data-testid="stSelectbox"] select {
 </style>
 """, unsafe_allow_html=True)
 
-# ===================================================================== TIMEFRAMES & GLOBAL
-TIMEFRAMES = ("3m", "5m", "10m", "15m", "30m", "75m", "1h", "2h", "4h", "1d", "1w", "1M")
+# ===================================================================== ALL 13 TIMEFRAMES
+TIMEFRAMES = (
+    "3m", "5m", "10m", "15m", "30m", "75m",
+    "1h", "2h", "4h", "6h", "1d", "1w", "1M"
+)
 MINUTE_TFS = {"3m", "5m", "10m", "15m", "30m", "75m"}
-HOUR_TFS = {"1h", "2h", "4h"}
+HOUR_TFS = {"1h", "2h", "4h", "6h"}
+DAY_TFS = {"1d", "1w", "1M"}
 
 GLOBAL_INSTRUMENTS = (
-    {"key": "NIFTY 50", "yahoo": "^NSEI", "tv": "NSE:NIFTY1!", "label": "NIFTY 50"},
-    {"key": "BANKNIFTY", "yahoo": "^NSEBANK", "tv": "NSE:BANKNIFTY1!", "label": "BANKNIFTY"},
-    {"key": "CRUDE OIL", "yahoo": "CL=F", "tv": "NYMEX:CL1!", "label": "CRUDE OIL"},
-    {"key": "BRENT CRUDE", "yahoo": "BZ=F", "tv": "NYMEX:BZ1!", "label": "BRENT CRUDE"},
-    {"key": "GOLD", "yahoo": "GC=F", "tv": "COMEX:GC1!", "label": "GOLD"},
-    {"key": "SILVER", "yahoo": "SI=F", "tv": "COMEX:SI1!", "label": "SILVER"},
-    {"key": "USD/INR", "yahoo": "INR=X", "tv": "FX_IDC:USDINR", "label": "USDINR"},
-    {"key": "S&P 500", "yahoo": "^GSPC", "tv": "SP:SPX", "label": "S&P 500"},
-    {"key": "NASDAQ 100", "yahoo": "^NDX", "tv": "NASDAQ:NDX", "label": "NASDAQ 100"},
-    {"key": "DOLLAR INDEX", "yahoo": "DX-Y.NYB", "tv": "TVC:DXY", "label": "DXY"}
+    {"key": "NIFTY 50", "yahoo": "^NSEI", "tv_eq": "NSE:NIFTY", "tv_fut": "NSE:NIFTY1!", "label": "NIFTY 50"},
+    {"key": "BANKNIFTY", "yahoo": "^NSEBANK", "tv_eq": "NSE:BANKNIFTY", "tv_fut": "NSE:BANKNIFTY1!", "label": "BANKNIFTY"},
+    {"key": "CRUDE OIL", "yahoo": "CL=F", "tv_eq": "NYMEX:CL1!", "tv_fut": "NYMEX:CL1!", "label": "CRUDE OIL"},
+    {"key": "BRENT CRUDE", "yahoo": "BZ=F", "tv_eq": "NYMEX:BZ1!", "tv_fut": "NYMEX:BZ1!", "label": "BRENT CRUDE"},
+    {"key": "GOLD", "yahoo": "GC=F", "tv_eq": "COMEX:GC1!", "tv_fut": "COMEX:GC1!", "label": "GOLD"},
+    {"key": "SILVER", "yahoo": "SI=F", "tv_eq": "COMEX:SI1!", "tv_fut": "COMEX:SI1!", "label": "SILVER"},
+    {"key": "USD/INR", "yahoo": "INR=X", "tv_eq": "FX_IDC:USDINR", "tv_fut": "FX_IDC:USDINR", "label": "USDINR"},
+    {"key": "S&P 500", "yahoo": "^GSPC", "tv_eq": "SP:SPX", "tv_fut": "CME_MINI:ES1!", "label": "S&P 500"},
+    {"key": "NASDAQ 100", "yahoo": "^NDX", "tv_eq": "NASDAQ:NDX", "tv_fut": "CME_MINI:NQ1!", "label": "NASDAQ 100"},
+    {"key": "DOLLAR INDEX", "yahoo": "DX-Y.NYB", "tv_eq": "TVC:DXY", "tv_fut": "ICEUS:DX1!", "label": "DXY"}
 )
 
 TV_INTERVAL = {
     "3m": "3", "5m": "5", "10m": "10", "15m": "15", "30m": "30",
-    "75m": "75", "1h": "60", "2h": "120", "4h": "240", "1d": "D", "1w": "W", "1M": "M"
+    "75m": "75", "1h": "60", "2h": "120", "4h": "240", "6h": "360",
+    "1d": "D", "1w": "W", "1M": "M"
 }
 
-def tradingview_link(symbol: str, tf: str, is_global: bool = False, custom_tv: str = "") -> str:
+def tradingview_link(symbol: str, tf: str, is_future: bool = False, custom_tv: str = "") -> str:
+    """TradingView चार्ट लिंक उसी टाइमफ्रेम पर जनरेट करता है"""
     interval = TV_INTERVAL.get(tf, "15")
-    if is_global and custom_tv:
+    if custom_tv:
         tv_sym = custom_tv
     else:
-        tv_sym = f"NSE:{symbol}1!"
+        tv_sym = f"NSE:{symbol}1!" if is_future else f"NSE:{symbol}"
     encoded = quote(tv_sym, safe="")
     return f"https://in.tradingview.com/chart/?symbol={encoded}&interval={interval}"
 
-# ===================================================================== DYNAMIC F&O LIST FETCHER
+# ===================================================================== AUTO-SYNC LIVE F&O LIST
 @st.cache_data(ttl=24 * 3600, show_spinner=False)
 def fetch_live_nse_fno_list() -> tuple[str, ...]:
-    """NSE Bhavcopy और Dhan Scrip Master से लाइव F&O स्टॉक्स की ताज़ा सूची लाता है"""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0 Safari/537.36",
         "Accept": "text/csv,application/json,*/*",
     }
-    
-    # 1. Dhan Scrip Master (सबसे तेज़ और विश्वसनीय स्रोत)
     try:
         url = "https://images.dhan.co/api-data/api-scrip-master.csv"
         res = requests.get(url, headers=headers, timeout=6)
@@ -114,7 +117,7 @@ def fetch_live_nse_fno_list() -> tuple[str, ...]:
     except Exception:
         pass
 
-    # 2. बैकअप: NSE Bhavcopy UDIFF फ़ाइल
+    # Backup: UDIFF Bhavcopy
     today = datetime.now(IST).date()
     for offset in range(5):
         d = today - timedelta(days=offset)
@@ -136,7 +139,6 @@ def fetch_live_nse_fno_list() -> tuple[str, ...]:
         except Exception:
             continue
 
-    # 3. फॉलबैक अगर नेटवर्क ब्लॉक हो
     return tuple(sorted(set("""
     AARTIIND ABB ABBOTINDIA ABCAPITAL ABFRL ACC ADANIENSOL ADANIENT ADANIGREEN
     ADANIPORTS ALKEM AMBER AMBUJACEM ANGELONE APOLLOHOSP APOLLOTYRE ASHOKLEY
@@ -163,7 +165,7 @@ def fetch_live_nse_fno_list() -> tuple[str, ...]:
     UNIONBANK UNITDSPR UPL VBL VEDL VOLTAS WIPRO YESBANK ZOMATO ZYDUSLIFE
     """.split())))
 
-# ===================================================================== DATA UTILS
+# ===================================================================== CANDLE UTILITIES
 OHLCV = ("Open", "High", "Low", "Close", "Volume")
 
 def normalize_ohlcv(df: pd.DataFrame | None) -> pd.DataFrame:
@@ -191,8 +193,11 @@ def resample_candles(df: pd.DataFrame, tf: str) -> pd.DataFrame:
     df = normalize_ohlcv(df)
     if df.empty or tf == "1d":
         return df
-    rule_map = {"3m": "3min", "5m": "5min", "10m": "10min", "15m": "15min", "30m": "30min",
-                "75m": "75min", "1h": "60min", "2h": "120min", "4h": "240min"}
+    rule_map = {
+        "3m": "3min", "5m": "5min", "10m": "10min", "15m": "15min", "30m": "30min",
+        "75m": "75min", "1h": "60min", "2h": "120min", "4h": "240min", "6h": "360min",
+        "1w": "W-FRI", "1M": "ME"
+    }
     rule = rule_map.get(tf)
     if not rule:
         return df
@@ -200,8 +205,9 @@ def resample_candles(df: pd.DataFrame, tf: str) -> pd.DataFrame:
         "Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"
     }).dropna().sort_index()
 
-# ===================================================================== ZONE DETECTION
-def detect_zones(df: pd.DataFrame, tf: str, symbol: str, is_global: bool = False, tv_custom: str = "") -> list[dict]:
+# ===================================================================== ZONE DETECTION ENGINE
+def detect_zones(df: pd.DataFrame, tf: str, symbol: str, is_global: bool = False,
+                 tv_eq_custom: str = "", tv_fut_custom: str = "") -> list[dict]:
     if len(df) < 12:
         return []
     c = df["Close"].to_numpy()
@@ -211,7 +217,8 @@ def detect_zones(df: pd.DataFrame, tf: str, symbol: str, is_global: bool = False
     zones = []
     
     ltp = c[-1]
-    chart_url = tradingview_link(symbol, tf, is_global=is_global, custom_tv=tv_custom)
+    chart_eq_url = tradingview_link(symbol, tf, is_future=False, custom_tv=tv_eq_custom)
+    chart_fut_url = tradingview_link(symbol, tf, is_future=True, custom_tv=tv_fut_custom)
 
     for i in range(len(df) - 2, 2, -1):
         span = h[i] - l[i]
@@ -219,15 +226,16 @@ def detect_zones(df: pd.DataFrame, tf: str, symbol: str, is_global: bool = False
             continue
         body = abs(c[i] - o[i])
         
-        # Bullish Demand Zone
+        # Bullish Demand
         if c[i] > o[i] and (body / span) >= 0.55:
             base_hi = max(h[i-1], h[i-2])
             base_lo = min(l[i-1], l[i-2])
             if c[i] > base_hi:
                 dist_pct = round(abs(ltp - base_hi) / ltp * 100, 2)
                 zones.append({
-                    "Symbol_Link": chart_url,
-                    "Equity": symbol,  # शुद्ध इक्विटी/कैश नाम
+                    "Equity_Link": chart_eq_url,
+                    "Future_Link": chart_fut_url,
+                    "Equity_Name": symbol,
                     "TF": tf,
                     "Zone Side": "🟢 Demand",
                     "Pattern": "DBR" if o[i-2] > c[i-2] else "RBR",
@@ -241,15 +249,16 @@ def detect_zones(df: pd.DataFrame, tf: str, symbol: str, is_global: bool = False
                 })
                 break
 
-        # Bearish Supply Zone
+        # Bearish Supply
         elif o[i] > c[i] and (body / span) >= 0.55:
             base_hi = max(h[i-1], h[i-2])
             base_lo = min(l[i-1], l[i-2])
             if c[i] < base_lo:
                 dist_pct = round(abs(ltp - base_lo) / ltp * 100, 2)
                 zones.append({
-                    "Symbol_Link": chart_url,
-                    "Equity": symbol,  # शुद्ध इक्विटी/कैश नाम
+                    "Equity_Link": chart_eq_url,
+                    "Future_Link": chart_fut_url,
+                    "Equity_Name": symbol,
                     "TF": tf,
                     "Zone Side": "🔴 Supply",
                     "Pattern": "RBD" if c[i-2] > o[i-2] else "DBD",
@@ -264,7 +273,7 @@ def detect_zones(df: pd.DataFrame, tf: str, symbol: str, is_global: bool = False
                 break
     return zones
 
-# ===================================================================== DOWNLOAD DATA
+# ===================================================================== DATA DOWNLOADER
 def _fetch_ticker_data(ticker_map: dict[str, str], period: str, interval: str) -> dict[str, pd.DataFrame]:
     import yfinance as yf
     tickers = list(ticker_map.values())
@@ -285,7 +294,7 @@ def _fetch_ticker_data(ticker_map: dict[str, str], period: str, interval: str) -
 @st.cache_data(ttl=150, show_spinner=False)
 def load_all_market_data(universe_type: str, tf_group: str, fno_pool: tuple[str, ...]) -> dict[str, pd.DataFrame]:
     interval = "1m" if tf_group == "intraday" else "1d"
-    period = "5d" if tf_group == "intraday" else "1y"
+    period = "5d" if tf_group == "intraday" else "2y"
 
     if universe_type == "Global Markets":
         ticker_map = {item["key"]: item["yahoo"] for item in GLOBAL_INSTRUMENTS}
@@ -315,7 +324,7 @@ def load_all_market_data(universe_type: str, tf_group: str, fno_pool: tuple[str,
 live_fno_symbols = fetch_live_nse_fno_list()
 
 with st.container():
-    c1, c2, c3, c4, c5, c6, c7 = st.columns([1.6, 2.0, 1.1, 1.1, 1.2, 1.5, 0.9])
+    c1, c2, c3, c4, c5, c6, c7 = st.columns([1.6, 2.2, 1.1, 1.1, 1.1, 1.3, 0.8])
     with c1:
         universe_choice = st.selectbox(
             "📁 Universe",
@@ -324,7 +333,7 @@ with st.container():
         )
     with c2:
         selected_tfs = st.multiselect(
-            "⏱️ Timeframe",
+            "⏱️ Timeframe (13 Total)",
             list(TIMEFRAMES),
             default=["15m", "1h", "1d"]
         )
@@ -335,7 +344,7 @@ with st.container():
     with c5:
         sort_mode = st.selectbox("📏 Distance", ["Nearest ↑", "Farthest ↓"], index=0)
     with c6:
-        search_query = st.text_input("🔍 Search Symbol", placeholder="RELIANCE, SBIN, CRUDE...")
+        search_query = st.text_input("🔍 Search", placeholder="RELIANCE, COFORGE...")
     with c7:
         st.write("")
         st.write("")
@@ -345,7 +354,7 @@ if not selected_tfs:
     st.warning("कृपया कम से कम एक Timeframe चुनें।")
     st.stop()
 
-# ===================================================================== EXECUTION
+# ===================================================================== SCANNING
 tf_group = "intraday" if any(t in MINUTE_TFS or t in HOUR_TFS for t in selected_tfs) else "daily"
 univ_key = "NSE All Future Stocks" if "NSE All Future Stocks" in universe_choice else universe_choice
 
@@ -361,7 +370,8 @@ with st.spinner(f"Scanning {universe_choice} across {', '.join(selected_tfs)}...
                 continue
             for tf in selected_tfs:
                 resampled = resample_candles(raw_df, tf)
-                zones = detect_zones(resampled, tf, item["label"], is_global=True, tv_custom=item["tv"])
+                zones = detect_zones(resampled, tf, item["label"], is_global=True,
+                                     tv_eq_custom=item["tv_eq"], tv_fut_custom=item["tv_fut"])
                 all_detected_zones.extend(zones)
     else:
         for sym, raw_df in data_bundle.items():
@@ -374,7 +384,7 @@ with st.spinner(f"Scanning {universe_choice} across {', '.join(selected_tfs)}...
 
 df_view = pd.DataFrame(all_detected_zones)
 
-# ===================================================================== DISPLAY (SHEETS FORMAT)
+# ===================================================================== TABLE VIEW
 if not df_view.empty:
     if side_filter != "All":
         df_view = df_view[df_view["Zone Side"] == side_filter]
@@ -383,24 +393,30 @@ if not df_view.empty:
     if search_query.strip():
         parts = [p.strip() for p in re.split(r"[,\s]+", search_query) if p.strip()]
         pat = "|".join(re.escape(p) for p in parts)
-        df_view = df_view[df_view["Equity"].str.contains(pat, case=False, na=False, regex=True)]
+        df_view = df_view[df_view["Equity_Name"].str.contains(pat, case=False, na=False, regex=True)]
 
     ascending = True if sort_mode.startswith("Nearest") else False
     df_view = df_view.sort_values(by="Distance Gap %", ascending=ascending).reset_index(drop=True)
 
-    # टेबल के लिए कॉलम
+    # दोनों कॉलम को सही क्रम में व्यवस्थित किया गया है
     display_df = df_view[[
-        "Symbol_Link", "TF", "Zone Side", "Pattern", "Status", "Score",
-        "Proximal (₹)", "Distal (₹)", "Current LTP", "Distance Gap %", "Created Date"
+        "Equity_Link", "Future_Link", "TF", "Zone Side", "Pattern", "Status",
+        "Score", "Proximal (₹)", "Distal (₹)", "Current LTP", "Distance Gap %", "Created Date"
     ]]
 
     st.dataframe(
         display_df,
         column_config={
-            # साफ सिंबल नाम दिखेगा (बिना '1!' के) और क्लिक करने पर सीधे TradingView चार्ट खुलेगा
-            "Symbol_Link": st.column_config.LinkColumn(
-                "Symbol (Cash / Equity)",
+            # 1. Equity / Cash कॉलम (साफ नाम, क्लिक करने पर Cash Chart)
+            "Equity_Link": st.column_config.LinkColumn(
+                "Equity (Cash)",
                 display_text=r"symbol=(?:NSE%3A)?([^&!%]+)",
+                width="small"
+            ),
+            # 2. Current Month Future कॉलम (फ्यूचर नाम, क्लिक करने पर Futures Chart 1!)
+            "Future_Link": st.column_config.LinkColumn(
+                "Current-Month Future",
+                display_text=r"symbol=(?:NSE%3A)?([^&%]+)",
                 width="medium"
             ),
             "TF": st.column_config.TextColumn("TF", width="small"),
@@ -426,8 +442,8 @@ if not df_view.empty:
 
     st.markdown(f"""
     <div class="sheet-statusbar">
-        <span>Rows: <b>{len(display_df)}</b> zones | Active Pool: <b>{len(live_fno_symbols)} F&O Stocks (Auto-synced)</b></span>
-        <span>Symbols are Clean Cash/Equity | Click to open exact timeframe chart on TradingView</span>
+        <span>Rows: <b>{len(display_df)}</b> zones | Active Pool: <b>{len(live_fno_symbols)} F&O Stocks (Live Auto-synced)</b></span>
+        <span>Left: Equity/Cash Chart | Right: Current Month Futures Chart (Both linked to exact zone timeframe)</span>
     </div>
     """, unsafe_allow_html=True)
 else:

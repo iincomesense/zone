@@ -283,6 +283,7 @@ class StrictPineV6Engine:
         if inRange == 0 or self.body_pct(li) < 0.60:
             return None
 
+        # Opposite Cover Check
         opposite = (inBull and self.is_bear(pi)) or (inBear and self.is_bull(pi))
         prevHi = max(self.o[pi], self.c[pi])
         prevLo = min(self.o[pi], self.c[pi])
@@ -370,6 +371,7 @@ class StrictPineV6Engine:
 
         prox = baseHigh if demand else baseLow
         dist = baseLow if demand else baseHigh
+        # Pine v6: mid = high - testedLegOutRetracePct * (high - low) [1.0 retrace = outLow]
         mid = (self.h[i] - 1.0 * (self.h[i] - self.l[i])) if demand else (self.l[i] + 1.0 * (self.h[i] - self.l[i]))
         pattern = "RBR" if rbr else ("DBR" if dbr else ("DBD" if dbd else "RBD"))
         return {
@@ -382,7 +384,45 @@ class StrictPineV6Engine:
         min_bar = max(14, 3 + 3, 11)
 
         for i in range(self.n):
-            # 1. Bar Scan
+            low_i, high_i = self.l[i], self.h[i]
+
+            # 1. पहले से बने ज़ोन्स का स्टेट अपडेट (कैंडल i द्वारा टेस्ट)
+            for z in active_zones:
+                if z.state == "Broken":
+                    continue
+                
+                # Pine Script Rule: ज़ोन अपनी बनने वाली कैंडल पर टेस्ट नहीं हो सकता
+                if i > z.createdBarIndex:
+                    if z.state == "Fresh":
+                        if z.isDemand:
+                            if low_i <= z.distVal:
+                                z.state = "Broken"
+                            elif low_i <= z.legOutMidLevel:
+                                z.state = "Tested"
+                                z.touchCount += 1
+                        else:
+                            if high_i >= z.distVal:
+                                z.state = "Broken"
+                            elif high_i >= z.legOutMidLevel:
+                                z.state = "Tested"
+                                z.touchCount += 1
+                    elif z.state == "Tested":
+                        if z.isDemand:
+                            if low_i <= z.distVal:
+                                z.state = "Broken"
+                            elif low_i <= z.legOutMidLevel:
+                                z.touchCount += 1
+                        else:
+                            if high_i >= z.distVal:
+                                z.state = "Broken"
+                            elif high_i >= z.legOutMidLevel:
+                                z.touchCount += 1
+
+                    # maxTestedCount = 1
+                    if z.state == "Tested" and z.touchCount > 1:
+                        z.state = "Broken"
+
+            # 2. कैंडल i पर नए ज़ोन की खोज (Scan Bar)
             if i >= min_bar and not np.isnan(self.atr[i]):
                 found = False
                 for bc in range(1, 4):
@@ -393,7 +433,7 @@ class StrictPineV6Engine:
                         continue
                     found = True
                     
-                    # Duplicate check
+                    # Duplicate check (0.25 * ATR)
                     duplicate = False
                     for old in reversed(active_zones):
                         if old.state == "Broken":
@@ -404,6 +444,7 @@ class StrictPineV6Engine:
                     if duplicate:
                         continue
 
+                    # नया ज़ोन हमेशा 'Fresh' स्टेट में ही बनेगा
                     z = ZoneRecord(
                         proxVal=float(cand["prox"]),
                         distVal=float(cand["dist"]),
@@ -417,40 +458,6 @@ class StrictPineV6Engine:
                         densityScore=int(cand["score"])
                     )
                     active_zones.append(z)
-
-            # 2. Update States (Fresh -> Tested -> Broken)
-            low_i, high_i = self.l[i], self.h[i]
-            for z in active_zones:
-                if z.state == "Broken":
-                    continue
-                if z.state == "Fresh":
-                    if z.isDemand:
-                        if low_i <= z.distVal:
-                            z.state = "Broken"
-                        elif low_i <= z.legOutMidLevel:
-                            z.state = "Tested"
-                            z.touchCount += 1
-                    else:
-                        if high_i >= z.distVal:
-                            z.state = "Broken"
-                        elif high_i >= z.legOutMidLevel:
-                            z.state = "Tested"
-                            z.touchCount += 1
-                elif z.state == "Tested":
-                    if z.isDemand:
-                        if low_i <= z.distVal:
-                            z.state = "Broken"
-                        elif low_i <= z.legOutMidLevel:
-                            z.touchCount += 1
-                    else:
-                        if high_i >= z.distVal:
-                            z.state = "Broken"
-                        elif high_i >= z.legOutMidLevel:
-                            z.touchCount += 1
-
-                # Pine v6 Rule: maxTestedCount = 1
-                if z.state == "Tested" and z.touchCount > 1:
-                    z.state = "Broken"
 
         # केवल शुद्ध Active Zones (Fresh & Tested) ही बाहर जाएंगे, Broken पूरी तरह बाहर
         return [z for z in active_zones if z.state in ("Fresh", "Tested")]
@@ -558,7 +565,7 @@ with st.spinner(f"Running Exact Pine v6 Engine across {len(live_fno_symbols)} st
             ltp = float(resampled["Close"].iloc[-1])
 
             for z in active_zones:
-                # Range check: High+ATR and Low-ATR
+                # ATR Scan Range Check
                 if not (r_min <= z.proxVal <= r_max or r_min <= z.distVal <= r_max):
                     continue
 
@@ -582,7 +589,6 @@ df_view = pd.DataFrame(all_raw_zones)
 
 # ===================================================================== MULTI-TF HIGHLIGHT & RENDER
 if not df_view.empty:
-    # कन्फ्लुएंस: यदि एक ही स्टॉक का ज़ोन 2 या अधिक टाइमफ्रेम में है
     tf_counts = df_view.groupby(["Equity_Name", "Zone Side"])["TF"].transform("nunique")
     df_view["Multi-TF Zone"] = tf_counts.apply(
         lambda count: f"🔥 Confluence ({count}x TF)" if count >= 3 else (f"⭐ Multi-TF (2x)" if count == 2 else "—")
@@ -599,7 +605,6 @@ if not df_view.empty:
 
     df_view = df_view.sort_values(by="Distance Gap %", ascending=True).reset_index(drop=True)
 
-    # टेबल लेआउट (Score कॉलम पूरी तरह हटा दिया गया है)
     display_df = df_view[[
         "Equity_Link", "Future_Link", "TF", "Zone Side", "Pattern", "Status",
         "Multi-TF Zone", "Proximal (₹)", "Distal (₹)", "Current LTP", "Distance Gap %", "Created Date"
@@ -641,8 +646,8 @@ if not df_view.empty:
 
     st.markdown(f"""
     <div class="sheet-statusbar">
-        <span>Active Valid Zones: <b>{len(display_df)}</b> | Engine: <b>Strict Pine v6 (Broken Zones Fully Removed)</b></span>
-        <span>TradingView charts open cleanly on exact timeframe without MTF indicator line clutters</span>
+        <span>Active Valid Zones: <b>{len(display_df)}</b> | Engine: <b>Strict Pine v6 (Broken Fully Excluded)</b></span>
+        <span>TradingView charts open cleanly on exact timeframe without MTF lines</span>
     </div>
     """, unsafe_allow_html=True)
 else:

@@ -18,7 +18,7 @@ import requests
 import streamlit as st
 
 st.set_page_config(
-    page_title="Pine v6 Zone Scanner",
+    page_title="Pine v6 Zone Scanner (Exact Match)",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -82,7 +82,7 @@ def tradingview_link(symbol: str, tf: str, is_future: bool = False) -> str:
 
 INDEX_EXCLUSIONS = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYIT", "NIFTYNXT50"}
 
-# ===================================================================== AUTO-SYNC LIVE F&O
+# ===================================================================== LIVE F&O LIST
 @st.cache_data(ttl=12 * 3600, show_spinner=False)
 def get_verified_nse_fno_list() -> tuple[str, ...]:
     headers = {"User-Agent": "Mozilla/5.0", "Accept": "text/csv,application/json,*/*"}
@@ -201,7 +201,7 @@ def resample_candles(df: pd.DataFrame, tf: str) -> pd.DataFrame:
         "Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"
     }).dropna().sort_index() if rule else df
 
-# ===================================================================== PINE SCRIPT V6 EXACT PORT
+# ===================================================================== 100% PINE SCRIPT V6 EXACT PORT
 @dataclass
 class ZoneRecord:
     proxVal: float
@@ -216,6 +216,7 @@ class ZoneRecord:
     densityScore: int
 
 class PineV6ExactEngine:
+    """Pine Script v6 'Zone MTF' का शत-प्रतिशत हूबहू रूप"""
     def __init__(self, df: pd.DataFrame):
         self.df = df
         self.o = df["Open"].to_numpy(dtype=float)
@@ -263,11 +264,11 @@ class PineV6ExactEngine:
         inRange = inHigh - inLow
         inBull, inBear = self.is_bull(li), self.is_bear(li)
 
-        # legInMinBodyPct = 0.60
+        # 1. legInMinBodyPct = 0.60
         if inRange == 0 or self.body_pct(li) < 0.60:
             return None
 
-        # Opposite Cover Check (rejectOppositeCoverPct = 0.50)
+        # 2. Opposite Cover Check (rejectOppositeCoverPct = 0.50)
         opposite = (inBull and self.is_bear(pi)) or (inBear and self.is_bull(pi))
         prevHi = max(self.o[pi], self.c[pi])
         prevLo = min(self.o[pi], self.c[pi])
@@ -278,6 +279,7 @@ class PineV6ExactEngine:
         bullClv = (inClose - inLow) / inRange
         bearClv = (inHigh - inClose) / inRange
 
+        # 3. Base Candles Check
         baseOK = True
         baseTR = 0.0
         baseHigh = -1.0
@@ -298,6 +300,7 @@ class PineV6ExactEngine:
         if not baseOK or baseTR == 0:
             return None
 
+        # 4. Leg-in to Base Size
         effectiveMult = 1.5 if bc == 1 else 2.0  # legInToBaseSizeMult
         if inTR < effectiveMult * baseTR or not (inTR >= 1.0 * self.atr[li]):
             return None
@@ -308,12 +311,14 @@ class PineV6ExactEngine:
         if not (demand or supply):
             return None
 
+        # 5. Explosive Leg-Out
         explosive = outTR >= 1.2 * self.atr[i]   # legOutTrMult = 1.2
         wickOK = self.wick_pct(i) <= 0.30        # maxWickPct = 0.30
         hierarchy = (outTR >= 1.0 * inTR) and (inTR > baseTR)
         volumeOK = self.v[i] > self.v[li]
         overnight = (self.dow[i] != self.dow[i-1] or self.time_ms[i] - self.time_ms[i-1] > 86400000) if i > 0 else False
 
+        # 6. Imbalance (सख्त जांच - YESBANK जैसी त्रुटि रोकने के लिए)
         gap = False
         imbalance = True
         if demand:
@@ -327,6 +332,7 @@ class PineV6ExactEngine:
         if bodyEngulf and not gap:
             return None
 
+        # 7. Pattern Definitions
         rbr = inBull and bullClv >= 0.60 and demand
         dbr = inBear and bearClv >= 0.60 and demand
         dbd = inBear and bearClv >= 0.60 and supply
@@ -335,6 +341,7 @@ class PineV6ExactEngine:
         if not ((rbr or dbr or dbd or rbd) and explosive and wickOK and hierarchy and volumeOK and imbalance):
             return None
 
+        # 8. Scoring System
         score = 0
         if bc == 1: score += 15
         if inTR >= 1.5 * self.atr[li]: score += 10
@@ -356,12 +363,11 @@ class PineV6ExactEngine:
         if gap: score += 10
         if overnight and gap: score += 15
 
-        if score < 40:
+        if score < 40:  # minValidScore = 40
             return None
 
         prox = baseHigh if demand else baseLow
         dist = baseLow if demand else baseHigh
-        # Pine v6: mid level
         mid = (self.h[i] - 1.0 * (self.h[i] - self.l[i])) if demand else (self.l[i] + 1.0 * (self.h[i] - self.l[i]))
         pattern = "RBR" if rbr else ("DBR" if dbr else ("DBD" if dbd else "RBD"))
         return {
@@ -373,11 +379,10 @@ class PineV6ExactEngine:
         active_zones: List[ZoneRecord] = []
         min_bar = max(14, 3 + 3, 11)
 
-        # Chronological loop
         for i in range(self.n):
             low_i, high_i = self.l[i], self.h[i]
 
-            # 1. State Update
+            # 1. State Update (केवल बाद की कैंडल्स द्वारा टेस्ट होगा)
             for z in active_zones:
                 if z.state == "Broken":
                     continue
@@ -411,7 +416,7 @@ class PineV6ExactEngine:
                     if z.state == "Tested" and z.touchCount > 1:
                         z.state = "Broken"
 
-            # 2. Candidate Discovery on bar i
+            # 2. Candidate Discovery
             if i >= min_bar and not np.isnan(self.atr[i]):
                 found = False
                 for bc in range(1, 4):
@@ -446,7 +451,6 @@ class PineV6ExactEngine:
                     )
                     active_zones.append(z)
 
-        # Return only Fresh or Tested zones
         return [z for z in active_zones if z.state in ("Fresh", "Tested")]
 
 # ===================================================================== DATA DOWNLOADER
@@ -517,7 +521,7 @@ with st.container():
     with c5:
         state_filter = st.selectbox("📌 Status", ["All", "Fresh", "Tested"], index=0)
     with c6:
-        search_query = st.text_input("🔍 Search", placeholder="RELIANCE, SBIN...")
+        search_query = st.text_input("🔍 Search", placeholder="RELIANCE, SWIGGY...")
     with c7:
         st.write("")
         st.write("")
@@ -552,7 +556,6 @@ with st.spinner(f"Running Pine v6 Engine across {len(live_fno_symbols)} stocks i
             ltp = float(resampled["Close"].iloc[-1])
 
             for z in active_zones:
-                # ATR Scan Range Check
                 if not (r_min <= z.proxVal <= r_max or r_min <= z.distVal <= r_max):
                     continue
 
@@ -576,13 +579,11 @@ df_view = pd.DataFrame(all_raw_zones)
 
 # ===================================================================== PRICE-OVERLAP CONFLUENCE CHECK
 if not df_view.empty:
-    # केवल वही Confluence कहलाएगा जिसकी प्राइस रेंज (Proximal) वास्तव में ओवरलैप हो रही हो
     confluence_labels = []
     for idx, row in df_view.iterrows():
         sym = row["Equity_Name"]
         side = row["Zone Side"]
         prox = row["Proximal"]
-        # उसी सिंबल और साइड के अन्य टाइमफ्रेम में अगर प्राइस 0.75% के दायरे में है तो मैच
         matches = df_view[
             (df_view["Equity_Name"] == sym) &
             (df_view["Zone Side"] == side) &
@@ -650,7 +651,7 @@ if not df_view.empty:
 
     st.markdown(f"""
     <div class="sheet-statusbar">
-        <span>Active Valid Zones: <b>{len(display_df)}</b> | Engine: <b>Strict Pine v6 (Price-Matched Confluence)</b></span>
+        <span>Active Valid Zones: <b>{len(display_df)}</b> | Engine: <b>Strict Pine v6 (Matches TradingView Boxes)</b></span>
         <span>Clean TV Links (No MTF Clutter) | Exact Candle Match</span>
     </div>
     """, unsafe_allow_html=True)

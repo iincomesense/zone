@@ -25,7 +25,7 @@ st.set_page_config(
 
 IST = ZoneInfo("Asia/Kolkata")
 
-# ===================================================================== CSS (Google Sheets Theme)
+# ===================================================================== CSS
 st.markdown("""
 <style>
 :root { color-scheme: dark; }
@@ -89,51 +89,33 @@ TV_INTERVAL = {
 
 def tradingview_link(symbol: str, tf: str, is_future: bool = False, custom_tv: str = "") -> str:
     interval = TV_INTERVAL.get(tf, "15")
-    if custom_tv:
-        tv_sym = custom_tv
-    else:
-        tv_sym = f"NSE:{symbol}1!" if is_future else f"NSE:{symbol}"
-    encoded = quote(tv_sym, safe="")
-    return f"https://in.tradingview.com/chart/?symbol={encoded}&interval={interval}"
+    tv_sym = custom_tv if custom_tv else (f"NSE:{symbol}1!" if is_future else f"NSE:{symbol}")
+    return f"https://in.tradingview.com/chart/?symbol={quote(tv_sym, safe='')}&interval={interval}"
 
-# ===================================================================== STRICT NSE F&O AUTO-SYNC
-INDEX_EXCLUSIONS = {
-    "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYIT", "NIFTYNXT50"
-}
+INDEX_EXCLUSIONS = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYIT", "NIFTYNXT50"}
 
+# ===================================================================== AUTO-SYNC LIVE F&O
 @st.cache_data(ttl=12 * 3600, show_spinner=False)
 def get_verified_nse_fno_list() -> tuple[str, ...]:
-    """NSE Bhavcopy और Dhan Master से केवल शुद्ध Stock Futures (FUTSTK) लाता है"""
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0 Safari/537.36",
-        "Accept": "text/csv,application/json,*/*",
-    }
-    
-    # स्रोत 1: Dhan Scrip Master (सख्त FUTSTK फ़िल्टर)
+    headers = {"User-Agent": "Mozilla/5.0", "Accept": "text/csv,application/json,*/*"}
     try:
         url = "https://images.dhan.co/api-data/api-scrip-master.csv"
         res = requests.get(url, headers=headers, timeout=6)
         if res.status_code == 200:
             df = pd.read_csv(io.StringIO(res.text), low_memory=False)
-            # केवल शुद्ध स्टॉक फ्यूचर्स
             cond = (
                 (df["SEM_SEGMENT"].astype(str).str.upper() == "NSE_FNO") &
                 (df["SEM_INSTRUMENT_NAME"].astype(str).str.upper() == "FUTSTK")
             )
             fno = df[cond]
             raw_syms = fno["SEM_UNDERLYING_SYMBOL"].dropna().unique()
-            clean = []
-            for s in raw_syms:
-                sym_str = str(s).strip().upper()
-                if sym_str and sym_str not in INDEX_EXCLUSIONS and not any(sym_str.startswith(x) for x in ("NIFTY", "BANKNIFTY")):
-                    clean.append(sym_str)
+            clean = [str(s).strip().upper() for s in raw_syms if str(s).strip() and str(s).strip().upper() not in INDEX_EXCLUSIONS and not any(str(s).strip().upper().startswith(x) for x in ("NIFTY", "BANKNIFTY"))]
             clean = sorted(list(set(clean)))
             if len(clean) >= 150:
                 return tuple(clean)
     except Exception:
         pass
 
-    # स्रोत 2: NSE Official FO Bhavcopy
     today = datetime.now(IST).date()
     for offset in range(5):
         d = today - timedelta(days=offset)
@@ -155,7 +137,6 @@ def get_verified_nse_fno_list() -> tuple[str, ...]:
         except Exception:
             continue
 
-    # स्रोत 3: आपातकालीन बैकअप (यदि इंटरनेट ब्लॉक हो)
     return tuple(sorted(set("""
     AARTIIND ABB ABBOTINDIA ABCAPITAL ABFRL ACC ADANIENSOL ADANIENT ADANIGREEN
     ADANIPORTS ALKEM AMBER AMBUJACEM ANGELONE APOLLOHOSP APOLLOTYRE ASHOKLEY
@@ -177,12 +158,12 @@ def get_verified_nse_fno_list() -> tuple[str, ...]:
     PFC PGEL PHOENIXLTD PIIND PIDILITIND PNB POLICYBZR POLYCAB POWERGRID POWERINDIA
     PRESTIGE PVRINOX RAMCOCEM RBLBANK RECLTD RELIANCE SAIL SBICARD SBILIFE SBIN
     SHREECEM SHRIRAMFIN SIEMENS SOLARINDS SONACOMS SRF SUNPHARMA SUPREMEIND
-    SUZLON SYNGENE TATACHEM TATACOMM TATACONSUM TATAELXSI TATAMOTORS TATAPOWER
+    SUZLON SWIGGY SYNGENE TATACHEM TATACOMM TATACONSUM TATAELXSI TATAMOTORS TATAPOWER
     TATASTEEL TCS TECHM TIINDIA TITAGARH TITAN TMPV TORNTPHARM TRENT TVSMOTOR
     UBL ULTRACEMCO UNIONBANK UNITDSPR UPL VBL VEDL VOLTAS WIPRO YESBANK ZOMATO ZYDUSLIFE
     """.split())))
 
-# ===================================================================== DATA UTILITIES
+# ===================================================================== CANDLE & RMA ATR UTILS
 OHLCV = ("Open", "High", "Low", "Close", "Volume")
 
 def normalize_ohlcv(df: pd.DataFrame | None) -> pd.DataFrame:
@@ -206,6 +187,55 @@ def normalize_ohlcv(df: pd.DataFrame | None) -> pd.DataFrame:
     f.index = idx.tz_localize(IST) if idx.tz is None else idx.tz_convert(IST)
     return f.loc[~f.index.duplicated(keep="last")].sort_index()
 
+def calc_atr_rma(df: pd.DataFrame, length: int = 14) -> float:
+    """Pine Script v6 के rma(tr, 14) की तरह सटीक गणना"""
+    if len(df) < length + 1:
+        return 0.0
+    h = df["High"].to_numpy()
+    l = df["Low"].to_numpy()
+    c = df["Close"].to_numpy()
+    tr = np.zeros(len(df))
+    tr[0] = h[0] - l[0]
+    for i in range(1, len(df)):
+        tr[i] = max(h[i] - l[i], abs(h[i] - c[i-1]), abs(l[i] - c[i-1]))
+    rma = np.zeros(len(df))
+    rma[length - 1] = np.mean(tr[:length])
+    for i in range(length, len(df)):
+        rma[i] = (rma[i-1] * (length - 1) + tr[i]) / length
+    return float(rma[-1])
+
+def get_scan_range_bounds(df_daily: pd.DataFrame, range_type: str = "Weekly") -> tuple[float, float]:
+    """Daily/Weekly/Monthly Candle (EOD) High + ATR(14) RMA, Low - ATR(14) RMA गणना"""
+    if df_daily is None or df_daily.empty or len(df_daily) < 15:
+        return 0.0, 1e9
+
+    if range_type == "Daily":
+        ref_df = df_daily
+        atr = calc_atr_rma(ref_df, 14)
+        last_h = float(ref_df["High"].iloc[-1])
+        last_l = float(ref_df["Low"].iloc[-1])
+    elif range_type == "Weekly":
+        ref_df = df_daily.resample("W-FRI").agg({
+            "Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"
+        }).dropna()
+        atr = calc_atr_rma(ref_df, 14)
+        last_h = float(ref_df["High"].iloc[-1])
+        last_l = float(ref_df["Low"].iloc[-1])
+    else:  # Monthly
+        ref_df = df_daily.resample("ME").agg({
+            "Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"
+        }).dropna()
+        atr = calc_atr_rma(ref_df, 14)
+        last_h = float(ref_df["High"].iloc[-1])
+        last_l = float(ref_df["Low"].iloc[-1])
+
+    if atr <= 0:
+        atr = (last_h - last_l) * 0.5  # फॉलबैक
+
+    range_max = last_h + atr
+    range_min = max(0.0, last_l - atr)
+    return range_min, range_max
+
 def resample_candles(df: pd.DataFrame, tf: str) -> pd.DataFrame:
     df = normalize_ohlcv(df)
     if df.empty or tf == "1d":
@@ -216,15 +246,13 @@ def resample_candles(df: pd.DataFrame, tf: str) -> pd.DataFrame:
         "1w": "W-FRI", "1M": "ME"
     }
     rule = rule_map.get(tf)
-    if not rule:
-        return df
     return df.resample(rule).agg({
         "Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"
-    }).dropna().sort_index()
+    }).dropna().sort_index() if rule else df
 
 # ===================================================================== ZONE DETECTION
-def detect_zones(df: pd.DataFrame, tf: str, symbol: str, is_global: bool = False,
-                 tv_eq_custom: str = "", tv_fut_custom: str = "") -> list[dict]:
+def detect_zones(df: pd.DataFrame, tf: str, symbol: str, range_min: float, range_max: float,
+                 is_global: bool = False, tv_eq_custom: str = "", tv_fut_custom: str = "") -> list[dict]:
     if len(df) < 8:
         return []
     c = df["Close"].to_numpy()
@@ -246,11 +274,12 @@ def detect_zones(df: pd.DataFrame, tf: str, symbol: str, is_global: bool = False
             continue
         body = abs(c[i] - o[i])
         
-        # Demand Zone
+        # Bullish Demand
         if c[i] > o[i] and (body / span) >= 0.50:
             base_hi = max(h[i-1], h[i-2])
             base_lo = min(l[i-1], l[i-2])
-            if c[i] > base_hi:
+            # केवल तयशुदा ATR Scan Range के भीतर का ही ज़ोन लिया जाएगा
+            if c[i] > base_hi and (range_min <= base_hi <= range_max or range_min <= base_lo <= range_max):
                 dist_pct = round(abs(ltp - base_hi) / ltp * 100, 2)
                 zones.append({
                     "Equity_Link": chart_eq_url,
@@ -269,11 +298,12 @@ def detect_zones(df: pd.DataFrame, tf: str, symbol: str, is_global: bool = False
                 })
                 break
 
-        # Supply Zone
+        # Bearish Supply
         elif o[i] > c[i] and (body / span) >= 0.50:
             base_hi = max(h[i-1], h[i-2])
             base_lo = min(l[i-1], l[i-2])
-            if c[i] < base_lo:
+            # केवल तयशुदा ATR Scan Range के भीतर का ही ज़ोन लिया जाएगा
+            if c[i] < base_lo and (range_min <= base_lo <= range_max or range_min <= base_hi <= range_max):
                 dist_pct = round(abs(ltp - base_lo) / ltp * 100, 2)
                 zones.append({
                     "Equity_Link": chart_eq_url,
@@ -293,7 +323,7 @@ def detect_zones(df: pd.DataFrame, tf: str, symbol: str, is_global: bool = False
                 break
     return zones
 
-# ===================================================================== BATCH DOWNLOAD
+# ===================================================================== SAFE DOWNLOAD
 def _download_safe_batch(tickers: list[str], period: str, interval: str) -> dict[str, pd.DataFrame]:
     import yfinance as yf
     out = {}
@@ -314,50 +344,45 @@ def _download_safe_batch(tickers: list[str], period: str, interval: str) -> dict
     return out
 
 @st.cache_data(ttl=120, show_spinner=False)
-def load_all_market_data(universe_type: str, tf_group: str, fno_pool: tuple[str, ...]) -> dict[str, pd.DataFrame]:
+def load_all_market_data(universe_type: str, tf_group: str, fno_pool: tuple[str, ...]) -> tuple[dict[str, pd.DataFrame], dict[str, pd.DataFrame]]:
     interval = "1m" if tf_group == "intraday" else "1d"
     period = "5d" if tf_group == "intraday" else "2y"
 
-    if universe_type == "Global Markets":
-        ticker_map = {item["key"]: item["yahoo"] for item in GLOBAL_INSTRUMENTS}
-        import yfinance as yf
-        raw = yf.download(list(ticker_map.values()), period=period, interval=interval,
-                          group_by="ticker", progress=False, timeout=12)
-        out = {}
-        for key, tk in ticker_map.items():
-            try:
-                frame = raw[tk] if len(ticker_map) > 1 else raw
-                out[key] = normalize_ohlcv(frame)
-            except Exception:
-                out[key] = pd.DataFrame()
-        return out
-
     symbols = fno_pool if "NSE All Future" in universe_type else fno_pool[:50]
     
-    # 15-15 के सेफ चंक्स में डाउनलोड
+    # 1. टाइमफ्रेम कैंडल्स डाउनलोड
     chunk_size = 15
     chunks = [list(symbols)[i:i + chunk_size] for i in range(0, len(symbols), chunk_size)]
-    combined: dict[str, pd.DataFrame] = {}
-
+    tf_data: dict[str, pd.DataFrame] = {}
     with ThreadPoolExecutor(max_workers=4) as pool:
-        futures = [
-            pool.submit(_download_safe_batch, [f"{s}.NS" for s in part], period, interval)
-            for part in chunks
-        ]
+        futures = [pool.submit(_download_safe_batch, [f"{s}.NS" for s in part], period, interval) for part in chunks]
         for fut in futures:
             try:
-                combined.update(fut.result())
+                tf_data.update(fut.result())
             except Exception:
                 pass
 
-    return combined
+    # 2. ATR 14 Range के लिए Daily कैंडल्स (हमेशा 1 साल का डेटा)
+    daily_data: dict[str, pd.DataFrame] = {}
+    if tf_group == "intraday":
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            d_futures = [pool.submit(_download_safe_batch, [f"{s}.NS" for s in part], "1y", "1d") for part in chunks]
+            for fut in d_futures:
+                try:
+                    daily_data.update(fut.result())
+                except Exception:
+                    pass
+    else:
+        daily_data = tf_data
+
+    return tf_data, daily_data
 
 # ===================================================================== TOOLBAR ROW
 live_fno_symbols = get_verified_nse_fno_list()
-fno_set = set(live_fno_symbols)  # केवल F&O स्टॉक्स की सख्त पुष्टि के लिए
+fno_set = set(live_fno_symbols)
 
 with st.container():
-    c1, c2, c3, c4, c5, c6, c7 = st.columns([1.7, 2.3, 1.0, 1.0, 1.1, 1.2, 0.8])
+    c1, c2, c3, c4, c5, c6, c7, c8 = st.columns([1.5, 1.8, 1.1, 0.9, 0.9, 1.0, 1.0, 0.7])
     with c1:
         universe_choice = st.selectbox(
             "📁 Universe",
@@ -371,14 +396,22 @@ with st.container():
             default=["15m", "1h", "1d"]
         )
     with c3:
-        side_filter = st.selectbox("⚖️ Side", ["All", "🟢 Demand", "🔴 Supply"], index=0)
+        # Range Filter Dropdown (Default Weekly)
+        range_choice = st.selectbox(
+            "🎯 Scan Range",
+            ["Weekly (Default)", "Daily", "Monthly"],
+            index=0
+        )
     with c4:
-        state_filter = st.selectbox("📌 Status", ["All", "Fresh", "Tested"], index=0)
+        side_filter = st.selectbox("⚖️ Side", ["All", "🟢 Demand", "🔴 Supply"], index=0)
     with c5:
-        sort_mode = st.selectbox("📏 Distance", ["Nearest ↑", "Farthest ↓"], index=0)
+        state_filter = st.selectbox("📌 Status", ["All", "Fresh", "Tested"], index=0)
     with c6:
-        search_query = st.text_input("🔍 Search", placeholder="RELIANCE, SBIN...")
+        # Deduplication विकल्प
+        dedup_choice = st.selectbox("⚡ Duplication", ["Unique (Nearest)", "All Zones"], index=0)
     with c7:
+        search_query = st.text_input("🔍 Search", placeholder="RELIANCE, SWIGGY...")
+    with c8:
         st.write("")
         st.write("")
         rescan = st.button("🚀 Scan", type="primary", use_container_width=True)
@@ -387,40 +420,33 @@ if not selected_tfs:
     st.warning("कृपया कम से कम एक Timeframe चुनें।")
     st.stop()
 
-# ===================================================================== EXECUTION SCAN
+# ===================================================================== SCANNING
+range_type = "Weekly" if "Weekly" in range_choice else ("Daily" if "Daily" in range_choice else "Monthly")
 tf_group = "intraday" if any(t in MINUTE_TFS or t in HOUR_TFS for t in selected_tfs) else "daily"
 univ_key = "NSE All Future Stocks" if "NSE All Future" in universe_choice else universe_choice
 
-with st.spinner(f"Scanning verified {universe_choice} across {', '.join(selected_tfs)}..."):
-    data_bundle = load_all_market_data(univ_key, tf_group, live_fno_symbols)
+with st.spinner(f"Scanning within {range_type} ATR(14) RMA Range..."):
+    tf_bundle, daily_bundle = load_all_market_data(univ_key, tf_group, live_fno_symbols)
     all_detected_zones = []
 
-    if univ_key == "Global Markets":
-        for item in GLOBAL_INSTRUMENTS:
-            key = item["key"]
-            raw_df = data_bundle.get(key)
-            if raw_df is None or raw_df.empty:
-                continue
-            for tf in selected_tfs:
-                resampled = resample_candles(raw_df, tf)
-                zones = detect_zones(resampled, tf, item["label"], is_global=True,
-                                     tv_eq_custom=item["tv_eq"], tv_fut_custom=item["tv_fut"])
-                all_detected_zones.extend(zones)
-    else:
-        # केवल वही स्टॉक्स स्कैन होंगे जो आधिकारिक F&O सेट (fno_set) में हैं
-        for sym, raw_df in data_bundle.items():
-            if sym not in fno_set:
-                continue
-            if raw_df is None or raw_df.empty:
-                continue
-            for tf in selected_tfs:
-                resampled = resample_candles(raw_df, tf)
-                zones = detect_zones(resampled, tf, sym)
-                all_detected_zones.extend(zones)
+    for sym, raw_df in tf_bundle.items():
+        if sym not in fno_set:
+            continue
+        if raw_df is None or raw_df.empty:
+            continue
+
+        # स्टॉक की विशिष्ट ATR Scan Range सीमाएं तय करें
+        df_d = daily_bundle.get(sym, raw_df)
+        r_min, r_max = get_scan_range_bounds(df_d, range_type=range_type)
+
+        for tf in selected_tfs:
+            resampled = resample_candles(raw_df, tf)
+            zones = detect_zones(resampled, tf, sym, range_min=r_min, range_max=r_max)
+            all_detected_zones.extend(zones)
 
 df_view = pd.DataFrame(all_detected_zones)
 
-# ===================================================================== DISPLAY (SHEETS FORMAT)
+# ===================================================================== DISPLAY (SHEETS VIEW)
 if not df_view.empty:
     if side_filter != "All":
         df_view = df_view[df_view["Zone Side"] == side_filter]
@@ -431,8 +457,12 @@ if not df_view.empty:
         pat = "|".join(re.escape(p) for p in parts)
         df_view = df_view[df_view["Equity_Name"].str.contains(pat, case=False, na=False, regex=True)]
 
-    ascending = True if sort_mode.startswith("Nearest") else False
-    df_view = df_view.sort_values(by="Distance Gap %", ascending=ascending).reset_index(drop=True)
+    # दूरी के आधार पर सॉर्ट करें
+    df_view = df_view.sort_values(by="Distance Gap %", ascending=True).reset_index(drop=True)
+
+    # डुप्लीकेसी फ़िल्टर (Deduplication): प्रति स्टॉक केवल 1 सबसे नज़दीकी ज़ोन
+    if dedup_choice == "Unique (Nearest)":
+        df_view = df_view.drop_duplicates(subset=["Equity_Name"], keep="first").reset_index(drop=True)
 
     display_df = df_view[[
         "Equity_Link", "Future_Link", "TF", "Zone Side", "Pattern", "Status",
@@ -442,13 +472,11 @@ if not df_view.empty:
     st.dataframe(
         display_df,
         column_config={
-            # 1. Equity / Cash कॉलम
             "Equity_Link": st.column_config.LinkColumn(
                 "Equity (Cash)",
                 display_text=r"symbol=(?:NSE%3A)?([^&!%]+)",
                 width="small"
             ),
-            # 2. Current Month Future कॉलम
             "Future_Link": st.column_config.LinkColumn(
                 "Current-Month Future",
                 display_text=r"symbol=(?:NSE%3A)?([^&%]+)",
@@ -477,9 +505,9 @@ if not df_view.empty:
 
     st.markdown(f"""
     <div class="sheet-statusbar">
-        <span>Rows: <b>{len(display_df)}</b> zones | Active Pool: <b>{len(live_fno_symbols)} Pure F&O Stocks (Auto-synced)</b></span>
-        <span>Strict F&O Filter Enabled (No outside symbols) | Left: Cash Chart | Right: Futures Chart</span>
+        <span>Active Zones: <b>{len(display_df)}</b> | Filter: <b>{range_type} ATR(14) RMA Scan Range</b> | Deduplication: <b>{dedup_choice}</b></span>
+        <span>Only In-Range Zones Displayed | Out-of-range zones filtered out</span>
     </div>
     """, unsafe_allow_html=True)
 else:
-    st.info("चयनित फिल्टर के आधार पर कोई ज़ोन नहीं मिला।")
+    st.info(f"चयनित {range_type} ATR Range में कोई ज़ोन नहीं मिला।")

@@ -18,7 +18,7 @@ import requests
 import streamlit as st
 
 st.set_page_config(
-    page_title="Pine v6 Zone Scanner (Exact Match)",
+    page_title="Pine v6 Zone Scanner (Strict Parity)",
     page_icon="🎯",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -60,7 +60,7 @@ div[data-testid="stTextInput"] input, div[data-testid="stSelectbox"] select {
 </style>
 """, unsafe_allow_html=True)
 
-# ===================================================================== 13 TIMEFRAMES
+# ===================================================================== TIMEFRAMES
 TIMEFRAMES = (
     "3m", "5m", "10m", "15m", "30m", "75m",
     "1h", "2h", "4h", "6h", "1d", "1w", "1M"
@@ -82,7 +82,7 @@ def tradingview_link(symbol: str, tf: str, is_future: bool = False) -> str:
 
 INDEX_EXCLUSIONS = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYIT", "NIFTYNXT50"}
 
-# ===================================================================== AUTO-SYNC LIVE F&O
+# ===================================================================== AUTO-SYNC LIVE F&O LIST
 @st.cache_data(ttl=12 * 3600, show_spinner=False)
 def get_verified_nse_fno_list() -> tuple[str, ...]:
     headers = {"User-Agent": "Mozilla/5.0", "Accept": "text/csv,application/json,*/*"}
@@ -201,7 +201,7 @@ def resample_candles(df: pd.DataFrame, tf: str) -> pd.DataFrame:
         "Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"
     }).dropna().sort_index() if rule else df
 
-# ===================================================================== EXACT PINE SCRIPT V6 ENGINE
+# ===================================================================== STRICT PINE SCRIPT V6 CORE ENGINE
 @dataclass
 class ZoneRecord:
     proxVal: float
@@ -215,8 +215,8 @@ class ZoneRecord:
     timestamp: Any
     densityScore: int
 
-class PurePineV6ZoneEngine:
-    """Pine Script v6 Code का हूबहू 1:1 निष्पादन"""
+class PineV6StrictCoreEngine:
+    """Pine Script v6 Code (f_candidate / Zone state) 100% 1-to-1 Translation"""
     def __init__(self, df: pd.DataFrame):
         self.df = df
         self.o = df["Open"].to_numpy(dtype=float)
@@ -228,7 +228,7 @@ class PurePineV6ZoneEngine:
         self.time_ms = df.index.view("int64") // 10**6
         self.dow = df.index.dayofweek.to_numpy() if self.n else np.array([], dtype=int)
 
-        # True Range array
+        # True Range
         tr = np.zeros(self.n)
         if self.n > 0:
             tr[0] = self.h[0] - self.l[0]
@@ -238,34 +238,29 @@ class PurePineV6ZoneEngine:
         self.atr = pine_rma(tr, 14)
         self.vol_sma = pd.Series(self.v).rolling(20).mean().to_numpy()
 
-    def tr_at(self, idx: int) -> float:
-        if idx <= 0:
+    def tr_val(self, i: int) -> float:
+        if i <= 0:
             return self.h[0] - self.l[0]
-        return max(self.h[idx] - self.l[idx], abs(self.h[idx] - self.c[idx - 1]), abs(self.l[idx] - self.c[idx - 1]))
+        return max(self.h[i] - self.l[i], abs(self.h[i] - self.c[i-1]), abs(self.l[i] - self.c[i-1]))
 
-    def is_bull(self, idx: int) -> bool: return self.c[idx] > self.o[idx]
-    def is_bear(self, idx: int) -> bool: return self.o[idx] > self.c[idx]
+    def wick_pct(self, i: int) -> float:
+        r = self.h[i] - self.l[i]
+        return 0.0 if r == 0 else ((self.h[i] - max(self.o[i], self.c[i])) + (min(self.o[i], self.c[i]) - self.l[i])) / r
 
-    def wick_pct(self, idx: int) -> float:
-        r = self.h[idx] - self.l[idx]
-        return 0.0 if r == 0 else ((self.h[idx] - max(self.o[idx], self.c[idx])) + (min(self.o[idx], self.c[idx]) - self.l[idx])) / r
+    def body_pct(self, i: int) -> float:
+        r = self.h[i] - self.l[i]
+        return 0.0 if r == 0 else abs(self.c[i] - self.o[i]) / r
 
-    def body_pct(self, idx: int) -> float:
-        r = self.h[idx] - self.l[idx]
-        return 0.0 if r == 0 else abs(self.c[idx] - self.o[idx]) / r
+    def is_bull(self, i: int) -> bool: return self.c[i] > self.o[i]
+    def is_bear(self, i: int) -> bool: return self.o[i] > self.c[i]
 
-    def is_overnight_gap(self, idx: int) -> bool:
-        if idx <= 0:
-            return False
-        return bool(self.dow[idx] != self.dow[idx - 1] or (self.time_ms[idx] - self.time_ms[idx - 1] > 86400000))
-
-    def evaluate_candidate(self, i: int, bc: int) -> Optional[dict]:
+    def _candidate(self, i: int, bc: int) -> Optional[dict]:
         li = i - (bc + 1)
         pi = li - 1
         if pi < 0 or np.isnan(self.atr[li]) or np.isnan(self.atr[i]):
             return None
 
-        inTR = self.tr_at(li)
+        inTR = self.tr_val(li)
         inLow, inHigh, inClose = self.l[li], self.h[li], self.c[li]
         inRange = inHigh - inLow
         inBull, inBear = self.is_bull(li), self.is_bear(li)
@@ -285,24 +280,24 @@ class PurePineV6ZoneEngine:
         bullClv = (inClose - inLow) / inRange
         bearClv = (inHigh - inClose) / inRange
 
-        # 3. Base Candles Loop
+        # 3. Base Candles Check
         baseOK = True
         baseTR = 0.0
         baseHigh = -1.0
         baseLow = 1e12
         for b in range(1, bc + 1):
-            b_idx = i - b
-            if np.isnan(self.atr[b_idx]):
+            idx = i - b
+            if np.isnan(self.atr[idx]):
                 baseOK = False
                 break
-            bt = self.tr_at(b_idx)
+            bt = self.tr_val(idx)
             # maxBaseAtrMult = 1.0
-            if bt > 1.0 * self.atr[b_idx]:
+            if bt > 1.0 * self.atr[idx]:
                 baseOK = False
                 break
             baseTR = max(baseTR, bt)
-            baseHigh = max(baseHigh, self.h[b_idx])
-            baseLow = min(baseLow, self.l[b_idx])
+            baseHigh = max(baseHigh, self.h[idx])
+            baseLow = min(baseLow, self.l[idx])
 
         if not baseOK or baseTR == 0:
             return None
@@ -312,20 +307,20 @@ class PurePineV6ZoneEngine:
         if inTR < effectiveMult * baseTR or not (inTR >= 1.0 * self.atr[li]):
             return None
 
-        outTR = self.tr_at(i)
+        outTR = self.tr_val(i)
         demand = self.is_bull(i)
         supply = self.is_bear(i)
         if not (demand or supply):
             return None
 
-        # 5. Explosive Leg-Out
+        # 5. Explosive Leg-Out (Must be >= 1.2 * ATR)
         explosive = outTR >= 1.2 * self.atr[i]
         wickOK = self.wick_pct(i) <= 0.30
         hierarchy = (outTR >= 1.0 * inTR) and (inTR > baseTR)
         volumeOK = self.v[i] > self.v[li]
-        overnight = self.is_overnight_gap(i)
+        overnight = (self.dow[i] != self.dow[i-1] or self.time_ms[i] - self.time_ms[i-1] > 86400000) if i > 0 else False
 
-        # 6. Imbalance (पाइन स्क्रिप्ट v6 का मूल नियम)
+        # 6. Imbalance (सख्त जांच - Pine: close[0] < inLow / close[0] > inHigh)
         gap = False
         imbalance = True
         if demand:
@@ -339,6 +334,7 @@ class PurePineV6ZoneEngine:
         if bodyEngulf and not gap:
             return None
 
+        # 7. Pattern Definitions
         rbr = inBull and bullClv >= 0.60 and demand
         dbr = inBear and bearClv >= 0.60 and demand
         dbd = inBear and bearClv >= 0.60 and supply
@@ -347,7 +343,7 @@ class PurePineV6ZoneEngine:
         if not ((rbr or dbr or dbd or rbd) and explosive and wickOK and hierarchy and volumeOK and imbalance):
             return None
 
-        # 7. Scoring System
+        # 8. Scoring System
         score = 0
         if bc == 1: score += 15
         if inTR >= 1.5 * self.atr[li]: score += 10
@@ -374,7 +370,6 @@ class PurePineV6ZoneEngine:
 
         prox = baseHigh if demand else baseLow
         dist = baseLow if demand else baseHigh
-        # Pine v6: mid level (testedLegOutRetracePct = 1.0)
         mid = (self.h[i] - 1.0 * (self.h[i] - self.l[i])) if demand else (self.l[i] + 1.0 * (self.h[i] - self.l[i]))
         pattern = "RBR" if rbr else ("DBR" if dbr else ("DBD" if dbd else "RBD"))
         return {
@@ -386,11 +381,10 @@ class PurePineV6ZoneEngine:
         active_zones: List[ZoneRecord] = []
         min_bar = max(14, 3 + 3, 11)
 
-        # बार-बाय-बार इतिहास लूप
         for i in range(self.n):
             low_i, high_i = self.l[i], self.h[i]
 
-            # 1. State Update
+            # 1. State Update Loop (Pine Script v6)
             for z in active_zones:
                 if z.state == "Broken":
                     continue
@@ -421,6 +415,7 @@ class PurePineV6ZoneEngine:
                             elif high_i >= z.legOutMidLevel:
                                 z.touchCount += 1
 
+                    # maxTestedCount = 1
                     if z.state == "Tested" and z.touchCount > 1:
                         z.state = "Broken"
 
@@ -430,11 +425,12 @@ class PurePineV6ZoneEngine:
                 for bc in range(1, 4):
                     if found:
                         break
-                    cand = self.evaluate_candidate(i, bc)
+                    cand = self._candidate(i, bc)
                     if cand is None:
                         continue
                     found = True
 
+                    # Duplicate check: 0.25 * ATR
                     duplicate = False
                     for old in reversed(active_zones):
                         if old.state == "Broken":
@@ -459,7 +455,7 @@ class PurePineV6ZoneEngine:
                     )
                     active_zones.append(z)
 
-        # केवल शुद्ध सक्रिय ज़ोन (Fresh & Tested) ही लौटेंगे
+        # केवल शुद्ध Active Zones (Fresh & Tested) ही बाहर जाएंगे, Broken हमेशा के लिए डिलीट
         return [z for z in active_zones if z.state in ("Fresh", "Tested")]
 
 # ===================================================================== DATA DOWNLOADER
@@ -482,7 +478,6 @@ def _download_safe_batch(tickers: list[str], period: str, interval: str) -> dict
         pass
     return out
 
-@st.cache_data(ttl=120, show_spinner=False)
 def load_all_market_data(tf_group: str, symbols: tuple[str, ...]) -> tuple[dict[str, pd.DataFrame], dict[str, pd.DataFrame]]:
     interval = "1m" if tf_group == "intraday" else "1d"
     period = "5d" if tf_group == "intraday" else "2y"
@@ -560,11 +555,12 @@ with st.spinner(f"Running Exact Pine v6 Engine across {len(live_fno_symbols)} st
             if len(resampled) < 25:
                 continue
 
-            engine = PurePineV6ZoneEngine(resampled)
+            engine = PineV6StrictCoreEngine(resampled)
             active_zones = engine.run_pine_engine()
             ltp = float(resampled["Close"].iloc[-1])
 
             for z in active_zones:
+                # ATR Scan Range Check
                 if not (r_min <= z.proxVal <= r_max or r_min <= z.distVal <= r_max):
                     continue
 
@@ -586,14 +582,14 @@ with st.spinner(f"Running Exact Pine v6 Engine across {len(live_fno_symbols)} st
 
 df_view = pd.DataFrame(all_raw_zones)
 
-# ===================================================================== EXACT CONFLUENCE (PRICE OVERLAP)
+# ===================================================================== PRICE-OVERLAP CONFLUENCE CHECK
 if not df_view.empty:
     confluence_labels = []
     for idx, row in df_view.iterrows():
         sym = row["Equity_Name"]
         side = row["Zone Side"]
         prox = row["Proximal"]
-        # केवल तभी Confluence माना जाएगा जब उसी सिंबल और साइड के अन्य टाइमफ्रेम में प्राइस 0.75% के भीतर हो
+        # केवल तभी Confluence जब प्राइस लेवल आपस में 0.75% के दायरे में मिले
         matches = df_view[
             (df_view["Equity_Name"] == sym) &
             (df_view["Zone Side"] == side) &
@@ -661,7 +657,7 @@ if not df_view.empty:
 
     st.markdown(f"""
     <div class="sheet-statusbar">
-        <span>Active Valid Zones: <b>{len(display_df)}</b> | Engine: <b>Pure Pine v6 Parity (100% Matches TradingView Chart Boxes)</b></span>
+        <span>Active Valid Zones: <b>{len(display_df)}</b> | Engine: <b>Strict Pine v6 (Matches TradingView Boxes 100%)</b></span>
         <span>Clean TV Links | Zero False Zones</span>
     </div>
     """, unsafe_allow_html=True)

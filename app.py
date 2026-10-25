@@ -5,9 +5,9 @@ _logging.getLogger("yfinance").setLevel(_logging.CRITICAL)
 
 import io
 import re
-import time
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
@@ -25,7 +25,7 @@ st.set_page_config(
 
 IST = ZoneInfo("Asia/Kolkata")
 
-# ===================================================================== CSS (Google Sheets Layout)
+# ===================================================================== CSS (Google Sheets Theme)
 st.markdown("""
 <style>
 :root { color-scheme: dark; }
@@ -68,33 +68,6 @@ MINUTE_TFS = {"3m", "5m", "10m", "15m", "30m", "75m"}
 HOUR_TFS = {"1h", "2h", "4h", "6h"}
 DAY_TFS = {"1d", "1w", "1M"}
 
-# ===================================================================== NSE ALL 215+ FUTURE STOCKS (पूर्ण सूची)
-NSE_FULL_FNO_LIST = tuple(sorted(set("""
-AARTIIND ABB ABBOTINDIA ABCAPITAL ABFRL ACC ADANIENSOL ADANIENT ADANIGREEN
-ADANIPORTS ALKEM AMBER AMBUJACEM ANGELONE APOLLOHOSP APOLLOTYRE ASHOKLEY
-ASIANPAINT ASTRAL ATUL AUBANK AUROPHARMA AXISBANK BAJAJ-AUTO BAJAJFINSV
-BAJFINANCE BALKRISIND BANDHANBNK BANKBARODA BANKINDIA BATAINDIA BEL BERGEPAINT
-BHARATFORG BHARTIARTL BHEL BIOCON BOSCHLTD BPCL BRITANNIA BSE CANBK CANFINHOME
-CDSL CESC CGPOWER CHAMBLFERT CHOLAFIN CIPLA COALINDIA COFORGE COLPAL CONCOR
-CROMPTON CUB CUMMINSIND CYIENT DABUR DALBHARAT DEEPAKNTR DELHIVERY DIVISLAB
-DIXON DLF DMART DRREDDY EICHERMOT ESCORTS EXIDEIND FEDERALBNK FORTIS GAIL
-GLENMARK GMRAIRPORT GODREJCP GODREJPROP GRANULES GRASIM GUJGASLTD HAL HAVELLS
-HCLTECH HDFCAMC HDFCBANK HDFCLIFE HEROMOTOCO HINDALCO HINDCOPPER HINDPETRO
-HINDUNILVR HUDCO ICICIBANK ICICIGI ICICIPRULI IDEA IDFCFIRSTB IEX INDHOTEL
-INDIAMART INDIGO INDUSINDBK INDUSTOWER INFY IOC IONEXCH IRB IRCTC IRFC IREDA
-ITC JINDALSTEL JIOFIN JSWENERGY JSWSTEEL JUBLFOOD KALYANKJIL KANSAINER KEI
-KOTAKBANK KPITTECH LALPATHLAB LAURUSLABS LT LTF LICI LTIM LTTS LUPIN M&M
-M&MFIN MANAPPURAM MARICO MARUTI MAXHEALTH MCDOWELL-N MCX METROPOLIS MFSL
-MGL MOTHERSON MPHASIS MUTHOOTFIN NATIONALUM NAUKRI NBCC NCC NESTLEIND NHPC
-NMDC NTPC NUVAMA OBEROIRLTY OFSS OIL ONGC PAGEIND PATANJALI PERSISTENT PETRONET
-PFC PGEL PHOENIXLTD PIIND PIDILITIND PNB POLICYBZR POLYCAB POWERGRID POWERINDIA
-PRESTIGE PVRINOX RAMCOCEM RBLBANK RECLTD RELIANCE SAIL SBICARD SBILIFE SBIN
-SHREECEM SHRIRAMFIN SIEMENS SOLARINDS SONACOMS SRF SUNPHARMA SUPREMEIND
-SUZLON SYNGENE TATACHEM TATACOMM TATACONSUM TATAELXSI TATAMOTORS TATAPOWER
-TATASTEEL TCS TECHM TIINDIA TITAGARH TITAN TMPV TORNTPHARM TRENT TVSMOTOR
-UBL ULTRACEMCO UNIONBANK UNITDSPR UPL VBL VEDL VOLTAS WIPRO YESBANK ZOMATO ZYDUSLIFE
-""".split())))
-
 GLOBAL_INSTRUMENTS = (
     {"key": "NIFTY 50", "yahoo": "^NSEI", "tv_eq": "NSE:NIFTY", "tv_fut": "NSE:NIFTY1!", "label": "NIFTY 50"},
     {"key": "BANKNIFTY", "yahoo": "^NSEBANK", "tv_eq": "NSE:BANKNIFTY", "tv_fut": "NSE:BANKNIFTY1!", "label": "BANKNIFTY"},
@@ -123,25 +96,93 @@ def tradingview_link(symbol: str, tf: str, is_future: bool = False, custom_tv: s
     encoded = quote(tv_sym, safe="")
     return f"https://in.tradingview.com/chart/?symbol={encoded}&interval={interval}"
 
-# ===================================================================== AUTO-SYNC LIVE LIST
-@st.cache_data(ttl=24 * 3600, show_spinner=False)
-def get_live_fno_list() -> tuple[str, ...]:
-    """NSE/Dhan से लिस्ट लाता है, अगर नेटवर्क समस्या हो तो पूरी 215 लिस्ट रिटर्न करता है"""
+# ===================================================================== STRICT NSE F&O AUTO-SYNC
+INDEX_EXCLUSIONS = {
+    "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYIT", "NIFTYNXT50"
+}
+
+@st.cache_data(ttl=12 * 3600, show_spinner=False)
+def get_verified_nse_fno_list() -> tuple[str, ...]:
+    """NSE Bhavcopy और Dhan Master से केवल शुद्ध Stock Futures (FUTSTK) लाता है"""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/csv,application/json,*/*",
+    }
+    
+    # स्रोत 1: Dhan Scrip Master (सख्त FUTSTK फ़िल्टर)
     try:
         url = "https://images.dhan.co/api-data/api-scrip-master.csv"
-        res = requests.get(url, timeout=5)
+        res = requests.get(url, headers=headers, timeout=6)
         if res.status_code == 200:
             df = pd.read_csv(io.StringIO(res.text), low_memory=False)
-            fno = df[(df["SEM_SEGMENT"] == "NSE_FNO") & (df["SEM_INSTRUMENT_NAME"] == "FUTSTK")]
-            syms = fno["SEM_UNDERLYING_SYMBOL"].dropna().unique()
-            clean = sorted([str(s).strip().upper() for s in syms if str(s).strip() and not str(s).startswith(("NIFTY", "BANKNIFTY"))])
-            if len(clean) >= 200:
+            # केवल शुद्ध स्टॉक फ्यूचर्स
+            cond = (
+                (df["SEM_SEGMENT"].astype(str).str.upper() == "NSE_FNO") &
+                (df["SEM_INSTRUMENT_NAME"].astype(str).str.upper() == "FUTSTK")
+            )
+            fno = df[cond]
+            raw_syms = fno["SEM_UNDERLYING_SYMBOL"].dropna().unique()
+            clean = []
+            for s in raw_syms:
+                sym_str = str(s).strip().upper()
+                if sym_str and sym_str not in INDEX_EXCLUSIONS and not any(sym_str.startswith(x) for x in ("NIFTY", "BANKNIFTY")):
+                    clean.append(sym_str)
+            clean = sorted(list(set(clean)))
+            if len(clean) >= 150:
                 return tuple(clean)
     except Exception:
         pass
-    return NSE_FULL_FNO_LIST
 
-# ===================================================================== CANDLE PROCESSING
+    # स्रोत 2: NSE Official FO Bhavcopy
+    today = datetime.now(IST).date()
+    for offset in range(5):
+        d = today - timedelta(days=offset)
+        if d.weekday() >= 5:
+            continue
+        udiff_url = f"https://nsearchives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_{d:%Y%m%d}_F_0000.csv.zip"
+        try:
+            r = requests.get(udiff_url, headers=headers, timeout=5)
+            if r.status_code == 200:
+                with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+                    for name in z.namelist():
+                        if name.endswith(".csv"):
+                            with z.open(name) as f:
+                                bdf = pd.read_csv(f, low_memory=False)
+                                stks = bdf[bdf["FinInstrmTp"].astype(str).str.upper() == "STF"]["TckrSymb"].dropna().unique()
+                                clean = sorted([str(s).strip().upper() for s in stks if str(s).strip() and str(s).strip().upper() not in INDEX_EXCLUSIONS])
+                                if len(clean) >= 150:
+                                    return tuple(clean)
+        except Exception:
+            continue
+
+    # स्रोत 3: आपातकालीन बैकअप (यदि इंटरनेट ब्लॉक हो)
+    return tuple(sorted(set("""
+    AARTIIND ABB ABBOTINDIA ABCAPITAL ABFRL ACC ADANIENSOL ADANIENT ADANIGREEN
+    ADANIPORTS ALKEM AMBER AMBUJACEM ANGELONE APOLLOHOSP APOLLOTYRE ASHOKLEY
+    ASIANPAINT ASTRAL ATUL AUBANK AUROPHARMA AXISBANK BAJAJ-AUTO BAJAJFINSV
+    BAJFINANCE BALKRISIND BANDHANBNK BANKBARODA BANKINDIA BATAINDIA BEL BERGEPAINT
+    BHARATFORG BHARTIARTL BHEL BIOCON BOSCHLTD BPCL BRITANNIA BSE CANBK CANFINHOME
+    CDSL CESC CGPOWER CHAMBLFERT CHOLAFIN CIPLA COALINDIA COFORGE COLPAL CONCOR
+    CROMPTON CUB CUMMINSIND CYIENT DABUR DALBHARAT DEEPAKNTR DELHIVERY DIVISLAB
+    DIXON DLF DMART DRREDDY EICHERMOT ESCORTS EXIDEIND FEDERALBNK FORTIS GAIL
+    GLENMARK GMRAIRPORT GODREJCP GODREJPROP GRANULES GRASIM GUJGASLTD HAL HAVELLS
+    HCLTECH HDFCAMC HDFCBANK HDFCLIFE HEROMOTOCO HINDALCO HINDCOPPER HINDPETRO
+    HINDUNILVR HUDCO ICICIBANK ICICIGI ICICIPRULI IDEA IDFCFIRSTB IEX INDHOTEL
+    INDIAMART INDIGO INDUSINDBK INDUSTOWER INFY IOC IONEXCH IRB IRCTC IRFC IREDA
+    ITC JINDALSTEL JIOFIN JSWENERGY JSWSTEEL JUBLFOOD KALYANKJIL KANSAINER KEI
+    KOTAKBANK KPITTECH LALPATHLAB LAURUSLABS LT LTF LICI LTIM LTTS LUPIN M&M
+    M&MFIN MANAPPURAM MARICO MARUTI MAXHEALTH MCDOWELL-N MCX METROPOLIS MFSL
+    MGL MOTHERSON MPHASIS MUTHOOTFIN NATIONALUM NAUKRI NBCC NCC NESTLEIND NHPC
+    NMDC NTPC NUVAMA OBEROIRLTY OFSS OIL ONGC PAGEIND PATANJALI PERSISTENT PETRONET
+    PFC PGEL PHOENIXLTD PIIND PIDILITIND PNB POLICYBZR POLYCAB POWERGRID POWERINDIA
+    PRESTIGE PVRINOX RAMCOCEM RBLBANK RECLTD RELIANCE SAIL SBICARD SBILIFE SBIN
+    SHREECEM SHRIRAMFIN SIEMENS SOLARINDS SONACOMS SRF SUNPHARMA SUPREMEIND
+    SUZLON SYNGENE TATACHEM TATACOMM TATACONSUM TATAELXSI TATAMOTORS TATAPOWER
+    TATASTEEL TCS TECHM TIINDIA TITAGARH TITAN TMPV TORNTPHARM TRENT TVSMOTOR
+    UBL ULTRACEMCO UNIONBANK UNITDSPR UPL VBL VEDL VOLTAS WIPRO YESBANK ZOMATO ZYDUSLIFE
+    """.split())))
+
+# ===================================================================== DATA UTILITIES
 OHLCV = ("Open", "High", "Low", "Close", "Volume")
 
 def normalize_ohlcv(df: pd.DataFrame | None) -> pd.DataFrame:
@@ -196,7 +237,6 @@ def detect_zones(df: pd.DataFrame, tf: str, symbol: str, is_global: bool = False
     chart_eq_url = tradingview_link(symbol, tf, is_future=False, custom_tv=tv_eq_custom)
     chart_fut_url = tradingview_link(symbol, tf, is_future=True, custom_tv=tv_fut_custom)
 
-    # Scan last 6 candles so that valid zones are not missed
     scan_depth = min(len(df) - 2, 7)
     for i in range(len(df) - 2, len(df) - 2 - scan_depth, -1):
         if i < 2:
@@ -206,7 +246,7 @@ def detect_zones(df: pd.DataFrame, tf: str, symbol: str, is_global: bool = False
             continue
         body = abs(c[i] - o[i])
         
-        # Bullish Demand
+        # Demand Zone
         if c[i] > o[i] and (body / span) >= 0.50:
             base_hi = max(h[i-1], h[i-2])
             base_lo = min(l[i-1], l[i-2])
@@ -229,7 +269,7 @@ def detect_zones(df: pd.DataFrame, tf: str, symbol: str, is_global: bool = False
                 })
                 break
 
-        # Bearish Supply
+        # Supply Zone
         elif o[i] > c[i] and (body / span) >= 0.50:
             base_hi = max(h[i-1], h[i-2])
             base_lo = min(l[i-1], l[i-2])
@@ -253,7 +293,7 @@ def detect_zones(df: pd.DataFrame, tf: str, symbol: str, is_global: bool = False
                 break
     return zones
 
-# ===================================================================== SAFE BATCH DOWNLOADER (NO DROPS)
+# ===================================================================== BATCH DOWNLOAD
 def _download_safe_batch(tickers: list[str], period: str, interval: str) -> dict[str, pd.DataFrame]:
     import yfinance as yf
     out = {}
@@ -294,7 +334,7 @@ def load_all_market_data(universe_type: str, tf_group: str, fno_pool: tuple[str,
 
     symbols = fno_pool if "NSE All Future" in universe_type else fno_pool[:50]
     
-    # याहू रेट-लिमिट से बचने के लिए 15-15 के सेफ चंक्स में डाउनलोड करें
+    # 15-15 के सेफ चंक्स में डाउनलोड
     chunk_size = 15
     chunks = [list(symbols)[i:i + chunk_size] for i in range(0, len(symbols), chunk_size)]
     combined: dict[str, pd.DataFrame] = {}
@@ -313,7 +353,8 @@ def load_all_market_data(universe_type: str, tf_group: str, fno_pool: tuple[str,
     return combined
 
 # ===================================================================== TOOLBAR ROW
-live_fno_symbols = get_live_fno_list()
+live_fno_symbols = get_verified_nse_fno_list()
+fno_set = set(live_fno_symbols)  # केवल F&O स्टॉक्स की सख्त पुष्टि के लिए
 
 with st.container():
     c1, c2, c3, c4, c5, c6, c7 = st.columns([1.7, 2.3, 1.0, 1.0, 1.1, 1.2, 0.8])
@@ -336,7 +377,7 @@ with st.container():
     with c5:
         sort_mode = st.selectbox("📏 Distance", ["Nearest ↑", "Farthest ↓"], index=0)
     with c6:
-        search_query = st.text_input("🔍 Search", placeholder="RELIANCE, COFORGE...")
+        search_query = st.text_input("🔍 Search", placeholder="RELIANCE, SBIN...")
     with c7:
         st.write("")
         st.write("")
@@ -350,7 +391,7 @@ if not selected_tfs:
 tf_group = "intraday" if any(t in MINUTE_TFS or t in HOUR_TFS for t in selected_tfs) else "daily"
 univ_key = "NSE All Future Stocks" if "NSE All Future" in universe_choice else universe_choice
 
-with st.spinner(f"Scanning all {len(live_fno_symbols)} F&O stocks across {', '.join(selected_tfs)}..."):
+with st.spinner(f"Scanning verified {universe_choice} across {', '.join(selected_tfs)}..."):
     data_bundle = load_all_market_data(univ_key, tf_group, live_fno_symbols)
     all_detected_zones = []
 
@@ -366,7 +407,10 @@ with st.spinner(f"Scanning all {len(live_fno_symbols)} F&O stocks across {', '.j
                                      tv_eq_custom=item["tv_eq"], tv_fut_custom=item["tv_fut"])
                 all_detected_zones.extend(zones)
     else:
+        # केवल वही स्टॉक्स स्कैन होंगे जो आधिकारिक F&O सेट (fno_set) में हैं
         for sym, raw_df in data_bundle.items():
+            if sym not in fno_set:
+                continue
             if raw_df is None or raw_df.empty:
                 continue
             for tf in selected_tfs:
@@ -376,7 +420,7 @@ with st.spinner(f"Scanning all {len(live_fno_symbols)} F&O stocks across {', '.j
 
 df_view = pd.DataFrame(all_detected_zones)
 
-# ===================================================================== GOOGLE SHEETS TABLE VIEW
+# ===================================================================== DISPLAY (SHEETS FORMAT)
 if not df_view.empty:
     if side_filter != "All":
         df_view = df_view[df_view["Zone Side"] == side_filter]
@@ -390,7 +434,6 @@ if not df_view.empty:
     ascending = True if sort_mode.startswith("Nearest") else False
     df_view = df_view.sort_values(by="Distance Gap %", ascending=ascending).reset_index(drop=True)
 
-    # टेबल कॉलम लेआउट
     display_df = df_view[[
         "Equity_Link", "Future_Link", "TF", "Zone Side", "Pattern", "Status",
         "Score", "Proximal (₹)", "Distal (₹)", "Current LTP", "Distance Gap %", "Created Date"
@@ -434,8 +477,8 @@ if not df_view.empty:
 
     st.markdown(f"""
     <div class="sheet-statusbar">
-        <span>Rows: <b>{len(display_df)}</b> zones | Active Universe: <b>{len(live_fno_symbols)} All F&O Stocks (Live Pool)</b></span>
-        <span>Left: Clean Cash Chart | Right: Current Month Futures Chart (Both linked to exact TF)</span>
+        <span>Rows: <b>{len(display_df)}</b> zones | Active Pool: <b>{len(live_fno_symbols)} Pure F&O Stocks (Auto-synced)</b></span>
+        <span>Strict F&O Filter Enabled (No outside symbols) | Left: Cash Chart | Right: Futures Chart</span>
     </div>
     """, unsafe_allow_html=True)
 else:

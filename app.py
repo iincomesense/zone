@@ -5,7 +5,6 @@ _logging.getLogger("yfinance").setLevel(_logging.CRITICAL)
 
 import io
 import re
-import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -19,7 +18,7 @@ import requests
 import streamlit as st
 
 st.set_page_config(
-    page_title="Pine v6 Zone Scanner (Exact Parity)",
+    page_title="Pine v6 Zone Scanner",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -27,7 +26,7 @@ st.set_page_config(
 
 IST = ZoneInfo("Asia/Kolkata")
 
-# ===================================================================== CSS (Google Sheets Layout)
+# ===================================================================== CSS (Google Sheets Theme)
 st.markdown("""
 <style>
 :root { color-scheme: dark; }
@@ -202,7 +201,7 @@ def resample_candles(df: pd.DataFrame, tf: str) -> pd.DataFrame:
         "Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"
     }).dropna().sort_index() if rule else df
 
-# ===================================================================== STRICT PINE V6 ENGINE
+# ===================================================================== PINE SCRIPT V6 EXACT PORT
 @dataclass
 class ZoneRecord:
     proxVal: float
@@ -228,7 +227,6 @@ class PineV6ExactEngine:
         self.time_ms = df.index.view("int64") // 10**6
         self.dow = df.index.dayofweek.to_numpy() if self.n else np.array([], dtype=int)
         
-        # True Range
         tr = np.zeros(self.n)
         if self.n > 0:
             tr[0] = self.h[0] - self.l[0]
@@ -265,10 +263,11 @@ class PineV6ExactEngine:
         inRange = inHigh - inLow
         inBull, inBear = self.is_bull(li), self.is_bear(li)
 
+        # legInMinBodyPct = 0.60
         if inRange == 0 or self.body_pct(li) < 0.60:
             return None
 
-        # Opposite Cover Check
+        # Opposite Cover Check (rejectOppositeCoverPct = 0.50)
         opposite = (inBull and self.is_bear(pi)) or (inBear and self.is_bull(pi))
         prevHi = max(self.o[pi], self.c[pi])
         prevLo = min(self.o[pi], self.c[pi])
@@ -309,28 +308,22 @@ class PineV6ExactEngine:
         if not (demand or supply):
             return None
 
-        explosive = outTR >= 1.2 * self.atr[i]
-        wickOK = self.wick_pct(i) <= 0.30
+        explosive = outTR >= 1.2 * self.atr[i]   # legOutTrMult = 1.2
+        wickOK = self.wick_pct(i) <= 0.30        # maxWickPct = 0.30
         hierarchy = (outTR >= 1.0 * inTR) and (inTR > baseTR)
         volumeOK = self.v[i] > self.v[li]
         overnight = (self.dow[i] != self.dow[i-1] or self.time_ms[i] - self.time_ms[i-1] > 86400000) if i > 0 else False
 
-        # Pine Script Imbalance Rules (Strict)
+        gap = False
+        imbalance = True
         if demand:
             gap = self.l[i] > baseHigh
             imbalance = gap or (self.c[i] > inHigh)
-            bodyEngulf = min(self.o[i], self.c[i]) <= baseLow and max(self.o[i], self.c[i]) >= baseHigh
-            # Demand zone requires close above baseHigh
-            if self.c[i] <= baseHigh:
-                return None
         else:
             gap = self.h[i] < baseLow
             imbalance = gap or (self.c[i] < inLow)
-            bodyEngulf = min(self.o[i], self.c[i]) <= baseLow and max(self.o[i], self.c[i]) >= baseHigh
-            # Supply zone requires close below baseLow (YESBANK Fix: Close must break below Base Low)
-            if self.c[i] >= baseLow:
-                return None
 
+        bodyEngulf = min(self.o[i], self.c[i]) <= baseLow and max(self.o[i], self.c[i]) >= baseHigh
         if bodyEngulf and not gap:
             return None
 
@@ -368,8 +361,8 @@ class PineV6ExactEngine:
 
         prox = baseHigh if demand else baseLow
         dist = baseLow if demand else baseHigh
-        # Pine v6: mid = 100% retrace of leg out candle
-        mid = self.l[i] if demand else self.h[i]
+        # Pine v6: mid level
+        mid = (self.h[i] - 1.0 * (self.h[i] - self.l[i])) if demand else (self.l[i] + 1.0 * (self.h[i] - self.l[i]))
         pattern = "RBR" if rbr else ("DBR" if dbr else ("DBD" if dbd else "RBD"))
         return {
             "prox": prox, "dist": dist, "mid": mid, "demand": demand,
@@ -380,10 +373,11 @@ class PineV6ExactEngine:
         active_zones: List[ZoneRecord] = []
         min_bar = max(14, 3 + 3, 11)
 
+        # Chronological loop
         for i in range(self.n):
             low_i, high_i = self.l[i], self.h[i]
 
-            # 1. State Update (Pine Rule: Tested on mid, Broken on Distal)
+            # 1. State Update
             for z in active_zones:
                 if z.state == "Broken":
                     continue
@@ -452,7 +446,7 @@ class PineV6ExactEngine:
                     )
                     active_zones.append(z)
 
-        # केवल सक्रिय (Fresh या Tested) ज़ोन बाहर जाएँगे
+        # Return only Fresh or Tested zones
         return [z for z in active_zones if z.state in ("Fresh", "Tested")]
 
 # ===================================================================== DATA DOWNLOADER
@@ -468,11 +462,7 @@ def _download_safe_batch(tickers: list[str], period: str, interval: str) -> dict
                 frame = raw[tk] if len(tickers) > 1 else raw
                 clean = normalize_ohlcv(frame)
                 if not clean.empty:
-                    # केवल पूर्ण/क्लोज्ड कैंडल लें ताकि अनक्लोज्ड लाइव बार पर गलत ज़ोन न बने
-                    if len(clean) > 1:
-                        out[sym] = clean.iloc[:-1]
-                    else:
-                        out[sym] = clean
+                    out[sym] = clean
             except Exception:
                 pass
     except Exception:
@@ -537,11 +527,11 @@ if not selected_tfs:
     st.warning("कृपया कम से कम एक Timeframe चुनें।")
     st.stop()
 
-# ===================================================================== EXECUTION
+# ===================================================================== SCANNING
 range_type = "Weekly" if "Weekly" in range_choice else ("Daily" if "Daily" in range_choice else "Monthly")
 tf_group = "intraday" if any(t in MINUTE_TFS or t in HOUR_TFS for t in selected_tfs) else "daily"
 
-with st.spinner(f"Running Exact Pine v6 Engine across {len(live_fno_symbols)} stocks in {range_type} ATR Range..."):
+with st.spinner(f"Running Pine v6 Engine across {len(live_fno_symbols)} stocks in {range_type} ATR Range..."):
     tf_bundle, daily_bundle = load_all_market_data(tf_group, live_fno_symbols)
     all_raw_zones = []
 
@@ -562,6 +552,7 @@ with st.spinner(f"Running Exact Pine v6 Engine across {len(live_fno_symbols)} st
             ltp = float(resampled["Close"].iloc[-1])
 
             for z in active_zones:
+                # ATR Scan Range Check
                 if not (r_min <= z.proxVal <= r_max or r_min <= z.distVal <= r_max):
                     continue
 
@@ -574,8 +565,8 @@ with st.spinner(f"Running Exact Pine v6 Engine across {len(live_fno_symbols)} st
                     "Zone Side": "🟢 Demand" if z.isDemand else "🔴 Supply",
                     "Pattern": z.patternType,
                     "Status": z.state,
-                    "Proximal (₹)": round(z.proxVal, 2),
-                    "Distal (₹)": round(z.distVal, 2),
+                    "Proximal": round(z.proxVal, 2),
+                    "Distal": round(z.distVal, 2),
                     "Current LTP": round(ltp, 2),
                     "Distance Gap %": dist_pct,
                     "Created Date": z.timestamp.strftime("%d-%b %H:%M"),
@@ -583,12 +574,29 @@ with st.spinner(f"Running Exact Pine v6 Engine across {len(live_fno_symbols)} st
 
 df_view = pd.DataFrame(all_raw_zones)
 
-# ===================================================================== DISPLAY
+# ===================================================================== PRICE-OVERLAP CONFLUENCE CHECK
 if not df_view.empty:
-    tf_counts = df_view.groupby(["Equity_Name", "Zone Side"])["TF"].transform("nunique")
-    df_view["Multi-TF Zone"] = tf_counts.apply(
-        lambda count: f"🔥 Confluence ({count}x TF)" if count >= 3 else (f"⭐ Multi-TF (2x)" if count == 2 else "—")
-    )
+    # केवल वही Confluence कहलाएगा जिसकी प्राइस रेंज (Proximal) वास्तव में ओवरलैप हो रही हो
+    confluence_labels = []
+    for idx, row in df_view.iterrows():
+        sym = row["Equity_Name"]
+        side = row["Zone Side"]
+        prox = row["Proximal"]
+        # उसी सिंबल और साइड के अन्य टाइमफ्रेम में अगर प्राइस 0.75% के दायरे में है तो मैच
+        matches = df_view[
+            (df_view["Equity_Name"] == sym) &
+            (df_view["Zone Side"] == side) &
+            (abs(df_view["Proximal"] - prox) / prox <= 0.0075)
+        ]["TF"].nunique()
+
+        if matches >= 3:
+            confluence_labels.append(f"🔥 Confluence ({matches}x TF)")
+        elif matches == 2:
+            confluence_labels.append("⭐ Multi-TF (2x)")
+        else:
+            confluence_labels.append("—")
+
+    df_view["Multi-TF Zone"] = confluence_labels
 
     if side_filter != "All":
         df_view = df_view[df_view["Zone Side"] == side_filter]
@@ -603,7 +611,7 @@ if not df_view.empty:
 
     display_df = df_view[[
         "Equity_Link", "Future_Link", "TF", "Zone Side", "Pattern", "Status",
-        "Multi-TF Zone", "Proximal (₹)", "Distal (₹)", "Current LTP", "Distance Gap %", "Created Date"
+        "Multi-TF Zone", "Proximal", "Distal", "Current LTP", "Distance Gap %", "Created Date"
     ]]
 
     st.dataframe(
@@ -624,8 +632,8 @@ if not df_view.empty:
             "Pattern": st.column_config.TextColumn("Pattern", width="small"),
             "Status": st.column_config.TextColumn("Status", width="small"),
             "Multi-TF Zone": st.column_config.TextColumn("Multi-TF Highlight", width="medium"),
-            "Proximal (₹)": st.column_config.NumberColumn("Proximal (₹)", format="%.2f"),
-            "Distal (₹)": st.column_config.NumberColumn("Distal (₹)", format="%.2f"),
+            "Proximal": st.column_config.NumberColumn("Proximal (₹)", format="%.2f"),
+            "Distal": st.column_config.NumberColumn("Distal (₹)", format="%.2f"),
             "Current LTP": st.column_config.NumberColumn("Current LTP", format="₹%.2f"),
             "Distance Gap %": st.column_config.ProgressColumn(
                 "Distance Gap %",
@@ -642,8 +650,8 @@ if not df_view.empty:
 
     st.markdown(f"""
     <div class="sheet-statusbar">
-        <span>Active Valid Zones: <b>{len(display_df)}</b> | Engine: <b>Strict Pine v6 (100% Matches TradingView)</b></span>
-        <span>Clean TradingView Links | Closed Bars Only</span>
+        <span>Active Valid Zones: <b>{len(display_df)}</b> | Engine: <b>Strict Pine v6 (Price-Matched Confluence)</b></span>
+        <span>Clean TV Links (No MTF Clutter) | Exact Candle Match</span>
     </div>
     """, unsafe_allow_html=True)
 else:

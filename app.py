@@ -3,14 +3,17 @@ from __future__ import annotations
 import logging as _logging
 _logging.getLogger("yfinance").setLevel(_logging.CRITICAL)
 
+import io
 import re
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
+import requests
 import streamlit as st
 
 st.set_page_config(
@@ -56,36 +59,10 @@ div[data-testid="stTextInput"] input, div[data-testid="stSelectbox"] select {
 </style>
 """, unsafe_allow_html=True)
 
-# ===================================================================== 200+ NSE F&O UNIVERSE
+# ===================================================================== TIMEFRAMES & GLOBAL
 TIMEFRAMES = ("3m", "5m", "10m", "15m", "30m", "75m", "1h", "2h", "4h", "1d", "1w", "1M")
 MINUTE_TFS = {"3m", "5m", "10m", "15m", "30m", "75m"}
 HOUR_TFS = {"1h", "2h", "4h"}
-
-NSE_ALL_FNO = tuple(sorted(set("""
-AARTIIND ABB ABBOTINDIA ABCAPITAL ABFRL ACC ADANIENSOL ADANIENT ADANIGREEN
-ADANIPORTS ALKEM AMBER AMBUJACEM ANGELONE APOLLOHOSP APOLLOTYRE ASHOKLEY
-ASIANPAINT ASTRAL ATUL AUBANK AUROPHARMA AXISBANK BAJAJ-AUTO BAJAJFINSV
-BAJFINANCE BALKRISIND BANDHANBNK BANKBARODA BANKINDIA BATAINDIA BEL BERGEPAINT
-BHARATFORG BHARTIARTL BHEL BIOCON BOSCHLTD BPCL BRITANNIA BSE CANBK CANFINHOME
-CDSL CESC CGPOWER CHAMBLFERT CHOLAFIN CIPLA COALINDIA COFORGE COLPAL CONCOR
-CROMPTON CUB CUMMINSIND CYIENT DABUR DALBHARAT DEEPAKNTR DELHIVERY DIVISLAB
-DIXON DLF DMART DRREDDY EICHERMOT ESCORTS EXIDEIND FEDERALBNK FORTIS GAIL
-GLENMARK GMRAIRPORT GODREJCP GODREJPROP GRANULES GRASIM GUJGASLTD HAL HAVELLS
-HCLTECH HDFCAMC HDFCBANK HDFCLIFE HEROMOTOCO HINDALCO HINDCOPPER HINDPETRO
-HINDUNILVR HUDCO ICICIBANK ICICIGI ICICIPRULI IDEA IDFCFIRSTB IEX INDHOTEL
-INDIAMART INDIGO INDUSINDBK INDUSTOWER INFY IOC IONEXCH IRB IRCTC IRFC IREDA
-ITC JINDALSTEL JIOFIN JSWENERGY JSWSTEEL JUBLFOOD KALYANKJIL KANSAINER KEI
-KOTAKBANK KPITTECH LALPATHLAB LAURUSLABS LT LTF LICI LTIM LTTS LUPIN M&M
-M&MFIN MANAPPURAM MARICO MARUTI MAXHEALTH MCDOWELL-N MCX METROPOLIS MFSL
-MGL MOTHERSON MPHASIS MUTHOOTFIN NATIONALUM NAUKRI NBCC NCC NESTLEIND NHPC
-NMDC NTPC NUVAMA OBEROIRLTY OFSS OIL ONGC PAGEIND PATANJALI PERSISTENT PETRONET
-PFC PGEL PHOENIXLTD PIIND PIDILITIND PNB POLICYBZR POLYCAB POWERGRID POWERINDIA
-PRESTIGE PVRINOX RAMCOCEM RBLBANK RECLTD RELIANCE SAIL SBICARD SBILIFE SBIN
-SHREECEM SHRIRAMFIN SIEMENS SOLARINDS SONACOMS SRF SUNPHARMA SUPREMEIND
-SUZLON SYNGENE TATACHEM TATACOMM TATACONSUM TATAELXSI TATAMOTORS TATAPOWER
-TATASTEEL TCS TECHM TITAGARH TITAN TORNTPHARM TRENT TVSMOTOR UBL ULTRACEMCO
-UNIONBANK UNITDSPR UPL VBL VEDL VOLTAS WIPRO YESBANK ZOMATO ZYDUSLIFE
-""".split())))
 
 GLOBAL_INSTRUMENTS = (
     {"key": "NIFTY 50", "yahoo": "^NSEI", "tv": "NSE:NIFTY1!", "label": "NIFTY 50"},
@@ -113,6 +90,78 @@ def tradingview_link(symbol: str, tf: str, is_global: bool = False, custom_tv: s
         tv_sym = f"NSE:{symbol}1!"
     encoded = quote(tv_sym, safe="")
     return f"https://in.tradingview.com/chart/?symbol={encoded}&interval={interval}"
+
+# ===================================================================== DYNAMIC F&O LIST FETCHER
+@st.cache_data(ttl=24 * 3600, show_spinner=False)
+def fetch_live_nse_fno_list() -> tuple[str, ...]:
+    """NSE Bhavcopy और Dhan Scrip Master से लाइव F&O स्टॉक्स की ताज़ा सूची लाता है"""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/csv,application/json,*/*",
+    }
+    
+    # 1. Dhan Scrip Master (सबसे तेज़ और विश्वसनीय स्रोत)
+    try:
+        url = "https://images.dhan.co/api-data/api-scrip-master.csv"
+        res = requests.get(url, headers=headers, timeout=6)
+        if res.status_code == 200:
+            df = pd.read_csv(io.StringIO(res.text), low_memory=False)
+            fno_df = df[(df["SEM_SEGMENT"] == "NSE_FNO") & (df["SEM_INSTRUMENT_NAME"] == "FUTSTK")]
+            symbols = fno_df["SEM_UNDERLYING_SYMBOL"].dropna().unique()
+            clean_syms = sorted([str(s).strip().upper() for s in symbols if str(s).strip() and not str(s).startswith("NIFTY") and not str(s).startswith("BANKNIFTY")])
+            if len(clean_syms) > 100:
+                return tuple(clean_syms)
+    except Exception:
+        pass
+
+    # 2. बैकअप: NSE Bhavcopy UDIFF फ़ाइल
+    today = datetime.now(IST).date()
+    for offset in range(5):
+        d = today - timedelta(days=offset)
+        if d.weekday() >= 5:
+            continue
+        udiff_url = f"https://nsearchives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_{d:%Y%m%d}_F_0000.csv.zip"
+        try:
+            r = requests.get(udiff_url, headers=headers, timeout=5)
+            if r.status_code == 200:
+                with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+                    for name in z.namelist():
+                        if name.endswith(".csv"):
+                            with z.open(name) as f:
+                                bdf = pd.read_csv(f, low_memory=False)
+                                stks = bdf[bdf["FinInstrmTp"] == "STF"]["TckrSymb"].dropna().unique()
+                                clean_syms = sorted([str(s).strip().upper() for s in stks if str(s).strip()])
+                                if len(clean_syms) > 100:
+                                    return tuple(clean_syms)
+        except Exception:
+            continue
+
+    # 3. फॉलबैक अगर नेटवर्क ब्लॉक हो
+    return tuple(sorted(set("""
+    AARTIIND ABB ABBOTINDIA ABCAPITAL ABFRL ACC ADANIENSOL ADANIENT ADANIGREEN
+    ADANIPORTS ALKEM AMBER AMBUJACEM ANGELONE APOLLOHOSP APOLLOTYRE ASHOKLEY
+    ASIANPAINT ASTRAL ATUL AUBANK AUROPHARMA AXISBANK BAJAJ-AUTO BAJAJFINSV
+    BAJFINANCE BALKRISIND BANDHANBNK BANKBARODA BANKINDIA BATAINDIA BEL BERGEPAINT
+    BHARATFORG BHARTIARTL BHEL BIOCON BOSCHLTD BPCL BRITANNIA BSE CANBK CANFINHOME
+    CDSL CESC CGPOWER CHAMBLFERT CHOLAFIN CIPLA COALINDIA COFORGE COLPAL CONCOR
+    CROMPTON CUB CUMMINSIND CYIENT DABUR DALBHARAT DEEPAKNTR DELHIVERY DIVISLAB
+    DIXON DLF DMART DRREDDY EICHERMOT ESCORTS EXIDEIND FEDERALBNK FORTIS GAIL
+    GLENMARK GMRAIRPORT GODREJCP GODREJPROP GRANULES GRASIM GUJGASLTD HAL HAVELLS
+    HCLTECH HDFCAMC HDFCBANK HDFCLIFE HEROMOTOCO HINDALCO HINDCOPPER HINDPETRO
+    HINDUNILVR HUDCO ICICIBANK ICICIGI ICICIPRULI IDEA IDFCFIRSTB IEX INDHOTEL
+    INDIAMART INDIGO INDUSINDBK INDUSTOWER INFY IOC IONEXCH IRB IRCTC IRFC IREDA
+    ITC JINDALSTEL JIOFIN JSWENERGY JSWSTEEL JUBLFOOD KALYANKJIL KANSAINER KEI
+    KOTAKBANK KPITTECH LALPATHLAB LAURUSLABS LT LTF LICI LTIM LTTS LUPIN M&M
+    M&MFIN MANAPPURAM MARICO MARUTI MAXHEALTH MCDOWELL-N MCX METROPOLIS MFSL
+    MGL MOTHERSON MPHASIS MUTHOOTFIN NATIONALUM NAUKRI NBCC NCC NESTLEIND NHPC
+    NMDC NTPC NUVAMA OBEROIRLTY OFSS OIL ONGC PAGEIND PATANJALI PERSISTENT PETRONET
+    PFC PGEL PHOENIXLTD PIIND PIDILITIND PNB POLICYBZR POLYCAB POWERGRID POWERINDIA
+    PRESTIGE PVRINOX RAMCOCEM RBLBANK RECLTD RELIANCE SAIL SBICARD SBILIFE SBIN
+    SHREECEM SHRIRAMFIN SIEMENS SOLARINDS SONACOMS SRF SUNPHARMA SUPREMEIND
+    SUZLON SYNGENE TATACHEM TATACOMM TATACONSUM TATAELXSI TATAMOTORS TATAPOWER
+    TATASTEEL TCS TECHM TITAGARH TITAN TORNTPHARM TRENT TVSMOTOR UBL ULTRACEMCO
+    UNIONBANK UNITDSPR UPL VBL VEDL VOLTAS WIPRO YESBANK ZOMATO ZYDUSLIFE
+    """.split())))
 
 # ===================================================================== DATA UTILS
 OHLCV = ("Open", "High", "Low", "Close", "Volume")
@@ -170,7 +219,7 @@ def detect_zones(df: pd.DataFrame, tf: str, symbol: str, is_global: bool = False
             continue
         body = abs(c[i] - o[i])
         
-        # Demand Zone
+        # Bullish Demand Zone
         if c[i] > o[i] and (body / span) >= 0.55:
             base_hi = max(h[i-1], h[i-2])
             base_lo = min(l[i-1], l[i-2])
@@ -178,7 +227,7 @@ def detect_zones(df: pd.DataFrame, tf: str, symbol: str, is_global: bool = False
                 dist_pct = round(abs(ltp - base_hi) / ltp * 100, 2)
                 zones.append({
                     "Symbol_Link": chart_url,
-                    "Equity": symbol,  # साफ इक्विटी नाम
+                    "Equity": symbol,  # शुद्ध इक्विटी/कैश नाम
                     "TF": tf,
                     "Zone Side": "🟢 Demand",
                     "Pattern": "DBR" if o[i-2] > c[i-2] else "RBR",
@@ -192,7 +241,7 @@ def detect_zones(df: pd.DataFrame, tf: str, symbol: str, is_global: bool = False
                 })
                 break
 
-        # Supply Zone
+        # Bearish Supply Zone
         elif o[i] > c[i] and (body / span) >= 0.55:
             base_hi = max(h[i-1], h[i-2])
             base_lo = min(l[i-1], l[i-2])
@@ -200,7 +249,7 @@ def detect_zones(df: pd.DataFrame, tf: str, symbol: str, is_global: bool = False
                 dist_pct = round(abs(ltp - base_lo) / ltp * 100, 2)
                 zones.append({
                     "Symbol_Link": chart_url,
-                    "Equity": symbol,  # साफ इक्विटी नाम
+                    "Equity": symbol,  # शुद्ध इक्विटी/कैश नाम
                     "TF": tf,
                     "Zone Side": "🔴 Supply",
                     "Pattern": "RBD" if c[i-2] > o[i-2] else "DBD",
@@ -215,13 +264,13 @@ def detect_zones(df: pd.DataFrame, tf: str, symbol: str, is_global: bool = False
                 break
     return zones
 
-# ===================================================================== PARALLEL DOWNLOAD
+# ===================================================================== DOWNLOAD DATA
 def _fetch_ticker_data(ticker_map: dict[str, str], period: str, interval: str) -> dict[str, pd.DataFrame]:
     import yfinance as yf
     tickers = list(ticker_map.values())
     try:
         raw = yf.download(tickers, period=period, interval=interval, group_by="ticker",
-                          progress=False, threads=True, timeout=12)
+                          progress=False, threads=True, timeout=14)
         out = {}
         for sym, tk in ticker_map.items():
             try:
@@ -233,8 +282,8 @@ def _fetch_ticker_data(ticker_map: dict[str, str], period: str, interval: str) -
     except Exception:
         return {sym: pd.DataFrame() for sym in ticker_map}
 
-@st.cache_data(ttl=120, show_spinner=False)
-def load_all_market_data(universe_type: str, tf_group: str) -> dict[str, pd.DataFrame]:
+@st.cache_data(ttl=150, show_spinner=False)
+def load_all_market_data(universe_type: str, tf_group: str, fno_pool: tuple[str, ...]) -> dict[str, pd.DataFrame]:
     interval = "1m" if tf_group == "intraday" else "1d"
     period = "5d" if tf_group == "intraday" else "1y"
 
@@ -242,10 +291,10 @@ def load_all_market_data(universe_type: str, tf_group: str) -> dict[str, pd.Data
         ticker_map = {item["key"]: item["yahoo"] for item in GLOBAL_INSTRUMENTS}
         return _fetch_ticker_data(ticker_map, period, interval)
 
-    symbols = NSE_ALL_FNO if universe_type == "NSE All Future Stocks" else NSE_ALL_FNO[:50]
+    symbols = fno_pool if universe_type == "NSE All Future Stocks" else fno_pool[:50]
     ticker_map = {s: f"{s}.NS" for s in symbols}
 
-    chunk_size = 30
+    chunk_size = 35
     sym_list = list(symbols)
     chunks = [sym_list[i:i + chunk_size] for i in range(0, len(sym_list), chunk_size)]
     combined: dict[str, pd.DataFrame] = {}
@@ -263,12 +312,14 @@ def load_all_market_data(universe_type: str, tf_group: str) -> dict[str, pd.Data
     return combined
 
 # ===================================================================== TOOLBAR ROW
+live_fno_symbols = fetch_live_nse_fno_list()
+
 with st.container():
     c1, c2, c3, c4, c5, c6, c7 = st.columns([1.6, 2.0, 1.1, 1.1, 1.2, 1.5, 0.9])
     with c1:
         universe_choice = st.selectbox(
             "📁 Universe",
-            ["NSE All Future Stocks", "Top 50 F&O", "Global Markets"],
+            [f"NSE All Future Stocks ({len(live_fno_symbols)})", "Top 50 F&O", "Global Markets"],
             index=0
         )
     with c2:
@@ -284,7 +335,7 @@ with st.container():
     with c5:
         sort_mode = st.selectbox("📏 Distance", ["Nearest ↑", "Farthest ↓"], index=0)
     with c6:
-        search_query = st.text_input("🔍 Search Symbol", placeholder="RELIANCE, NIFTY, Crude...")
+        search_query = st.text_input("🔍 Search Symbol", placeholder="RELIANCE, SBIN, CRUDE...")
     with c7:
         st.write("")
         st.write("")
@@ -294,14 +345,15 @@ if not selected_tfs:
     st.warning("कृपया कम से कम एक Timeframe चुनें।")
     st.stop()
 
-# ===================================================================== SCANNING PROCESS
+# ===================================================================== EXECUTION
 tf_group = "intraday" if any(t in MINUTE_TFS or t in HOUR_TFS for t in selected_tfs) else "daily"
+univ_key = "NSE All Future Stocks" if "NSE All Future Stocks" in universe_choice else universe_choice
 
 with st.spinner(f"Scanning {universe_choice} across {', '.join(selected_tfs)}..."):
-    data_bundle = load_all_market_data(universe_choice, tf_group)
+    data_bundle = load_all_market_data(univ_key, tf_group, live_fno_symbols)
     all_detected_zones = []
 
-    if universe_choice == "Global Markets":
+    if univ_key == "Global Markets":
         for item in GLOBAL_INSTRUMENTS:
             key = item["key"]
             raw_df = data_bundle.get(key)
@@ -322,7 +374,7 @@ with st.spinner(f"Scanning {universe_choice} across {', '.join(selected_tfs)}...
 
 df_view = pd.DataFrame(all_detected_zones)
 
-# ===================================================================== RENDER
+# ===================================================================== DISPLAY (SHEETS FORMAT)
 if not df_view.empty:
     if side_filter != "All":
         df_view = df_view[df_view["Zone Side"] == side_filter]
@@ -336,19 +388,18 @@ if not df_view.empty:
     ascending = True if sort_mode.startswith("Nearest") else False
     df_view = df_view.sort_values(by="Distance Gap %", ascending=ascending).reset_index(drop=True)
 
-    # टेबल कॉलम लेआउट
+    # टेबल के लिए कॉलम
     display_df = df_view[[
         "Symbol_Link", "TF", "Zone Side", "Pattern", "Status", "Score",
         "Proximal (₹)", "Distal (₹)", "Current LTP", "Distance Gap %", "Created Date"
     ]]
 
-    # Google Sheets Table View Render
     st.dataframe(
         display_df,
         column_config={
+            # साफ सिंबल नाम दिखेगा (बिना '1!' के) और क्लिक करने पर सीधे TradingView चार्ट खुलेगा
             "Symbol_Link": st.column_config.LinkColumn(
-                "Symbol (Click to Open Chart)",
-                # regex से URL में से केवल शुद्ध सिंबल नाम निकाल कर दिखाएगा (बिना '1!' के)
+                "Symbol (Cash / Equity)",
                 display_text=r"symbol=(?:NSE%3A)?([^&!%]+)",
                 width="medium"
             ),
@@ -375,8 +426,8 @@ if not df_view.empty:
 
     st.markdown(f"""
     <div class="sheet-statusbar">
-        <span>Rows: <b>{len(display_df)}</b> zones | Universe: <b>{universe_choice}</b></span>
-        <span>Clicking Symbol opens TradingView on the exact Zone Timeframe</span>
+        <span>Rows: <b>{len(display_df)}</b> zones | Active Pool: <b>{len(live_fno_symbols)} F&O Stocks (Auto-synced)</b></span>
+        <span>Symbols are Clean Cash/Equity | Click to open exact timeframe chart on TradingView</span>
     </div>
     """, unsafe_allow_html=True)
 else:

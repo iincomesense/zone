@@ -1,17 +1,20 @@
-# Pine Zone MTF scanner - single-file Streamlit app (Pine v6 rules / inputs / logic unchanged)
+# Pine Zone MTF scanner - single-file Streamlit app (Pine v6 rules / inputs / logic UNCHANGED)
 #
-# CHANGELOG (speed + clean-UI pass)
-#  * FIX : module-level docstrings in the middle of the file were rendered by Streamlit
-#          "magic" as page text (see screenshots). They are plain comments now.
-#  * FIX : the scan used to restart on EVERY widget click (that is why it hung at
-#          "202 NSE futures x 13 timeframes"). Now it runs only on Scan / Refresh.
-#  * FAST: lazy compute - only the selected view (NSE / Global / MTF) is scanned.
-#  * FAST: only the Yahoo layers needed by the selected timeframes are downloaded.
-#  * FAST: scan results cached (st.cache_data); filters / sort / state / side are instant.
-#  * FAST: NSE bhavcopy lookup runs in parallel + new NSE file name added.
-#  * FAST: broken zones are skipped in the per-bar state loop (identical output).
-#  * FAST: no pandas Styler; native dataframe column_config + emoji colouring.
-#  * UI  : table first; every control sits in one strip above it; Pine inputs in sidebar form.
+# v2 CHANGELOG (this rewrite)
+#  * SPEED : biggest fix — "Scan" no longer wipes the Yahoo / NSE bhavcopy caches on every
+#            click. It only invalidates the derived scan-result cache, so repeated scans
+#            reuse already-downloaded candles (TTL 90s) instead of re-downloading everything.
+#            A separate "Hard refresh" button nukes all caches when you really need fresh data.
+#  * SPEED : per-symbol Pine scanning runs on a small thread pool (order-preserving, so the
+#            output rows / tie-break order are identical to the serial version).
+#  * UI    : replaced the broken custom "pill" CSS (labels were being clipped to "I…", "D…",
+#            "C…") with native Streamlit segmented-control / multiselect chips — same compact
+#            look, zero clipping, zero extra CSS fighting the framework.
+#  * UI    : table first, KPI strip (Fresh/Tested/Broken/Demand/Supply/HQ) like a BI dashboard,
+#            clean column formatting (₹, %, dates, link columns) so it reads like an
+#            Excel/Google-Sheet grid. Native dataframe sorting/search toolbar is used instead
+#            of a pandas Styler (fast).
+#  * Pine engine / inputs / scoring / state machine: 100% unchanged from the supplied script.
 from __future__ import annotations
 
 import logging as _logging
@@ -987,8 +990,8 @@ def _download_chunk(tickers: tuple[str, ...], period: str,
 
 
 def download_yahoo_candles(tickers: tuple[str, ...] | list[str], period: str,
-                           interval: str, *, chunk_size: int = 20,
-                           workers: int = 6) -> dict[str, pd.DataFrame]:
+                           interval: str, *, chunk_size: int = 25,
+                           workers: int = 8) -> dict[str, pd.DataFrame]:
     """Download many symbols in small parallel batches, failing soft per batch."""
     clean = tuple(dict.fromkeys(str(t).strip() for t in tickers if str(t).strip()))
     if not clean:
@@ -1482,26 +1485,28 @@ def scan_equity_zones(
     equity_live_quotes: dict[str, float] | None = None,
     *, params: dict[str, Any] | None = None, now: datetime | None = None,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
-    """Run Pine chart-zone state/visual rules for every selected symbol/TF."""
+    """Run Pine chart-zone state/visual rules for every selected symbol/TF.
+
+    SPEED: each symbol's work is independent, so it runs on a small thread
+    pool. ``ThreadPoolExecutor.map`` yields results in call order (not
+    completion order), so row order / stable-sort tie-breaks are identical
+    to the original serial loop — only wall-clock time changes.
+    """
     config = pine_settings(**(params or {}))
     future_quotes = future_quotes or {}
     equity_live_quotes = equity_live_quotes or {}
-    rows: list[dict[str, Any]] = []
-    coverage = {"symbols_requested": len(symbols), "symbols_with_daily": 0,
-                "symbols_with_minute": 0, "symbols_with_zones": 0, "zone_rows": 0}
     tf_order = {tf: i for i, tf in enumerate(TIMEFRAMES)}
-    for raw_symbol in symbols:
+
+    def _one(raw_symbol: str):
         symbol = str(raw_symbol).strip().upper()
         data = symbol_data.get(symbol) or {}
-        if not normalize_ohlcv(data.get("daily")).empty:
-            coverage["symbols_with_daily"] += 1
-        if not normalize_ohlcv(data.get("minute")).empty:
-            coverage["symbols_with_minute"] += 1
+        has_daily = not normalize_ohlcv(data.get("daily")).empty
+        has_minute = not normalize_ohlcv(data.get("minute")).empty
         ltp, ltp_source, ltp_asof = latest_ltp(data)
         live_ltp = _safe_price(equity_live_quotes.get(symbol))
         if live_ltp is not None:
             ltp, ltp_source, ltp_asof = live_ltp, "Dhan LIVE", datetime.now(IST)
-        has_zone = False
+        local_rows: list[dict[str, Any]] = []
         for timeframe in timeframes:
             try:
                 _, zones = _scan_frame(data, timeframe, market="NSE", ltp=ltp,
@@ -1509,12 +1514,24 @@ def scan_equity_zones(
             except Exception:
                 continue
             for zone in zones:
-                rows.append(_zone_row(symbol, timeframe, zone, ltp=ltp,
-                                      ltp_source=ltp_source, ltp_asof=ltp_asof,
-                                      future=future_quotes.get(symbol)))
-                has_zone = True
-        if has_zone:
-            coverage["symbols_with_zones"] += 1
+                local_rows.append(_zone_row(symbol, timeframe, zone, ltp=ltp,
+                                            ltp_source=ltp_source, ltp_asof=ltp_asof,
+                                            future=future_quotes.get(symbol)))
+        return symbol, has_daily, has_minute, local_rows
+
+    rows: list[dict[str, Any]] = []
+    coverage = {"symbols_requested": len(symbols), "symbols_with_daily": 0,
+                "symbols_with_minute": 0, "symbols_with_zones": 0, "zone_rows": 0}
+    workers = max(1, min(16, len(symbols) or 1))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for symbol, has_daily, has_minute, local_rows in pool.map(_one, symbols):
+            if has_daily:
+                coverage["symbols_with_daily"] += 1
+            if has_minute:
+                coverage["symbols_with_minute"] += 1
+            if local_rows:
+                coverage["symbols_with_zones"] += 1
+            rows.extend(local_rows)
     coverage["zone_rows"] = len(rows)
     frame = pd.DataFrame(rows)
     if not frame.empty:
@@ -1532,17 +1549,15 @@ def scan_global_zones(
     *, params: dict[str, Any] | None = None, now: datetime | None = None,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     config = pine_settings(**(params or {}))
-    rows: list[dict[str, Any]] = []
-    coverage = {"instruments_requested": len(instruments), "instruments_with_data": 0,
-                "zone_rows": 0}
     tf_order = {tf: i for i, tf in enumerate(TIMEFRAMES)}
-    for instrument in instruments:
+
+    def _one(instrument: dict[str, str]):
         key = str(instrument["key"])
         data = global_data.get(key) or {}
         if normalize_ohlcv(data.get("daily")).empty:
-            continue
-        coverage["instruments_with_data"] += 1
+            return key, False, []
         ltp, source, asof = latest_ltp(data)
+        local_rows: list[dict[str, Any]] = []
         for timeframe in timeframes:
             try:
                 _, zones = _scan_frame(data, timeframe, market="GLOBAL", ltp=ltp,
@@ -1550,7 +1565,7 @@ def scan_global_zones(
             except Exception:
                 continue
             for zone in zones:
-                rows.append({
+                local_rows.append({
                     "Global Instrument / TV Chart": tradingview_url(instrument["tv"], timeframe),
                     "Instrument": instrument.get("label", key),
                     "LTP": ltp,
@@ -1559,6 +1574,17 @@ def scan_global_zones(
                     **_zone_values(zone, ltp),
                     "Quote As Of": asof,
                 })
+        return key, True, local_rows
+
+    rows: list[dict[str, Any]] = []
+    coverage = {"instruments_requested": len(instruments), "instruments_with_data": 0,
+                "zone_rows": 0}
+    workers = max(1, min(10, len(instruments) or 1))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for key, has_data, local_rows in pool.map(_one, instruments):
+            if has_data:
+                coverage["instruments_with_data"] += 1
+            rows.extend(local_rows)
     coverage["zone_rows"] = len(rows)
     frame = pd.DataFrame(rows)
     if not frame.empty:
@@ -1582,13 +1608,15 @@ def scan_mtf_levels(
     if not show_mtf:
         return pd.DataFrame()
     config = pine_settings(**(params or {}))
-    rows: list[dict[str, Any]] = []
     contexts = [(str(symbol).strip().upper(), symbol_data.get(str(symbol).strip().upper()) or {},
                  "NSE", f"NSE:{str(symbol).strip().upper()}") for symbol in symbols]
     contexts.extend((str(item["key"]), global_data.get(str(item["key"])) or {},
                      "GLOBAL", str(item["tv"])) for item in instruments)
-    for label, data, market, tv_symbol in contexts:
+
+    def _one(ctx):
+        label, data, market, tv_symbol = ctx
         ltp, source, _ = latest_ltp(data)
+        local_rows: list[dict[str, Any]] = []
         for timeframe in PINE_MTF_TIMEFRAMES:
             bars = timeframe_candles(data, timeframe, market=market, now=now)
             bars = _confirmed_mtf_bars(bars, timeframe, now=now, market=market)
@@ -1605,7 +1633,7 @@ def scan_mtf_levels(
                 near = ltp is not None and distance <= float(mtf_near_pct)
                 if filter_distant and not near:
                     continue
-                rows.append({
+                local_rows.append({
                     "Instrument": label,
                     "TradingView": tradingview_url(tv_symbol, timeframe),
                     "TF": timeframe,
@@ -1619,6 +1647,13 @@ def scan_mtf_levels(
                     "LTP Source": source,
                     "MTF Line Visible": bool(near or not filter_distant),
                 })
+        return local_rows
+
+    rows: list[dict[str, Any]] = []
+    workers = max(1, min(16, len(contexts) or 1))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for local_rows in pool.map(_one, contexts):
+            rows.extend(local_rows)
     frame = pd.DataFrame(rows)
     if not frame.empty:
         frame = frame.sort_values("Distance %", kind="stable").reset_index(drop=True)
@@ -1626,7 +1661,7 @@ def scan_mtf_levels(
 
 
 # ===================================================================== cached data + scans
-@st.cache_data(ttl=90, show_spinner=False, max_entries=12)
+@st.cache_data(ttl=90, show_spinner=False, max_entries=16)
 def cached_yahoo_candles(tickers: tuple[str, ...], period: str, interval: str):
     return download_yahoo_candles(tickers, period, interval)
 
@@ -1688,7 +1723,7 @@ def _global_data(loaded: dict[str, dict[str, pd.DataFrame]]):
     return {item["key"]: loaded.get(item["yahoo"], {}) for item in GLOBAL_INSTRUMENTS}
 
 
-@st.cache_data(ttl=120, show_spinner=False, max_entries=3)
+@st.cache_data(ttl=120, show_spinner=False, max_entries=6)
 def cached_equity_scan(symbols: tuple[str, ...], tfs: tuple[str, ...], params_items: tuple):
     params = dict(params_items)
     snapshot = cached_fo_bhavcopy()
@@ -1711,7 +1746,7 @@ def cached_equity_scan(symbols: tuple[str, ...], tfs: tuple[str, ...], params_it
     return frame, coverage, dhan_status
 
 
-@st.cache_data(ttl=120, show_spinner=False, max_entries=3)
+@st.cache_data(ttl=120, show_spinner=False, max_entries=6)
 def cached_global_scan(tfs: tuple[str, ...], params_items: tuple):
     params = dict(params_items)
     loaded = _load_bundle(tuple(i["yahoo"] for i in GLOBAL_INSTRUMENTS), _layers_for(tfs, False))
@@ -1719,7 +1754,7 @@ def cached_global_scan(tfs: tuple[str, ...], params_items: tuple):
     return frame, coverage
 
 
-@st.cache_data(ttl=120, show_spinner=False, max_entries=2)
+@st.cache_data(ttl=120, show_spinner=False, max_entries=4)
 def cached_mtf_scan(symbols: tuple[str, ...], params_items: tuple):
     params = dict(params_items)
     tickers = tuple(yahoo_ticker(s) for s in symbols) + tuple(i["yahoo"] for i in GLOBAL_INSTRUMENTS)
@@ -1732,9 +1767,18 @@ def cached_mtf_scan(symbols: tuple[str, ...], params_items: tuple):
         mtf_near_pct=float(params["mtfNearPct"]))
 
 
-def _clear_caches() -> None:
-    for fn in (cached_yahoo_candles, cached_fo_bhavcopy, cached_equity_scan,
-               cached_global_scan, cached_mtf_scan):
+def _clear_scan_caches() -> None:
+    """Scan / Refresh: only invalidate derived scan results. Raw Yahoo candles
+    (90s TTL) and the NSE bhavcopy (6h TTL) keep serving from cache, which is
+    the single biggest speed win — no more full re-download on every click."""
+    for fn in (cached_equity_scan, cached_global_scan, cached_mtf_scan):
+        fn.clear()
+
+
+def _clear_all_caches() -> None:
+    """Hard refresh: wipe everything, including raw market-data caches."""
+    for fn in (cached_yahoo_candles, cached_fo_bhavcopy, cached_dhan_master,
+               cached_equity_scan, cached_global_scan, cached_mtf_scan):
         fn.clear()
 
 
@@ -1744,29 +1788,32 @@ try:
 except Exception:
     _ST_VER = (1, 0)
 _STRETCH: dict[str, Any] = {"width": "stretch"} if _ST_VER >= (1, 50) else {"use_container_width": True}
+_HAS_SEGMENTED = hasattr(st, "segmented_control")
 
 st.markdown("""
 <style>
 :root { color-scheme: dark; }
-.stApp { background:#0b1016; color:#e8edf3; }
-[data-testid="stAppViewContainer"] .block-container { max-width:99vw; padding:3rem 1rem 1rem; }
-[data-testid="stHeader"] { background:rgba(11,16,22,.95); }
-div[data-testid="stVerticalBlockBorderWrapper"] { background:#0f161f; border-color:#223042; border-radius:12px; }
-[data-testid="stWidgetLabel"] p { font-size:.68rem; letter-spacing:.09em; text-transform:uppercase; color:#8c9aaa; font-weight:600; }
-button[data-testid^="stBaseButton-pills"] { border-radius:999px; min-height:1.95rem; padding:.05rem .8rem; font-size:.82rem;
-  background:#101b27; border:1px solid #27425e; color:#9fb6cc; }
-button[data-testid="stBaseButton-pillsActive"] { background:#0d3252; border-color:#2f8cf0; color:#8ec8ff; font-weight:600; }
-.st-key-chip_state button[data-testid="stBaseButton-pillsActive"] { background:#0f3b2e; border-color:#14b8a6; color:#6ee7d0; }
-.st-key-chip_side button[data-testid="stBaseButton-pillsActive"] { background:#3b1d2a; border-color:#fb7185; color:#fda4af; }
-.st-key-chip_view button[data-testid="stBaseButton-pillsActive"],
-.st-key-chip_sort button[data-testid="stBaseButton-pillsActive"] { background:#2d2a12; border-color:#fbbf24; color:#fde68a; }
-.st-key-tfq button { min-height:1.6rem; padding:0 .65rem; font-size:.74rem; border-radius:999px; background:#0f161f; border:1px solid #2b3a4d; color:#9fb6cc; }
-.gap { height:1.55rem; }
-.hdr { display:flex; justify-content:space-between; align-items:baseline; margin:0 0 .35rem; }
-.hdr b { font-size:1.2rem; letter-spacing:-.02em; }
-.hdr span { color:#8c9aaa; font-size:.78rem; }
-.stat { color:#bdc9d5; font-size:.82rem; margin:.1rem 0 .3rem; }
-.src { color:#7d8a99; font-size:.72rem; }
+.stApp { background:#0b0f14; color:#e8edf3; font-family:-apple-system,"Segoe UI",Roboto,sans-serif; }
+[data-testid="stAppViewContainer"] .block-container { max-width:99vw; padding:1.1rem 1.1rem .6rem; }
+[data-testid="stHeader"] { background:rgba(11,15,20,.92); }
+div[data-testid="stVerticalBlockBorderWrapper"] { background:#101722; border-color:#1f2a38; border-radius:10px; }
+[data-testid="stWidgetLabel"] p { font-size:.66rem; letter-spacing:.08em; text-transform:uppercase; color:#889bb0; font-weight:700; }
+/* spreadsheet-ish grid look for the data table */
+[data-testid="stDataFrame"] { border:1px solid #1f2a38; border-radius:8px; overflow:hidden; }
+[data-testid="stMetricValue"] { font-size:1.35rem; }
+[data-testid="stMetric"] { background:#101722; border:1px solid #1f2a38; border-radius:10px; padding:.5rem .7rem; }
+button[kind="primary"] { font-weight:700; }
+.hdr-card { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:.4rem;
+  background:linear-gradient(135deg,#101722,#0c1016); border:1px solid #1f2a38; border-radius:12px;
+  padding:.65rem 1rem; margin-bottom:.6rem; }
+.hdr-title { font-size:1.25rem; font-weight:800; letter-spacing:-.02em; }
+.hdr-title span { color:#5fb6ff; font-weight:600; font-size:.85rem; margin-left:.4rem; }
+.hdr-meta { color:#8c9aaa; font-size:.78rem; text-align:right; }
+.statusbar { display:flex; gap:1rem; align-items:center; color:#9fb0c3; font-size:.78rem;
+  padding:.35rem .2rem; border-top:1px solid #1f2a38; margin-top:.3rem; flex-wrap:wrap; }
+.statusbar b { color:#e8edf3; }
+.pending-note { color:#f5c451; font-size:.8rem; }
+.src { color:#67788c; font-size:.72rem; margin-top:.4rem; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -1873,7 +1920,9 @@ def _pine_controls() -> tuple[dict[str, Any], bool]:
         st.caption("EOD High/Low buffers, maxImbalanceMult, relaxGapCapOvernight और parity flags "
                    "Pine के मूल code की तरह zone validation में use नहीं होते। "
                    "Candle feed (Yahoo) और TradingView अलग होने से 1:1 price-data परिणाम की गारंटी नहीं।")
-    return {**PINE_DEFAULTS, **values}, bool(applied)
+        st.divider()
+        hard_refresh = st.button("⟳ Hard refresh (re-download everything)", **_STRETCH)
+    return {**PINE_DEFAULTS, **values}, bool(applied), bool(hard_refresh)
 
 
 CORE_FIELDS = ["TF", "Zone", "Pattern", "Zone State", "Density Score", "HQ",
@@ -1901,7 +1950,7 @@ def _column_config(cols: list[str]) -> dict[str, Any]:
         "Pattern": C.TextColumn("Pattern", width="small"),
         "Category": C.TextColumn("Category", width="small"),
         "Zone State": C.TextColumn("State", width="small"),
-        "Density Score": C.NumberColumn("Score", width="small", format="%d"),
+        "Density Score": C.ProgressColumn("Score", width="small", format="%d", min_value=0, max_value=140),
         "HQ": C.TextColumn("HQ", width="small"),
         "Touch Count": C.NumberColumn("Touch", width="small", format="%d"),
         "Base Count": C.NumberColumn("Base", width="small", format="%d"),
@@ -1952,7 +2001,7 @@ def _show_zone_table(view: pd.DataFrame, *, global_table: bool, all_cols: bool,
                      *(["Flag"] if show_flags else []),
                      "Future Expiry", "Future LTP Source", "Equity LTP Source"]
     disp = _prepare_display(view, order)
-    height = max(260, min(760, 35 * (len(disp) + 1) + 3))
+    height = max(280, min(820, 34 * (len(disp) + 1) + 3))
     st.dataframe(disp, column_config=_column_config(list(disp.columns)),
                  hide_index=True, height=height, **_STRETCH)
     left, right = st.columns([1, 5])
@@ -1974,7 +2023,7 @@ def _show_mtf_table(frame: pd.DataFrame) -> None:
         {"Fresh": "🟢 Fresh", "Tested": "🟡 Tested"}).fillna(view["Zone State"])
     view["Created"] = pd.to_datetime(view["Created"], errors="coerce")
     C = st.column_config
-    st.dataframe(view, hide_index=True, height=max(260, min(760, 35 * (len(view) + 1) + 3)),
+    st.dataframe(view, hide_index=True, height=max(280, min(820, 34 * (len(view) + 1) + 3)),
                  column_config={
                      "TradingView": C.LinkColumn("Chart", display_text="📈"),
                      "Proximal Line": C.NumberColumn("Proximal", format="%.2f"),
@@ -1988,31 +2037,43 @@ def _show_mtf_table(frame: pd.DataFrame) -> None:
                        file_name="mtf_proximal_lines.csv", mime="text/csv")
 
 
+def _kpi_strip(frame: pd.DataFrame, side_col: str = "Zone") -> None:
+    if frame is None or frame.empty:
+        cols = st.columns(6)
+        for c, label in zip(cols, ["Total", "Fresh", "Tested", "Broken", "Demand", "Supply"]):
+            c.metric(label, 0)
+        return
+    counts = frame["Zone State"].value_counts()
+    sides = frame[side_col].value_counts() if side_col in frame.columns else pd.Series(dtype=int)
+    hq = int(frame["HQ"].sum()) if "HQ" in frame.columns else 0
+    cols = st.columns(7)
+    cols[0].metric("Total zones", f"{len(frame):,}")
+    cols[1].metric("🟢 Fresh", int(counts.get("Fresh", 0)))
+    cols[2].metric("🟡 Tested", int(counts.get("Tested", 0)))
+    cols[3].metric("⚪ Broken", int(counts.get("Broken", 0)))
+    cols[4].metric("Demand", int(sides.get("Demand", 0)))
+    cols[5].metric("Supply", int(sides.get("Supply", 0)))
+    cols[6].metric("★ HQ", hq)
+
+
 # ===================================================================== page
 ss = st.session_state
 UNIVERSE_N = {"50": 50, "100": 100, "150": 150, "All": None}
 DEFAULT_TFS = ["5m", "15m", "1h", "1d"]
 VIEWS = ["NSE Futures", "Global", "MTF Lines"]
-
-header_slot = st.empty()
-params, form_apply = _pine_controls()
-
-_HAS_PILLS = hasattr(st, "pills")
 INTRADAY_TFS = [t for t in TIMEFRAMES if t in MINUTE_TFS or t in HOUR_TFS]
 
+header_slot = st.empty()
+params, form_apply, hard_refresh = _pine_controls()
 
-def _chips(label: str, options: list[str], *, default: Any, key: str, multi: bool = True):
-    """Chip-style selector (st.pills); falls back to multiselect/selectbox on old Streamlit."""
+
+def _single(label: str, options: list[str], default: str, key: str) -> str:
     if key not in ss:
-        ss[key] = list(default) if multi else default
-    if _HAS_PILLS:
-        got = st.pills(label, options, selection_mode="multi" if multi else "single", key=key)
-        if multi:
-            return list(got or [])
-        return got if got is not None else default
-    if multi:
-        return st.multiselect(label, options, key=key)
-    return st.selectbox(label, options, key=key)
+        ss[key] = default
+    if _HAS_SEGMENTED:
+        val = st.segmented_control(label, options, default=ss[key], key=key)
+        return val if val is not None else default
+    return st.selectbox(label, options, index=options.index(ss.get(key, default)), key=key)
 
 
 def _set_tfs(values: list[str]) -> None:
@@ -2020,44 +2081,41 @@ def _set_tfs(values: list[str]) -> None:
 
 
 with st.container(border=True):
-    top = st.columns([1.1, 5.0, 1.7])
+    top = st.columns([1.0, 4.4, 1.3, 1.3])
     with top[0]:
-        with st.container(key="chip_universe"):
-            universe_choice = _chips("Universe", list(UNIVERSE_N), default="50", key="universe", multi=False)
+        universe_choice = _single("Universe", list(UNIVERSE_N), "50", "universe")
     with top[1]:
-        selected_tfs = _chips("Timeframes", list(TIMEFRAMES), default=DEFAULT_TFS, key="tfs")
-        with st.container(key="tfq"):
-            q = st.columns([1, 1, 1, 1, 8])
-            q[0].button("Intraday", key="tf_intra", on_click=_set_tfs, args=(INTRADAY_TFS,))
-            q[1].button("Daily+", key="tf_daily", on_click=_set_tfs, args=(["1d", "1w", "1M"],))
-            q[2].button("All", key="tf_all", on_click=_set_tfs, args=(list(TIMEFRAMES),))
-            q[3].button("Clear", key="tf_clear", on_click=_set_tfs, args=([],))
+        if "tfs" not in ss:
+            ss["tfs"] = list(DEFAULT_TFS)
+        selected_tfs = st.multiselect("Timeframes", list(TIMEFRAMES), key="tfs")
+        q = st.columns([1, 1, 1, 1, 8])
+        q[0].button("Intraday", on_click=_set_tfs, args=(INTRADAY_TFS,), key="tf_intra")
+        q[1].button("Daily+", on_click=_set_tfs, args=(["1d", "1w", "1M"],), key="tf_daily")
+        q[2].button("All", on_click=_set_tfs, args=(list(TIMEFRAMES),), key="tf_all")
+        q[3].button("Clear", on_click=_set_tfs, args=([],), key="tf_clear")
     with top[2]:
-        with st.container(key="chip_state"):
-            selected_states = _chips("State", ["Fresh", "Tested", "Broken"],
-                                     default=["Fresh", "Tested"], key="states")
+        if "states" not in ss:
+            ss["states"] = ["Fresh", "Tested"]
+        selected_states = st.multiselect("State", ["Fresh", "Tested", "Broken"], key="states")
+    with top[3]:
+        if "sides" not in ss:
+            ss["sides"] = ["Demand", "Supply"]
+        selected_sides = st.multiselect("Side", ["Demand", "Supply"], key="sides")
 
-    bot = st.columns([1.35, 2.0, 1.9, 1.6, 1.0, 0.9, 1.1])
+    bot = st.columns([1.5, 2.3, 1.6, 1.1, 0.9, 0.9, 1.3])
     with bot[0]:
-        with st.container(key="chip_side"):
-            selected_sides = _chips("Side", ["Demand", "Supply"], default=["Demand", "Supply"], key="sides")
-    with bot[1]:
-        with st.container(key="chip_view"):
-            view_name = _chips("View", VIEWS, default="NSE Futures", key="view", multi=False)
-    symbol_query = bot[2].text_input("Filter", placeholder="RELIANCE, SBIN, Gold", key="query")
+        view_name = _single("View", VIEWS, "NSE Futures", "view")
+    symbol_query = bot[1].text_input("Filter", placeholder="RELIANCE, SBIN, Gold", key="query")
+    with bot[2]:
+        sort_mode = _single("Distance", ["Nearest ↑", "Farthest ↓"], "Nearest ↑", "sort")
     with bot[3]:
-        with st.container(key="chip_sort"):
-            sort_mode = _chips("Distance", ["Nearest ↑", "Farthest ↓"], default="Nearest ↑",
-                               key="sort", multi=False)
+        all_cols = st.toggle("All cols", value=False, key="all_cols")
     with bot[4]:
-        st.markdown('<div class="gap"></div>', unsafe_allow_html=True)
-        all_cols = st.toggle("All cols", value=False)
+        auto_refresh = st.toggle("Auto 2m", value=False, key="auto_refresh")
     with bot[5]:
-        st.markdown('<div class="gap"></div>', unsafe_allow_html=True)
-        auto_refresh = st.toggle("Auto 2m", value=False)
+        st.write("")
     with bot[6]:
-        st.markdown('<div class="gap"></div>', unsafe_allow_html=True)
-        run_scan = st.button("🚀 Scan", type="primary", **_STRETCH)
+        run_scan = st.button("🚀 Scan / Refresh", type="primary", **_STRETCH)
 
 if auto_refresh:
     try:
@@ -2071,8 +2129,10 @@ if not selected_tfs:
     st.stop()
 
 scheduled = bool(auto_refresh and time.time() - float(ss.get("last_scan_epoch", 0.0)) >= 115)
-if run_scan or scheduled:
-    _clear_caches()
+if hard_refresh:
+    _clear_all_caches()
+elif run_scan or scheduled:
+    _clear_scan_caches()
 
 with st.spinner("NSE F&O contract list…"):
     try:
@@ -2083,7 +2143,7 @@ symbols = list(fo_snapshot.get("symbols") or FNO_FALLBACK)
 using_fallback = not bool(fo_snapshot.get("symbols"))
 fo_label = "static fallback" if using_fallback else f"NSE bhavcopy {fo_snapshot.get('asof')}"
 
-if "applied" not in ss or run_scan or form_apply or scheduled:
+if "applied" not in ss or run_scan or form_apply or hard_refresh or scheduled:
     n = UNIVERSE_N[universe_choice]
     ss["applied"] = {
         "symbols": tuple(symbols[:n] if n else symbols),
@@ -2097,13 +2157,15 @@ ap = ss["applied"]
 params_applied = dict(ap["params"])
 
 header_slot.markdown(
-    f'<div class="hdr"><b>🎯 Zone MTF <span>· Pine v6</span></b>'
-    f'<span>Universe {len(ap["symbols"])}/{len(symbols)} · {fo_label} · last scan {ap["at"]}</span></div>',
+    f'<div class="hdr-card"><div class="hdr-title">🎯 Zone MTF <span>Pine v6</span></div>'
+    f'<div class="hdr-meta">Universe {len(ap["symbols"])}/{len(symbols)} · {fo_label}'
+    f'<br>last scan {ap["at"]}</div></div>',
     unsafe_allow_html=True)
 
 pending = (ap["universe"] != universe_choice) or (set(ap["tfs"]) != set(selected_tfs))
 if pending:
-    st.caption("⚠️ Universe / timeframes बदले हैं — नए data के लिए **Scan / Refresh** दबाएँ।")
+    st.markdown('<p class="pending-note">⚠️ Universe / timeframes बदले हैं — नए data के लिए '
+               '<b>Scan / Refresh</b> दबाएँ।</p>', unsafe_allow_html=True)
 
 
 def _filter_and_sort(frame: pd.DataFrame, instrument_col: str) -> pd.DataFrame:
@@ -2120,40 +2182,41 @@ def _filter_and_sort(frame: pd.DataFrame, instrument_col: str) -> pd.DataFrame:
     return view.sort_values("Nearest Gap %", ascending=sort_mode.startswith("Nearest"), kind="stable")
 
 
-def _counts_line(frame: pd.DataFrame, shown: int, extra: str) -> str:
-    if frame is None or frame.empty:
-        return f"0 zones · {extra}"
-    c = frame["Zone State"].value_counts()
-    return (f"<b>{shown:,}</b> shown / {len(frame):,} zones · 🟢 Fresh {int(c.get('Fresh', 0))} · "
-            f"🟡 Tested {int(c.get('Tested', 0))} · ⚪ Broken {int(c.get('Broken', 0))} · {extra}")
-
-
 try:
     if view_name == "NSE Futures":
+        t0 = time.time()
         with st.spinner(f"Scanning {len(ap['symbols'])} NSE futures × {len(ap['tfs'])} timeframes …"):
             rows, cov, dhan_status = cached_equity_scan(ap["symbols"], ap["tfs"], ap["params"])
+        elapsed = time.time() - t0
         view = _filter_and_sort(rows, "Equity")
+        _kpi_strip(view)
         st.markdown(
-            f'<div class="stat">{_counts_line(rows, len(view), "")}'
-            f'coverage {cov.get("symbols_with_daily", 0)}/{cov.get("symbols_requested", 0)} daily · '
-            f'{cov.get("symbols_with_minute", 0)} minute · {dhan_status}</div>', unsafe_allow_html=True)
+            f'<div class="statusbar"><b>{len(view):,}</b> shown / {len(rows):,} total zones · '
+            f'coverage <b>{cov.get("symbols_with_daily", 0)}/{cov.get("symbols_requested", 0)}</b> daily · '
+            f'{cov.get("symbols_with_minute", 0)} minute · {dhan_status} · {elapsed:.1f}s</div>',
+            unsafe_allow_html=True)
         _show_zone_table(view, global_table=False, all_cols=all_cols,
                          show_shadow=bool(params_applied["showShadow"]),
                          show_flags=bool(params_applied["showFlags"]), csv_name="nse_pine_zone_scan.csv")
     elif view_name == "Global":
+        t0 = time.time()
         with st.spinner("Scanning global instruments …"):
             grows, gcov = cached_global_scan(ap["tfs"], ap["params"])
+        elapsed = time.time() - t0
         view = _filter_and_sort(grows, "Instrument")
+        _kpi_strip(view)
         st.markdown(
-            f'<div class="stat">{_counts_line(grows, len(view), "")}'
-            f'{gcov.get("instruments_with_data", 0)}/{gcov.get("instruments_requested", 0)} instruments with data</div>',
-            unsafe_allow_html=True)
+            f'<div class="statusbar"><b>{len(view):,}</b> shown / {len(grows):,} total zones · '
+            f'{gcov.get("instruments_with_data", 0)}/{gcov.get("instruments_requested", 0)} instruments with data · '
+            f'{elapsed:.1f}s</div>', unsafe_allow_html=True)
         _show_zone_table(view, global_table=True, all_cols=all_cols,
                          show_shadow=bool(params_applied["showShadow"]),
                          show_flags=bool(params_applied["showFlags"]), csv_name="global_pine_zone_scan.csv")
     else:
+        t0 = time.time()
         with st.spinner("Scanning MTF contexts (3/5/10/15m · 1/2/4/6h · 1d) — heaviest view …"):
             mrows = cached_mtf_scan(ap["symbols"], ap["params"])
+        elapsed = time.time() - t0
         if not mrows.empty:
             if symbol_query.strip():
                 parts = [p.strip() for p in re.split(r"[,\s]+", symbol_query) if p.strip()]
@@ -2166,8 +2229,8 @@ try:
             if selected_states:
                 mrows = mrows[mrows["Zone State"].isin(selected_states)]
             mrows = mrows.sort_values("Distance %", ascending=sort_mode.startswith("Nearest"), kind="stable")
-        st.markdown(f'<div class="stat"><b>{len(mrows):,}</b> MTF proximal lines · proximity hides lines only, '
-                    f'never changes zone validity</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="statusbar"><b>{len(mrows):,}</b> MTF proximal lines · proximity hides lines only, '
+                    f'never changes zone validity · {elapsed:.1f}s</div>', unsafe_allow_html=True)
         _show_mtf_table(mrows)
 except Exception as exc:
     st.error(f"Scan failed: {type(exc).__name__}: {exc}")

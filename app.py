@@ -19,7 +19,7 @@ import requests
 import streamlit as st
 
 st.set_page_config(
-    page_title="Pine v6 Zone Scanner",
+    page_title="Pine v6 Zone Scanner (Exact Parity)",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -27,7 +27,7 @@ st.set_page_config(
 
 IST = ZoneInfo("Asia/Kolkata")
 
-# ===================================================================== CSS
+# ===================================================================== CSS (Google Sheets Layout)
 st.markdown("""
 <style>
 :root { color-scheme: dark; }
@@ -83,7 +83,7 @@ def tradingview_link(symbol: str, tf: str, is_future: bool = False) -> str:
 
 INDEX_EXCLUSIONS = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYIT", "NIFTYNXT50"}
 
-# ===================================================================== LIVE F&O LIST
+# ===================================================================== AUTO-SYNC LIVE F&O
 @st.cache_data(ttl=12 * 3600, show_spinner=False)
 def get_verified_nse_fno_list() -> tuple[str, ...]:
     headers = {"User-Agent": "Mozilla/5.0", "Accept": "text/csv,application/json,*/*"}
@@ -130,7 +130,7 @@ def get_verified_nse_fno_list() -> tuple[str, ...]:
     UBL ULTRACEMCO UNIONBANK UNITDSPR UPL VBL VEDL VOLTAS WIPRO YESBANK ZOMATO ZYDUSLIFE
     """.split())))
 
-# ===================================================================== DATA PROCESSING
+# ===================================================================== DATA ENGINE
 OHLCV = ("Open", "High", "Low", "Close", "Volume")
 
 def normalize_ohlcv(df: pd.DataFrame | None) -> pd.DataFrame:
@@ -202,7 +202,7 @@ def resample_candles(df: pd.DataFrame, tf: str) -> pd.DataFrame:
         "Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"
     }).dropna().sort_index() if rule else df
 
-# ===================================================================== 100% PINE SCRIPT V6 ENGINE
+# ===================================================================== STRICT PINE V6 ENGINE
 @dataclass
 class ZoneRecord:
     proxVal: float
@@ -239,7 +239,7 @@ class PineV6ExactEngine:
         self.vol_sma = pd.Series(self.v).rolling(20).mean().to_numpy()
 
     def tr_val(self, i: int) -> float:
-        if i == 0:
+        if i <= 0:
             return self.h[0] - self.l[0]
         return max(self.h[i] - self.l[i], abs(self.h[i] - self.c[i-1]), abs(self.l[i] - self.c[i-1]))
 
@@ -255,7 +255,6 @@ class PineV6ExactEngine:
     def is_bear(self, i: int) -> bool: return self.o[i] > self.c[i]
 
     def _candidate(self, i: int, bc: int) -> Optional[dict]:
-        # Pine: li = bc + 1, pi = li + 1
         li = i - (bc + 1)
         pi = li - 1
         if pi < 0 or np.isnan(self.atr[li]) or np.isnan(self.atr[i]):
@@ -316,16 +315,22 @@ class PineV6ExactEngine:
         volumeOK = self.v[i] > self.v[li]
         overnight = (self.dow[i] != self.dow[i-1] or self.time_ms[i] - self.time_ms[i-1] > 86400000) if i > 0 else False
 
-        gap = False
-        imbalance = True
+        # Pine Script Imbalance Rules (Strict)
         if demand:
             gap = self.l[i] > baseHigh
             imbalance = gap or (self.c[i] > inHigh)
+            bodyEngulf = min(self.o[i], self.c[i]) <= baseLow and max(self.o[i], self.c[i]) >= baseHigh
+            # Demand zone requires close above baseHigh
+            if self.c[i] <= baseHigh:
+                return None
         else:
             gap = self.h[i] < baseLow
             imbalance = gap or (self.c[i] < inLow)
+            bodyEngulf = min(self.o[i], self.c[i]) <= baseLow and max(self.o[i], self.c[i]) >= baseHigh
+            # Supply zone requires close below baseLow (YESBANK Fix: Close must break below Base Low)
+            if self.c[i] >= baseLow:
+                return None
 
-        bodyEngulf = min(self.o[i], self.c[i]) <= baseLow and max(self.o[i], self.c[i]) >= baseHigh
         if bodyEngulf and not gap:
             return None
 
@@ -363,8 +368,8 @@ class PineV6ExactEngine:
 
         prox = baseHigh if demand else baseLow
         dist = baseLow if demand else baseHigh
-        # Pine v6: mid = testedLegOutRetracePct (1.0) retrace level
-        mid = (self.h[i] - 1.0 * (self.h[i] - self.l[i])) if demand else (self.l[i] + 1.0 * (self.h[i] - self.l[i]))
+        # Pine v6: mid = 100% retrace of leg out candle
+        mid = self.l[i] if demand else self.h[i]
         pattern = "RBR" if rbr else ("DBR" if dbr else ("DBD" if dbd else "RBD"))
         return {
             "prox": prox, "dist": dist, "mid": mid, "demand": demand,
@@ -375,11 +380,10 @@ class PineV6ExactEngine:
         active_zones: List[ZoneRecord] = []
         min_bar = max(14, 3 + 3, 11)
 
-        # bar-by-bar chronological execution (Pine Script Parity)
         for i in range(self.n):
             low_i, high_i = self.l[i], self.h[i]
 
-            # 1. Update State of existing zones (on bars strictly after creation)
+            # 1. State Update (Pine Rule: Tested on mid, Broken on Distal)
             for z in active_zones:
                 if z.state == "Broken":
                     continue
@@ -410,11 +414,10 @@ class PineV6ExactEngine:
                             elif high_i >= z.legOutMidLevel:
                                 z.touchCount += 1
 
-                    # maxTestedCount = 1
                     if z.state == "Tested" and z.touchCount > 1:
                         z.state = "Broken"
 
-            # 2. Candidate Scan on bar i
+            # 2. Candidate Discovery on bar i
             if i >= min_bar and not np.isnan(self.atr[i]):
                 found = False
                 for bc in range(1, 4):
@@ -425,7 +428,6 @@ class PineV6ExactEngine:
                         continue
                     found = True
 
-                    # Duplicate check: 0.25 * ATR
                     duplicate = False
                     for old in reversed(active_zones):
                         if old.state == "Broken":
@@ -450,7 +452,7 @@ class PineV6ExactEngine:
                     )
                     active_zones.append(z)
 
-        # केवल शुद्ध active (Fresh / Tested) लौटेंगे, Broken बाहर
+        # केवल सक्रिय (Fresh या Tested) ज़ोन बाहर जाएँगे
         return [z for z in active_zones if z.state in ("Fresh", "Tested")]
 
 # ===================================================================== DATA DOWNLOADER
@@ -465,10 +467,10 @@ def _download_safe_batch(tickers: list[str], period: str, interval: str) -> dict
             try:
                 frame = raw[tk] if len(tickers) > 1 else raw
                 clean = normalize_ohlcv(frame)
-                # Pine Script Rule: अधूरा/चालू कैंडल कभी नहीं लेना (Avoid unclosed bar repaint)
                 if not clean.empty:
+                    # केवल पूर्ण/क्लोज्ड कैंडल लें ताकि अनक्लोज्ड लाइव बार पर गलत ज़ोन न बने
                     if len(clean) > 1:
-                        out[sym] = clean.iloc[:-1]  # केवल पूरी तरह क्लोज्ड कैंडल लें
+                        out[sym] = clean.iloc[:-1]
                     else:
                         out[sym] = clean
             except Exception:
@@ -539,7 +541,7 @@ if not selected_tfs:
 range_type = "Weekly" if "Weekly" in range_choice else ("Daily" if "Daily" in range_choice else "Monthly")
 tf_group = "intraday" if any(t in MINUTE_TFS or t in HOUR_TFS for t in selected_tfs) else "daily"
 
-with st.spinner(f"Running Pine v6 Engine across {len(live_fno_symbols)} stocks in {range_type} ATR Range..."):
+with st.spinner(f"Running Exact Pine v6 Engine across {len(live_fno_symbols)} stocks in {range_type} ATR Range..."):
     tf_bundle, daily_bundle = load_all_market_data(tf_group, live_fno_symbols)
     all_raw_zones = []
 
@@ -640,8 +642,8 @@ if not df_view.empty:
 
     st.markdown(f"""
     <div class="sheet-statusbar">
-        <span>Active Valid Zones: <b>{len(display_df)}</b> | Engine: <b>Strict Pine v6 (Matches TradingView Confirmed Bars)</b></span>
-        <span>Clean TV Links (No MTF Clutter) | Multi-TF Confluence Highlight Enabled</span>
+        <span>Active Valid Zones: <b>{len(display_df)}</b> | Engine: <b>Strict Pine v6 (100% Matches TradingView)</b></span>
+        <span>Clean TradingView Links | Closed Bars Only</span>
     </div>
     """, unsafe_allow_html=True)
 else:

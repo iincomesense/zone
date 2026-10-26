@@ -1477,6 +1477,14 @@ def is_dark() -> bool:
     return False
 
 
+def _html(src: str) -> None:
+    """कच्चा HTML/CSS डालो — markdown पार्सर की अड़चनों से बचने के लिए st.html।"""
+    try:
+        st.html(src)
+    except Exception:                                          # purana streamlit
+        st.markdown(src, unsafe_allow_html=True)
+
+
 def css():
     dark = is_dark()
     sheet = ("""
@@ -1513,9 +1521,9 @@ def css():
       .gs-ok{color:#0b6b3a;} .gs-star{color:#f9ab00;}
       .gs-track{background:#e8eaed;}""")
 
-    st.markdown("""
+    _CSS = """
     <style>
-      .block-container{padding-top:.7rem;padding-bottom:1.2rem;max-width:100%;}
+      .block-container{padding-top:.55rem;padding-bottom:1rem;max-width:100%;}
       h1,h2,h3{letter-spacing:.2px;}
       div[data-testid="stMetricValue"]{font-size:1.25rem;}
       div[data-testid="stHorizontalBlock"]{gap:.45rem;}
@@ -1548,7 +1556,8 @@ def css():
                 vertical-align:middle;margin-right:6px;}
       .gs-fill{display:block;height:6px;border-radius:4px;}
       .gs-sm{font-size:11px;opacity:.85;}
-    </style>""" + sheet, unsafe_allow_html=True)
+    </style>""" + sheet
+    _html(_CSS)
 
 
 def reset_inputs():
@@ -1569,7 +1578,7 @@ def preset_loose():
 # ---------------------------------------------------------------------------
 def top_bar():
     """स्क्रीनशॉट जैसी एक row: यूनिवर्स · TF · ट्रेडर · पक्ष · स्थिति · रेंज · स्क्रिप्ट · Scan"""
-    c = cols([1.45, 2.15, 1.1, .8, .8, 1.0, 1.3, .6])
+    c = cols([1.4, 2.0, 1.0, .72, .72, 1.0, 1.12, .95])
 
     uni = c[0].selectbox("यूनिवर्स", UNIVERSES, key="in_uni", label_visibility="collapsed")
     tfs = c[1].multiselect("TF", list(ALL_TFS), default=list(ALL_TFS),
@@ -1584,7 +1593,7 @@ def top_bar():
                           label_visibility="collapsed")
     sym_txt = c[6].text_input("स्क्रिप्ट", key="in_symtxt", label_visibility="collapsed",
                               placeholder="RELIANCE, SBIN…")
-    go = put(c[7], "button", "⚡ Scan", type="primary", key="btn_scan")
+    go = put(c[7], "button", "⚡ Scan", type="primary", key="btn_scan", help=None)
 
     return dict(universe=uni, tfs=tuple(tfs), trader=ttype, side=side, status=status,
                 band=band, symbols_txt=sym_txt.strip(), go=go)
@@ -1593,8 +1602,10 @@ def top_bar():
 # ---------------------------------------------------------------------------
 # 2 · Pine v6 के सारे इनपुट — एक expander में (sidebar हटा दिया)
 # ---------------------------------------------------------------------------
-def pine_panel() -> "PineInputs":
-    with st.expander("⚙️ Pine v6 इनपुट — सभी 30+ पैरामीटर (वही default)", expanded=False):
+def pine_panel(slot=None) -> "PineInputs":
+    """Pine के सारे input — किसी भी कॉलम/स्लॉट के अंदर, बंद expander में।"""
+    host = slot if slot is not None else st
+    with host.expander("⚙️ इनपुट", expanded=False):
         b1, b2, _ = st.columns([1, 1, 4])
         put(b1, "button", "↺ Pine default", on_click=reset_inputs,
             help="सारे input वापस Pine v6 के मूल default पर")
@@ -1958,7 +1969,7 @@ def _zone_chart_plotly(df: pd.DataFrame, zones: pd.DataFrame, sym: str, tf: str,
                           line=dict(color="#7b61ff", width=1, dash="dot"))
     fig.update_layout(height=520, margin=dict(l=8, r=8, t=30, b=8),
                       xaxis_rangeslider_visible=False,
-                      title=f"{sym} · {tf} ({TF_LABEL_HI.get(tf, tf)}) · ज़ोन",
+                      title=f"{sym} · {tf}",
                       hovermode="x unified", dragmode="pan")
     if TF_SECONDS.get(tf, 0) < 86400:
         fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"]),
@@ -2034,7 +2045,7 @@ def _zone_chart_altair(df: pd.DataFrame, zones: pd.DataFrame, sym: str, tf: str,
 
     return (alt.layer(*layers)
             .properties(height=520,
-                        title=f"{sym} · {tf} ({TF_LABEL_HI.get(tf, tf)}) · ज़ोन")
+                        title=f"{sym} · {tf}")
             .interactive())
 
 
@@ -2246,7 +2257,8 @@ def main():
         return
 
     tb = top_bar()
-    inp, uo = pine_panel()
+    ctrl = cols([1.55, .85, .7, .7, 3.4])
+    inp, uo = pine_panel(ctrl[0])
     dark = is_dark()
 
     # ── स्कैन ────────────────────────────────────────────────────────────
@@ -2268,7 +2280,6 @@ def main():
 
     res = st.session_state.get("scan")
     if not res:
-        st.caption("⚡ Scan दबाएँ")
         return
 
     df_all: pd.DataFrame = res["rows"]
@@ -2308,48 +2319,42 @@ def main():
             st.write(pd.DataFrame({"स्क्रिप्ट": list(res["errs"]),
                                    "कारण": list(res["errs"].values())}))
 
-    # ── शीट पंक्ति: सिर्फ़ कॉलम-टॉगल + डाउनलोड (कोई डिस्क्रिप्शन नहीं) ──
-    c1, c2, c3, c4 = cols([.9, .9, 3.2, 1.0])
-    with c1:
+    # ── कॉलम-टॉगल + डाउनलोड (उसी ऊपरी row में) ──
+    with ctrl[1]:
         extra_cols = st.toggle("➕ कॉलम", value=False, key="in_extra")
+    if extra_cols and uo.get("show_mcap") and not f.empty:
+        syms_vis = tuple(sorted(f["symbol"].unique())[:120])
+        try:
+            caps = cached_caps(syms_vis)
+            f["mcap_cr"] = f["symbol"].map(caps)
+        except Exception:                                        # noqa: BLE001
+            f["mcap_cr"] = np.nan
     tbl = zone_table(f, uo.get("show_mcap", True), uo.get("min_mcap", 50000.0))
-    put(c2, "download_button", "⬇️ CSV",
+    put(ctrl[2], "download_button", "⬇️ CSV",
         tbl.to_csv(index=False).encode("utf-8-sig"),
         file_name=f"zone_mtf_{datetime.now(IST):%Y%m%d_%H%M}.csv",
         mime="text/csv")
-    with c3:
-        if extra_cols and uo.get("show_mcap") and not f.empty:
-            syms_vis = tuple(sorted(f["symbol"].unique())[:120])
-            try:
-                caps = cached_caps(syms_vis)
-                f["mcap_cr"] = f["symbol"].map(caps)
-            except Exception:                                    # noqa: BLE001
-                f["mcap_cr"] = np.nan
-    put(c4, "download_button", "⬇️ TSV",
+    put(ctrl[3], "download_button", "⬇️ TSV",
         tbl.to_csv(index=False, sep="\t").encode("utf-8-sig"),
         file_name=f"zone_mtf_{datetime.now(IST):%Y%m%d_%H%M}.tsv",
         mime="text/tab-separated-values")
 
-    if f.empty:
-        st.caption("— कोई ज़ोन नहीं —")
-    else:
+    if not f.empty:
         try:
             scale = float(max(1.0, f["dist_pct"].quantile(0.90)))
         except Exception:                                        # noqa: BLE001
             scale = 5.0
-        st.markdown(sheet_html(f, dark, uo.get("show_mcap", True),
-                               uo.get("min_mcap", 50000.0), extra=extra_cols,
-                               range_pct=scale), unsafe_allow_html=True)
+        _html(sheet_html(f, dark, uo.get("show_mcap", True),
+                         uo.get("min_mcap", 50000.0), extra=extra_cols,
+                         range_pct=scale))
 
-    # ── आगे के टैब ──────────────────────────────────────────────────────
-    t2, t3, t4, t5 = st.tabs(["🕯️ ज़ोन डिटेल + चार्ट", "🔗 MTF तालिका",
-                              "🎯 फ़िल्टर/सॉर्ट तालिका", "📖 नियम व सेटिंग"])
+    # ── नीचे: दो बंद (collapsed) खंड — डैशबोर्ड साफ़ रहे ────────────────
+    x_chart = st.expander("🕯️ चार्ट", expanded=False)
+    x_mtf = st.expander("🔗 MTF", expanded=False)
 
-    # ---------- ज़ोन डिटेल ----------
-    with t2:
-        if f.empty:
-            st.info("पहले फ़िल्टर में कुछ ज़ोन आने दें।")
-        else:
+    # ---------- ज़ोन डिटेल (ज़रूरत पड़ने पर) ----------
+    with x_chart:
+        if not f.empty:
             cc1, cc2, cc3 = st.columns([1, 1, 2])
             sym_opts = sorted(f["symbol"].unique())
             if st.session_state.get("d_sym") not in sym_opts:
@@ -2402,14 +2407,14 @@ def main():
                 fig = zone_chart(df_tf, zc, sym_pick, tf_pick, inp_s,
                                  sl=float(zrow["sl"]), tp=float(zrow["tp"]))
                 if HAS_PLOTLY:
-                    stretch(st.plotly_chart, fig)
+                    stretch(st.plotly_chart, fig, config={"displayModeBar": False})
                 else:
                     stretch(st.altair_chart, fig)
             if inp_s.showInfo:
                 st.code(info_text(zrow.to_dict(), inp_s.targetRR), language="text")
 
     # ---------- MTF ----------
-    with t3:
+    with x_mtf:
         sym2 = st.selectbox("स्क्रिप्ट", sorted(res["snaps"].keys()), key="m_sym") \
             if res["snaps"] else None
         if sym2:
@@ -2425,74 +2430,8 @@ def main():
                         "LTP से %": st.column_config.NumberColumn(format="%.2f%%"),
                     })
 
-    # ---------- इंटरैक्टिव ----------
-    with t4:
-        if f.empty:
-            st.info("पहले फ़िल्टर में कुछ ज़ोन आने दें।")
-        else:
-            tx = zone_table(f, uo.get("show_mcap", True), uo.get("min_mcap", 50000.0))
-            tx.insert(1, "चार्ट", [tv_url(sy, tf) for sy, tf in zip(f["symbol"], f["tf"])])
-            tx.insert(2, "Future", [fut_url(sy, tf) for sy, tf in zip(f["symbol"], f["tf"])])
-            sel = stretch(st.dataframe, tx, hide_index=False, height=520,
-                          on_select="rerun", selection_mode="single-row", key="res_table",
-                          column_config={
-                              "चार्ट": st.column_config.LinkColumn("चार्ट", display_text="📈 कैश"),
-                              "Future": st.column_config.LinkColumn("Future", display_text="📈 फ़्यूचर"),
-                              "स्कोर": st.column_config.ProgressColumn(
-                                  "स्कोर", min_value=0, max_value=150, format="%d"),
-                              "दूरी %": st.column_config.NumberColumn("दूरी %", format="%.2f%%"),
-                          })
-            try:
-                picked = sel.selection.rows if sel is not None else []
-            except Exception:                                    # noqa: BLE001
-                picked = []
-            if picked:
-                pr = f.iloc[picked[0]]
-                pkk = {"symbol": str(pr["symbol"]), "tf": str(pr["tf"]), "bar": int(pr["bar"])}
-                if st.session_state.get("_pick") != pkk:
-                    st.session_state["_pick"] = pkk
-                    st.session_state["d_sym"] = pkk["symbol"]
-                    st.session_state["d_tf"] = pkk["tf"]
-                    st.session_state.pop("d_zone", None)
-
-    # ---------- नियम ----------
-    with t5:
-        cA, cB = st.columns([1, 1])
-        with cA:
-            st.markdown("#### इस रन के इनपुट (Pine v6)")
-            st.json({k: (round(v, 4) if isinstance(v, float) else v)
-                     for k, v in inp_s.__dict__.items()})
-        with cB:
-            st.markdown("#### Pine नियम — संक्षेप में")
-            st.markdown(PINE_HELP)
-
-    engine = "Plotly" if HAS_PLOTLY else ("Altair (fallback)" if HAS_ALTAIR else "कोई नहीं")
-    st.caption(f"डेटा: Yahoo Finance (15-20 मिनट देरी संभव) · नियम: Pine v6 “Zone MTF (KTP rules)” "
-               f"© iincomesense · चार्ट इंजन: {engine} · यह शिक्षा हेतु है, निवेश सलाह नहीं।")
 
 
-PINE_HELP = """
-**1-2-4 ढाँचा (Zone)**
-- **Leg-in** ज़ोरदार candle: body ≥ 50%, closing-side wick ≤ 20%, TR ≥ 1.0 × ATR
-- **Boring base**: 1–4 candles, हर TR ≤ 1.0 × ATR, कुल रेंज leg-in से ≥ 1/2
-- **Leg-out**: TR ≥ 1.2 × ATR, wick ≤ 30%, 1–3 समान रंग की candles (join सहनशीलता 0.25 × ATR)
-- रेंज: leg-in ≥ 2 × base, leg-out ≥ 4 × base
-- **CBLI**: leg-in के पीछे का उल्टे रंग का candle leg-in body के 50% से बड़ा न हो
-- **Formation**: पलटाव पैटर्न (DBR/RBD) में leg-out का open leg-in body के अंदर (±0.10 ATR)
-- **White area**: leg-out body boring body को निगल न ले
-- **Maturity**: hourly TF = 75 मिनट, daily = अगला दिन, weekly = +7, monthly = +21 ट्रेडिंग दिन
-
-**स्तर**
-- **Proximal** = base का high (मांग) / low (आपूर्ति) — एंट्री
-- **Distal** = course विधि में pattern का सबसे नीचा/ऊँचा, वरना सिर्फ़ boring
-- **SL** = distal ∓ DATR बफ़र (पिछले पूरे दिन का ATR14)
-- **T1** = proximal ± जोखिम × targetRR · **XRPT** = पहले leg-out candle का (open+close)/2
-
-**स्थितियाँ**: Fresh → Tested (ज़ोन में घुसा + matured) / Immature / Covered / Broken / Exhausted
-
-**MTF**: पड़ोसी TF का same-side proximal इस ज़ोन के ±0.5 × ATR के अंदर हो — शीट में
-**★ Multi-TF (N×)** = कितने TF पुष्टि कर रहे हैं।
-"""
 
 
 main()

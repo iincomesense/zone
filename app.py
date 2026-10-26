@@ -32,9 +32,25 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
 import requests
 import streamlit as st
+
+# plotly ज़रूरी नहीं — न मिले तो Altair से चार्ट बनेंगे (Altair streamlit के साथ आता है)
+try:
+    if os.environ.get("ZONE_NO_PLOTLY"):
+        raise ImportError("ZONE_NO_PLOTLY सेट है")
+    import plotly.graph_objects as go
+    HAS_PLOTLY = True
+except Exception:                                              # noqa: BLE001
+    go = None
+    HAS_PLOTLY = False
+
+try:
+    import altair as alt
+    HAS_ALTAIR = True
+except Exception:                                              # noqa: BLE001
+    alt = None
+    HAS_ALTAIR = False
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1293,6 +1309,45 @@ def css():
       .p-n{background:#e9edf5;color:#33415c;}
       div[data-testid="stMetricValue"]{font-size:1.35rem;}
       section[data-testid="stSidebar"] div[data-testid="stVerticalBlock"]{gap:.35rem;}
+
+      /* ───── Google Sheets जैसी शीट ───── */
+      .gs-bar{display:flex;align-items:center;gap:10px;font-size:12px;color:#5f6368;
+              margin:.2rem 0 .45rem;}
+      .gs-bar b{color:#202124;}
+      .gs-wrap{border:1px solid #dadce0;border-radius:6px;background:#fff;
+               box-shadow:0 1px 3px rgba(60,64,67,.10);overflow:hidden;}
+      .gs-scroll{max-height:620px;overflow:auto;}
+      table.gs{border-collapse:separate;border-spacing:0;width:100%;
+               font-family:Roboto,'Noto Sans Devanagari',Arial,sans-serif;
+               font-size:12.5px;color:#202124;}
+      table.gs th,table.gs td{border-right:1px solid #e8eaed;border-bottom:1px solid #e8eaed;
+               padding:5px 9px;white-space:nowrap;vertical-align:middle;}
+      table.gs thead th{position:sticky;background:#f1f3f4;font-weight:700;color:#3c4043;
+               text-align:left;z-index:2;}
+      table.gs thead tr.gs-letters th{top:0;background:#e8eaed;color:#5f6368;font-size:10px;
+               text-align:center;padding:1px 6px;z-index:3;font-weight:600;}
+      table.gs thead tr.gs-head th{top:19px;box-shadow:inset 0 -1px 0 #dadce0;}
+      table.gs th.gs-rn,table.gs td.gs-rn{position:sticky;left:0;z-index:1;background:#f8f9fa;
+               color:#80868b;text-align:center;font-size:10px;padding:5px 6px;
+               min-width:34px;border-right:1px solid #dadce0;}
+      table.gs thead th.gs-rn{z-index:4;}
+      table.gs tbody tr:hover td{background:#f1f8ff;}
+      table.gs tbody tr:hover td.gs-rn{background:#f1f3f4;}
+      table.gs td.num{text-align:right;font-variant-numeric:tabular-nums;}
+      table.gs td.ctr{text-align:center;}
+      table.gs a{color:#1a73e8;text-decoration:none;font-weight:600;}
+      table.gs a:hover{text-decoration:underline;}
+      .gs-pill{display:inline-block;padding:1px 8px;border-radius:11px;font-size:10.5px;
+               font-weight:700;}
+      .gs-d{background:#ceead6;color:#0b6b3a;}
+      .gs-s{background:#fce8e6;color:#a50e0e;}
+      .gs-fresh{color:#0b6b3a;font-weight:600;}
+      .gs-trig{color:#1a73e8;font-weight:600;}
+      .gs-imm{color:#b06000;font-weight:600;}
+      .gs-cov{color:#7b61ff;font-weight:600;}
+      .gs-exh{color:#80868b;font-weight:600;}
+      .gs-ok{color:#0b6b3a;font-weight:700;}
+      .gs-no{color:#d93025;font-weight:700;}
     </style>""", unsafe_allow_html=True)
 
 
@@ -1573,6 +1628,119 @@ def run_scan(symbols, inp, opts, ph, pbar):
 # ---------------------------------------------------------------------------
 # 3 · TABLE / CHART
 # ---------------------------------------------------------------------------
+# ---- TradingView लिंक (ज़ोन के टाइम फ्रेम पर ही खुले) ----
+TV_TF = {"3m": "3", "5m": "5", "10m": "10", "15m": "15", "30m": "30", "75m": "75",
+         "1h": "60", "2h": "120", "4h": "240", "6h": "360", "1d": "D", "1w": "W",
+         "1M": "M"}
+
+
+def tv_url(symbol: str, tf: str) -> str:
+    """https://www.tradingview.com/chart/?symbol=NSE:SBIN&interval=15"""
+    from urllib.parse import quote
+    return (f"https://www.tradingview.com/chart/?symbol={quote('NSE:' + str(symbol))}"
+            f"&interval={TV_TF.get(str(tf), '15')}")
+
+
+def _col_letter(i: int) -> str:
+    """0 → A, 25 → Z, 26 → AA"""
+    out, i = "", i + 1
+    while i:
+        i, r = divmod(i - 1, 26)
+        out = chr(65 + r) + out
+    return out
+
+
+def _lerp(c1, c2, t):
+    return tuple(int(round(a + (b - a) * t)) for a, b in zip(c1, c2))
+
+
+def _score_bg(sc: float) -> str:
+    """Google Sheets जैसा conditional रंग: लाल → पीला → हरा"""
+    low, mid, high = (252, 232, 230), (254, 247, 224), (206, 234, 214)
+    t = max(0.0, min(1.0, (float(sc) - 30.0) / 90.0))
+    c = _lerp(low, mid, t / 0.5) if t <= 0.5 else _lerp(mid, high, (t - 0.5) / 0.5)
+    return f"rgb({c[0]},{c[1]},{c[2]})"
+
+
+_STATE_CLS = {"Fresh": "gs-fresh", "Triggered": "gs-trig", "Immature": "gs-imm",
+              "Covered": "gs-cov", "Exhausted": "gs-exh", "Broken": "gs-no"}
+
+
+def sheet_html(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0,
+               max_rows: int = 400) -> str:
+    """Google Sheets जैसी टेबल — column letters, row numbers, sticky header,
+    रंग-कोडेड स्कोर, और symbol/TF पर TradingView लिंक (उसी TF का interval)।"""
+    if df is None or df.empty:
+        return ""
+    d = df.head(max_rows)
+    cols = [("स्क्रिप्ट", "s"), ("TF", "s"), ("पक्ष", "s"), ("पैटर्न", "ctr"),
+            ("बेस", "s"), ("एंट्री", "num"), ("डिस्टल", "num"), ("SL", "num"),
+            ("T1", "num"), ("दूरी %", "num"), ("स्कोर", "ctr"), ("HQ", "ctr"),
+            ("MTF", "ctr"), ("स्थिति", "s"), ("XRPT", "num"), ("मात्रा", "num")]
+    if show_mcap:
+        cols.append(("मार्केट कैप ₹Cr", "num"))
+    cols += [("बना (IST)", "ctr"), ("चार्ट", "ctr")]
+
+    letters = "".join(f"<th>{_col_letter(i)}</th>" for i in range(len(cols) + 1))
+    head = "".join(f'<th class="{a}">{t}</th>' for t, a in cols)
+
+    body = []
+    for n, (_, r) in enumerate(d.iterrows(), start=2):
+        u = tv_url(r["symbol"], r["tf"])
+        sym = (f'<a href="{u}" target="_blank" rel="noopener" '
+               f'title="TradingView पर {r["symbol"]} · {r["tf"]}">{r["symbol"]}</a>')
+        tf_c = (f'<a href="{u}" target="_blank" rel="noopener" '
+                f'title="TradingView · {r["tf"]}">{r["tf"]}</a>')
+        side = (f'<span class="gs-pill {"gs-d" if r["demand"] else "gs-s"}">'
+                f'{"मांग" if r["demand"] else "आपूर्ति"}</span>')
+        stt = (f'<span class="{_STATE_CLS.get(str(r["state"]), "")}">'
+               f'{r["state_hi"]}</span>')
+        sc_bg = _score_bg(r["score"])
+        cap = ""
+        if show_mcap:
+            mv = r.get("mcap_cr", float("nan"))
+            if mv is None or (isinstance(mv, float) and pd.isna(mv)):
+                cap = '<td class="num">—</td>'
+            else:
+                ok = float(mv) >= float(min_mcap)
+                cap = (f'<td class="num">{float(mv):,.0f} '
+                       f'<span class="{"gs-ok" if ok else "gs-no"}">'
+                       f'{"✓" if ok else "✗"}</span></td>')
+        hq_cell = '<span style="color:#f9ab00;font-size:14px">★</span>' if r["hq"] else ""
+        mtf_cell = ('<span class="gs-ok">✓</span>' if r["mtf"]
+                    else '<span class="gs-exh">–</span>')
+        t1c = f'<td class="ctr"><a href="{u}" target="_blank" rel="noopener">📈</a></td>'
+        body.append(
+            f'<tr><td class="gs-rn">{n}</td>'
+            f'<td>{sym}</td><td>{tf_c}</td><td>{side}</td>'
+            f'<td class="ctr">{r["pattern"]}</td>'
+            f'<td>{int(r["base_count"])} · {_GRADE_HI.get(int(r["base_count"]), "")}</td>'
+            f'<td class="num">{r["prox"]:,.2f}</td>'
+            f'<td class="num">{r["dist"]:,.2f}</td>'
+            f'<td class="num">{r["sl"]:,.2f}</td>'
+            f'<td class="num">{r["tp"]:,.2f}</td>'
+            f'<td class="num">{r["dist_pct"]:.2f}%</td>'
+            f'<td class="ctr" style="background:{sc_bg};font-weight:700">{int(r["score"])}</td>'
+            f'<td class="ctr">{hq_cell}</td>'
+            f'<td class="ctr">{mtf_cell}</td>'
+            f'<td>{stt}</td>'
+            f'<td class="num">1:{r["xrpt_rr"]:.2f}</td>'
+            f'<td class="num">{int(r["qty"])}</td>'
+            f'{cap}'
+            f'<td class="ctr">{r["created_ist"]}</td>'
+            f'{t1c}</tr>')
+
+    more = ""
+    if len(df) > len(d):
+        more = (f'<div class="gs-bar">… और {len(df) - len(d)} पंक्तियाँ छिपी हैं '
+                f'(CSV डाउनलोड करें)</div>')
+    return (
+        '<div class="gs-wrap"><div class="gs-scroll"><table class="gs">'
+        f'<thead><tr class="gs-letters"><th class="gs-rn"></th>{letters}</tr>'
+        f'<tr class="gs-head"><th class="gs-rn">1</th>{head}</tr></thead>'
+        f'<tbody>{"".join(body)}</tbody></table></div></div>{more}')
+
+
 def zone_table(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0):
     d = pd.DataFrame({
         "स्क्रिप्ट": df["symbol"],
@@ -1602,7 +1770,22 @@ def zone_table(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0):
 
 
 def zone_chart(df: pd.DataFrame, zones: pd.DataFrame, sym: str, tf: str,
-               inputs: PineInputs) -> go.Figure:
+               inputs: PineInputs, sl: float | None = None, tp: float | None = None):
+    """Plotly हो तो Plotly; वरना Altair (streamlit के साथ bundled)।"""
+    if HAS_PLOTLY:
+        fig = _zone_chart_plotly(df, zones, sym, tf, inputs)
+        if sl is not None:
+            fig.add_hline(y=float(sl), line=dict(color="#d62728", width=1, dash="dash"),
+                          annotation_text=f"SL {float(sl):.2f}", annotation_position="right")
+        if tp is not None:
+            fig.add_hline(y=float(tp), line=dict(color="#2ca02c", width=1, dash="dash"),
+                          annotation_text=f"T1 {float(tp):.2f}", annotation_position="right")
+        return fig
+    return _zone_chart_altair(df, zones, sym, tf, sl, tp)
+
+
+def _zone_chart_plotly(df: pd.DataFrame, zones: pd.DataFrame, sym: str, tf: str,
+                       inputs: PineInputs):
     d = df.tail(400)
     x = d.index
     step = (x[-1] - x[-2]) if len(x) > 1 else pd.Timedelta(minutes=15)
@@ -1640,6 +1823,78 @@ def zone_chart(df: pd.DataFrame, zones: pd.DataFrame, sym: str, tf: str,
     return fig
 
 
+def _zone_chart_altair(df: pd.DataFrame, zones: pd.DataFrame, sym: str, tf: str,
+                       sl: float | None, tp: float | None):
+    """fallback — वही candle + ज़ोन, बिना plotly।"""
+    d = df.tail(400).copy()
+    d = d.reset_index()
+    tcol = d.columns[0]
+    try:
+        d[tcol] = (pd.to_datetime(d[tcol]).dt.tz_convert(IST).dt.tz_localize(None))
+    except Exception:                                          # noqa: BLE001
+        d[tcol] = pd.to_datetime(d[tcol]).dt.tz_localize(None)
+    tname = "t"
+    d = d.rename(columns={tcol: tname})
+    tmin, tmax = d[tname].min(), d[tname].max()
+    step = (tmax - tmin) / max(len(d), 1) if len(d) > 1 else pd.Timedelta(minutes=15)
+    t_end = tmax + step * 12
+
+    up = "#26a69a"
+    dn = "#ef5350"
+    color = alt.condition(alt.datum["close"] >= alt.datum["open"],
+                          alt.value(up), alt.value(dn))
+    wick = (alt.Chart(d).mark_rule(strokeWidth=1)
+            .encode(x=alt.X(f"{tname}:T", title=None),
+                    y=alt.Y("low:Q", title="मूल्य", scale=alt.Scale(zero=False)),
+                    y2="high:Q", color=color))
+    body = (alt.Chart(d).mark_bar(size=5)
+            .encode(x=f"{tname}:T", y="open:Q", y2="close:Q", color=color,
+                    tooltip=[alt.Tooltip(f"{tname}:T", title="समय"),
+                             alt.Tooltip("open:Q", format=".2f"),
+                             alt.Tooltip("high:Q", format=".2f"),
+                             alt.Tooltip("low:Q", format=".2f"),
+                             alt.Tooltip("close:Q", format=".2f")]))
+    layers = [wick, body]
+
+    zr = []
+    for _, z in zones.iterrows():
+        try:
+            t0 = pd.to_datetime(df.index[int(z["left_bar"])])
+            t0 = t0.tz_convert(IST).tz_localize(None)
+        except Exception:                                      # noqa: BLE001
+            t0 = tmin
+        zr.append({tname: t0, "t1": t_end, "y1": float(z["prox"]), "y0": float(z["dist"]),
+                   "col": up if z["demand"] else dn,
+                   "lbl": f"{'D' if z['demand'] else 'S'} {z['pattern']} · {int(z['score'])}"})
+    if zr:
+        zdf = pd.DataFrame(zr)
+        zinc = (alt.Chart(zdf).mark_rect(opacity=0.16, strokeWidth=1)
+                .encode(x=alt.X(f"{tname}:T"), x2=alt.X2("t1:T"),
+                        y=alt.Y("y1:Q"), y2=alt.Y2("y0:Q"),
+                        color=alt.Color("col:N", scale=None, legend=None),
+                        stroke=alt.Color("col:N", scale=None, legend=None)))
+        ztxt = (alt.Chart(zdf).mark_text(align="left", dx=3, fontSize=9)
+                .encode(x=alt.X(f"{tname}:T"), x2=alt.X2("t1:T"),
+                        y=alt.Y("y1:Q"), text="lbl:N",
+                        color=alt.Color("col:N", scale=None, legend=None)))
+        layers += [zinc, ztxt]
+
+    for lvl, cl, nm in ((sl, "#d62728", "SL"), (tp, "#2ca02c", "T1")):
+        if lvl is None:
+            continue
+        rdf = pd.DataFrame({tname: [tmin], "t1": [t_end], "y": [float(lvl)], "nm": [f"{nm} {float(lvl):.2f}"]})
+        rule = (alt.Chart(rdf).mark_rule(strokeDash=[5, 4], color=cl)
+                .encode(x=alt.X(f"{tname}:T"), x2=alt.X2("t1:T"), y=alt.Y("y:Q")))
+        txt = (alt.Chart(rdf).mark_text(align="left", dx=3, color=cl, fontSize=9)
+               .encode(x=alt.X(f"{tname}:T"), x2=alt.X2("t1:T"), y=alt.Y("y:Q"), text="nm:N"))
+        layers += [rule, txt]
+
+    return (alt.layer(*layers)
+            .properties(height=520,
+                        title=f"{sym} · {tf} ({TF_LABEL_HI.get(tf, tf)}) · ज़ोन")
+            .interactive())
+
+
 def mtf_panel(snap: dict, tfs, peers):
     rows = []
     for tf in tfs:
@@ -1659,8 +1914,34 @@ def mtf_panel(snap: dict, tfs, peers):
 # ---------------------------------------------------------------------------
 # 4 · MAIN
 # ---------------------------------------------------------------------------
+REQ_TXT = """streamlit
+yfinance
+pandas
+numpy
+plotly      # वैकल्पिक — न हो तो Altair चार्ट चलेंगे
+requests"""
+
+
+def deps_guard() -> bool:
+    """ज़रूरी पैकेज हैं या नहीं — Streamlit Cloud पर साफ़ संदेश दिखाने के लिए।"""
+    missing = []
+    if yf is None:
+        missing.append("yfinance")
+    if not missing:
+        return True
+    st.error("### ⚠️ ज़रूरी पैकेज इंस्टॉल नहीं हैं: " + ", ".join(missing))
+    st.markdown(
+        "GitHub repo की जड़ (root) में **`requirements.txt`** खोलें और ये पंक्तियाँ रखें — "
+        "फिर Streamlit Cloud में **Manage app → Reboot app**:")
+    st.code(REQ_TXT, language="text")
+    st.caption("plotly वैकल्पिक है — न हो तो ज़ोन चार्ट Altair में बनते हैं।")
+    return False
+
+
 def main():
     css()
+    if not deps_guard():
+        return
     inp, opts = sidebar()
 
     st.markdown("""
@@ -1765,34 +2046,61 @@ def main():
             st.warning("इन फ़िल्टर पर कोई ज़ोन नहीं। फ़िल्टर ढीले करें।")
         else:
             tbl = zone_table(f, opt_s.get("show_mcap", True), opt_s.get("min_mcap", 50000.0))
-            sel = stretch(st.dataframe, tbl, hide_index=True, height=520,
-                    on_select="rerun", selection_mode="single-row", key="res_table",
-                    column_config={
-                        "स्कोर": st.column_config.ProgressColumn(
-                            "स्कोर", min_value=0, max_value=150, format="%d"),
-                        "दूरी %": st.column_config.NumberColumn("दूरी %", format="%.2f%%"),
-                        "एंट्री (proximal)": st.column_config.NumberColumn(format="%.2f"),
-                        "डिस्टल": st.column_config.NumberColumn(format="%.2f"),
-                        "SL": st.column_config.NumberColumn(format="%.2f"),
-                        "T1": st.column_config.NumberColumn(format="%.2f"),
-                    })
-            try:
-                picked = sel.selection.rows if sel is not None else []
-            except Exception:                                    # noqa: BLE001
-                picked = []
-            if picked:
-                pr = f.iloc[picked[0]]
-                pk = {"symbol": str(pr["symbol"]), "tf": str(pr["tf"]), "bar": int(pr["bar"])}
-                if st.session_state.get("_pick") != pk:
-                    st.session_state["_pick"] = pk
-                    st.session_state["d_sym"] = pk["symbol"]
-                    st.session_state["d_tf"] = pk["tf"]
-                    st.session_state.pop("d_zone", None)
-            dl = tbl.to_csv(index=False).encode("utf-8-sig")
-            st.download_button("⬇️ CSV डाउनलोड (हिंदी कॉलम)", dl,
-                               file_name=f"zone_mtf_{datetime.now(IST):%Y%m%d_%H%M}.csv",
-                               mime="text/csv", width="content")
-            st.caption("किसी पंक्ति पर क्लिक करें → 'ज़ोन डिटेल + चार्ट' टैब में वही ज़ोन खुल जाएगा।")
+
+            # ── Google Sheets जैसा दृश्य (symbol/TF पर TradingView लिंक) ──
+            st.markdown(
+                f'<div class="gs-bar"><b>📄 शीट दृश्य</b> · {len(f)} पंक्तियाँ · '
+                f'<b>स्क्रिप्ट / TF / 📈</b> पर क्लिक → TradingView उसी टाइम फ्रेम पर खुलेगा '
+                f'(NSE:स्क्रिप्ट · interval = ज़ोन का TF)</div>',
+                unsafe_allow_html=True)
+            st.markdown(sheet_html(f, opt_s.get("show_mcap", True),
+                                   opt_s.get("min_mcap", 50000.0)),
+                        unsafe_allow_html=True)
+
+            c_dl1, c_dl2, c_dl3 = st.columns([1.1, 1.1, 2.2])
+            with c_dl1:
+                dl = tbl.to_csv(index=False).encode("utf-8-sig")
+                st.download_button("⬇️ CSV (Sheets में Import)", dl,
+                                   file_name=f"zone_mtf_{datetime.now(IST):%Y%m%d_%H%M}.csv",
+                                   mime="text/csv", width="stretch")
+            with c_dl2:
+                st.download_button("⬇️ TSV (सीधे पेस्ट)",
+                                   tbl.to_csv(index=False, sep="\t").encode("utf-8-sig"),
+                                   file_name=f"zone_mtf_{datetime.now(IST):%Y%m%d_%H%M}.tsv",
+                                   mime="text/tab-separated-values", width="stretch")
+            with c_dl3:
+                st.caption("Google Sheets → File → Import → Upload (या TSV कॉपी कर सीधे पेस्ट)। "
+                           "TradingView पर 10m/75m/6H जैसा custom TF न हो तो निकटतम TF खुलेगा।")
+
+            # ── इंटरैक्टिव तालिका — सॉर्ट + पंक्ति क्लिक → ज़ोन डिटेल ──
+            with st.expander("🔎 फ़िल्टर/सॉर्ट करने योग्य तालिका — पंक्ति क्लिक → ज़ोन डिटेल", expanded=False):
+                tbl_x = tbl.copy()
+                tbl_x.insert(1, "चार्ट", [tv_url(sy, tf) for sy, tf in zip(f["symbol"], f["tf"])])
+                sel = stretch(st.dataframe, tbl_x, hide_index=True, height=460,
+                        on_select="rerun", selection_mode="single-row", key="res_table",
+                        column_config={
+                            "चार्ट": st.column_config.LinkColumn("चार्ट", display_text="📈 खोलें"),
+                            "स्कोर": st.column_config.ProgressColumn(
+                                "स्कोर", min_value=0, max_value=150, format="%d"),
+                            "दूरी %": st.column_config.NumberColumn("दूरी %", format="%.2f%%"),
+                            "एंट्री (proximal)": st.column_config.NumberColumn(format="%.2f"),
+                            "डिस्टल": st.column_config.NumberColumn(format="%.2f"),
+                            "SL": st.column_config.NumberColumn(format="%.2f"),
+                            "T1": st.column_config.NumberColumn(format="%.2f"),
+                        })
+                try:
+                    picked = sel.selection.rows if sel is not None else []
+                except Exception:                                # noqa: BLE001
+                    picked = []
+                if picked:
+                    pr = f.iloc[picked[0]]
+                    pk = {"symbol": str(pr["symbol"]), "tf": str(pr["tf"]), "bar": int(pr["bar"])}
+                    if st.session_state.get("_pick") != pk:
+                        st.session_state["_pick"] = pk
+                        st.session_state["d_sym"] = pk["symbol"]
+                        st.session_state["d_tf"] = pk["tf"]
+                        st.session_state.pop("d_zone", None)
+                st.caption("किसी पंक्ति पर क्लिक करें → 'ज़ोन डिटेल + चार्ट' टैब में वही ज़ोन खुल जाएगा।")
 
             # ---- quick summary by TF / side ----
             ssum = (f.groupby(["tf", "side"], observed=True)
@@ -1858,6 +2166,9 @@ def main():
                 + ("<span class='pill p-n'>SWING</span>" if zrow.get("swing_break") else ""),
                 unsafe_allow_html=True)
 
+            st.link_button(f"📈 TradingView पर खोलें — NSE:{zrow['symbol']} · {zrow['tf']}",
+                           tv_url(zrow["symbol"], zrow["tf"]), type="primary")
+
             # chart
             try:
                 frames = load_frames([sym_pick], [tf_pick])
@@ -1867,13 +2178,12 @@ def main():
                 st.error(f"चार्ट डेटा नहीं मिला: {e}")
             if df_tf is not None and len(df_tf):
                 zc = zsub[zsub["state"].isin(["Fresh", "Triggered", "Covered", "Immature"])]
-                fig = zone_chart(df_tf, zc, sym_pick, tf_pick, inp_s)
-                # SL / TP of the selected zone
-                fig.add_hline(y=float(zrow["sl"]), line=dict(color="#d62728", width=1, dash="dash"),
-                              annotation_text=f"SL {zrow['sl']:.2f}", annotation_position="right")
-                fig.add_hline(y=float(zrow["tp"]), line=dict(color="#2ca02c", width=1, dash="dash"),
-                              annotation_text=f"T1 {zrow['tp']:.2f}", annotation_position="right")
-                stretch(st.plotly_chart, fig)
+                fig = zone_chart(df_tf, zc, sym_pick, tf_pick, inp_s,
+                                 sl=float(zrow["sl"]), tp=float(zrow["tp"]))
+                if HAS_PLOTLY:
+                    stretch(st.plotly_chart, fig)
+                else:
+                    stretch(st.altair_chart, fig)
             if inp_s.showInfo:
                 st.code(info_text(zrow.to_dict(), inp_s.targetRR), language="text")
 
@@ -1919,8 +2229,9 @@ def main():
             st.markdown("#### Pine नियम — संक्षेप में")
             st.markdown(PINE_HELP)
 
-    st.caption("डेटा: Yahoo Finance (15-20 मिनट देरी संभव) · नियम: Pine v6 “Zone MTF (KTP rules)” © iincomesense · "
-               "यह शिक्षा हेतु है, निवेश सलाह नहीं।")
+    engine = "Plotly" if HAS_PLOTLY else ("Altair (fallback)" if HAS_ALTAIR else "कोई नहीं")
+    st.caption(f"डेटा: Yahoo Finance (15-20 मिनट देरी संभव) · नियम: Pine v6 “Zone MTF (KTP rules)” "
+               f"© iincomesense · चार्ट इंजन: {engine} · यह शिक्षा हेतु है, निवेश सलाह नहीं।")
 
 
 PINE_HELP = """

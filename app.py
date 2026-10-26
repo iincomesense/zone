@@ -1254,16 +1254,15 @@ def _last_close(frames: Dict[str, pd.DataFrame], tfs: Sequence[str]) -> float:
     return 0.0
 
 # ═══════════════════════════════════════════════════════════════════════
-#  भाग 4 · Streamlit UI — sidebar में Pine के सारे input, स्कैन,
-#           टेबल, ज़ोन चार्ट, MTF तालिका, CSV
+
+# ═══════════════════════════════════════════════════════════════════════
+#  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar) में सारे नियंत्रण,
+#           नीचे Google-Sheets जैसी टेबल (TradingView लिंक सहित)
 # ═══════════════════════════════════════════════════════════════════════
 
-# ---------------------------------------------------------------------------
-# 0 · छोटे helpers
-# ---------------------------------------------------------------------------
 st.set_page_config(page_title="ज़ोन MTF स्कैनर · KTP नियम",
                    page_icon="📐", layout="wide",
-                   initial_sidebar_state="expanded")
+                   initial_sidebar_state="collapsed")
 
 STATE_HI = {
     "Fresh": "ताज़ा (Fresh)",
@@ -1273,9 +1272,294 @@ STATE_HI = {
     "Exhausted": "समाप्त (Exhausted)",
     "Broken": "टूटा (Broken)",
 }
+# टेबल में पुराने फ़ॉर्मैट जैसे नाम (Fresh / Tested / …)
+STATE_SHORT = {"Fresh": "Fresh", "Triggered": "Tested", "Immature": "Immature",
+               "Covered": "Covered", "Exhausted": "Exhausted", "Broken": "Broken"}
 SIDE_HI = {"Demand": "मांग (Demand)", "Supply": "आपूर्ति (Supply)"}
 CAT_HI = {"Reversal": "पलटाव", "Continuation": "निरंतरता"}
 ALL_STATES = ["Fresh", "Triggered", "Immature", "Covered", "Exhausted"]
+
+# टेबल की पहली पंक्ति — सभी नियंत्रण एक जगह
+UNIVERSES = ["NSE All F&O", "NIFTY 50", "NIFTY 50 + F&O", "अपनी सूची"]
+TV_TF = {"3m": "3", "5m": "5", "10m": "10", "15m": "15", "30m": "30", "75m": "75",
+         "1h": "60", "2h": "120", "4h": "240", "6h": "360", "1d": "D", "1w": "W",
+         "1M": "M"}
+_STATE_CLS = {"Fresh": "gs-fresh", "Triggered": "gs-trig", "Immature": "gs-imm",
+              "Covered": "gs-cov", "Exhausted": "gs-exh", "Broken": "gs-no"}
+TRADER_OPTS = ["Auto", "Aggressive (1M)", "Hourly (3M/5M)", "Daily (10M/15M)",
+               "Weekly/Swing (1H/75M/2H)", "Monthly (D)"]
+
+
+def cols(spec, gap="small", center=True):
+    """st.columns — पुराने संस्करण में vertical_alignment नहीं होता।"""
+    try:
+        return st.columns(spec, gap=gap, vertical_alignment="center" if center else None)
+    except TypeError:
+        return st.columns(spec, gap=gap)
+
+
+def put(col, fn, *a, **k):
+    """कॉलम के अंदर विजेट — width="stretch" न चले तो use_container_width।"""
+    try:
+        return getattr(col, fn)(*a, width="stretch", **k)
+    except TypeError:
+        return getattr(col, fn)(*a, use_container_width=True, **k)
+
+
+def is_dark() -> bool:
+    """ऐप का थीम डार्क है या लाइट (जहाँ पता न चले वहाँ लाइट)।"""
+    try:
+        t = st.context.theme.type
+        if t:
+            return str(t).lower() == "dark"
+    except Exception:                                          # noqa: BLE001
+        pass
+    try:
+        return str(st.get_option("theme.base")).lower() == "dark"
+    except Exception:                                          # noqa: BLE001
+        pass
+    return False
+
+
+def css():
+    dark = is_dark()
+    sheet = ("""
+      .gs-wrap{border:1px solid #2f3542;background:#0e1117;
+               box-shadow:0 1px 3px rgba(0,0,0,.35);}
+      table.gs{color:#e6e9ef;background:#0e1117;}
+      table.gs th,table.gs td{border-right:1px solid #262b36;border-bottom:1px solid #262b36;}
+      table.gs thead th{background:#161b25;color:#c3cad6;box-shadow:inset 0 -1px 0 #2f3542;}
+      table.gs th.gs-rn,table.gs td.gs-rn{background:#12161f;color:#6b7482;border-right:1px solid #2f3542;}
+      table.gs tbody tr:hover td{background:#141a24;}
+      table.gs tbody tr:hover td.gs-rn{background:#161b25;}
+      table.gs a{color:#58a6ff;}
+      table.gs a.fut{color:#79b8ff;font-weight:700;}
+      .gs-bar{color:#8b949e;} .gs-bar b{color:#c9d1d9;}
+      .gs-dot-s{color:#ff4d4f;} .gs-dot-d{color:#3fb950;}
+      .gs-fresh{color:#3fb950;} .gs-trig{color:#58a6ff;} .gs-imm{color:#d29922;}
+      .gs-cov{color:#a371f7;} .gs-exh{color:#8b949e;} .gs-no{color:#f85149;}
+      .gs-ok{color:#3fb950;} .gs-star{color:#e3b341;}
+      .gs-track{background:#21262d;}""") if dark else ("""
+      .gs-wrap{border:1px solid #dadce0;background:#fff;
+               box-shadow:0 1px 3px rgba(60,64,67,.10);}
+      table.gs{color:#202124;background:#fff;}
+      table.gs th,table.gs td{border-right:1px solid #e8eaed;border-bottom:1px solid #e8eaed;}
+      table.gs thead th{background:#f1f3f4;color:#3c4043;box-shadow:inset 0 -1px 0 #dadce0;}
+      table.gs th.gs-rn,table.gs td.gs-rn{background:#f8f9fa;color:#80868b;border-right:1px solid #dadce0;}
+      table.gs tbody tr:hover td{background:#f1f8ff;}
+      table.gs tbody tr:hover td.gs-rn{background:#f1f3f4;}
+      table.gs a{color:#1a73e8;}
+      table.gs a.fut{color:#0b57d0;font-weight:700;}
+      .gs-bar{color:#5f6368;} .gs-bar b{color:#202124;}
+      .gs-dot-s{color:#e53935;} .gs-dot-d{color:#2e7d32;}
+      .gs-fresh{color:#0b6b3a;} .gs-trig{color:#1a73e8;} .gs-imm{color:#b06000;}
+      .gs-cov{color:#7b61ff;} .gs-exh{color:#80868b;} .gs-no{color:#d93025;}
+      .gs-ok{color:#0b6b3a;} .gs-star{color:#f9ab00;}
+      .gs-track{background:#e8eaed;}""")
+
+    st.markdown("""
+    <style>
+      .block-container{padding-top:.7rem;padding-bottom:1.2rem;max-width:100%;}
+      h1,h2,h3{letter-spacing:.2px;}
+      div[data-testid="stMetricValue"]{font-size:1.25rem;}
+      div[data-testid="stHorizontalBlock"]{gap:.45rem;}
+      .hero{background:linear-gradient(100deg,#0b132b 0%,#1c2541 45%,#3a506b 100%);
+            padding:10px 18px;border-radius:12px;color:#fff;margin-bottom:8px;}
+      .hero h1{margin:0;font-size:1.12rem;color:#fff;font-weight:700;}
+      .hero span{color:#c9d6e8;font-size:.76rem;}
+
+      /* ───── Google Sheets जैसी टेबल ───── */
+      .gs-bar{display:flex;align-items:center;gap:8px;font-size:11.5px;margin:.15rem 0 .35rem;}
+      .gs-bar b{font-weight:700;}
+      .gs-wrap{border-radius:6px;overflow:hidden;}
+      .gs-scroll{max-height:min(70vh,720px);overflow:auto;}
+      table.gs{border-collapse:separate;border-spacing:0;width:100%;
+               font-family:Roboto,'Noto Sans Devanagari',Arial,sans-serif;
+               font-size:12.5px;}
+      table.gs th,table.gs td{padding:4px 9px;white-space:nowrap;vertical-align:middle;}
+      table.gs thead th{position:sticky;top:0;font-weight:600;text-align:left;z-index:2;
+               padding-top:7px;padding-bottom:7px;}
+      table.gs th.gs-rn,table.gs td.gs-rn{position:sticky;left:0;z-index:1;
+               text-align:center;font-size:10.5px;padding:4px 6px;min-width:32px;}
+      table.gs thead th.gs-rn{z-index:4;}
+      table.gs th.gs-rn{color:transparent;}
+      table.gs td.num{text-align:right;font-variant-numeric:tabular-nums;}
+      table.gs td.ctr{text-align:center;}
+      table.gs a{text-decoration:none;}
+      table.gs a:hover{text-decoration:underline;}
+      .gs-dot{font-size:13px;line-height:1;}
+      .gs-track{display:inline-block;width:56px;height:6px;border-radius:4px;overflow:hidden;
+                vertical-align:middle;margin-right:6px;}
+      .gs-fill{display:block;height:6px;border-radius:4px;}
+      .gs-sm{font-size:11px;opacity:.85;}
+    </style>""" + sheet, unsafe_allow_html=True)
+
+
+def reset_inputs():
+    for k in list(st.session_state.keys()):
+        if str(k).startswith("in_"):
+            del st.session_state[k]
+
+
+def preset_loose():
+    """Pine default से थोड़ा ढीला — सिर्फ़ खोज के लिए।"""
+    for k, v in {"in_losize": 3.0, "in_lisize": 1.5, "in_minscorep": 30,
+                 "in_baseatr": 1.2, "in_libody": 0.40, "in_liwick": 0.30}.items():
+        st.session_state[k] = v
+
+
+# ---------------------------------------------------------------------------
+# 1 · ऊपर की पंक्ति — सारे स्कैन नियंत्रण इनबिल्ट
+# ---------------------------------------------------------------------------
+def top_bar():
+    """स्क्रीनशॉट जैसी एक row: यूनिवर्स · TF · ट्रेडर · पक्ष · स्थिति · रेंज · स्क्रिप्ट · Scan"""
+    c = cols([1.35, 2.25, 1.15, .85, .85, .62, 1.35, .62])
+
+    uni = c[0].selectbox("यूनिवर्स", UNIVERSES, key="in_uni", label_visibility="collapsed")
+    tfs = c[1].multiselect("TF", list(ALL_TFS), default=list(ALL_TFS),
+                           format_func=lambda t: t, key="in_tfs",
+                           label_visibility="collapsed")
+    ttype = c[2].selectbox("ट्रेडर", TRADER_OPTS, key="in_ttype", label_visibility="collapsed")
+    side = c[3].selectbox("पक्ष", ["All", "Demand", "Supply"], key="in_side",
+                          label_visibility="collapsed")
+    status = c[4].selectbox("स्थिति", ["All"] + ALL_STATES, key="in_status",
+                            label_visibility="collapsed")
+    rng = c[5].number_input("रेंज", 0.5, 100.0, 10.0, 0.5, key="in_range",
+                            label_visibility="collapsed")
+    sym_txt = c[6].text_input("स्क्रिप्ट", key="in_symtxt", label_visibility="collapsed",
+                              placeholder="RELIANCE, SBIN…")
+    go = put(c[7], "button", "⚡ Scan", type="primary", key="btn_scan")
+
+    return dict(universe=uni, tfs=tuple(tfs), trader=ttype, side=side, status=status,
+                range_pct=float(rng), symbols_txt=sym_txt.strip(), go=go)
+
+
+# ---------------------------------------------------------------------------
+# 2 · Pine v6 के सारे इनपुट — एक expander में (sidebar हटा दिया)
+# ---------------------------------------------------------------------------
+def pine_panel() -> "PineInputs":
+    with st.expander("⚙️ Pine v6 इनपुट — सभी 30+ पैरामीटर (वही default)", expanded=False):
+        b1, b2, _ = st.columns([1, 1, 4])
+        put(b1, "button", "↺ Pine default", on_click=reset_inputs,
+            help="सारे input वापस Pine v6 के मूल default पर")
+        put(b2, "button", "🔓 ढीला", on_click=preset_loose,
+            help="कुछ ज़्यादा ज़ोन दिखेंगे (Pine default नहीं — प्रयोग के लिए)")
+
+        c1, c2, c3, c4 = st.columns(4)
+
+        with c1:
+            st.markdown("**0 · पूँजी, जोखिम, बफ़र**")
+            cap = st.number_input("खाता पूँजी ₹ (accountCapital)", 1000.0, 1e9, 25000.0, 1000.0, key="in_cap")
+            risk = st.number_input("जोखिम % (riskPct)", 0.05, 10.0, 0.5, 0.05, key="in_risk")
+            rr = st.number_input("टारगेट RR (targetRR)", 0.5, 20.0, 5.0, 0.5, key="in_rr")
+            bmode = st.selectbox("बफ़र विधि (bufferMode)", ["DATR % (course)", "Chart ATR ×"], key="in_bmode")
+            b_aggr = st.number_input("Aggressive बफ़र % (bufAggrPct)", 0.0, 100.0, 2.0, 0.5, key="in_baggr")
+            b_day = st.number_input("Daily बफ़र % (bufDailyPct)", 0.0, 100.0, 5.0, 0.5, key="in_bday")
+            b_swing = st.number_input("Swing बफ़र % (bufSwingPct)", 0.0, 100.0, 10.0, 0.5, key="in_bswing")
+            sl_buf = st.number_input("SL बफ़र ATR × (slBufferAtr)", 0.0, 5.0, 0.1, 0.05, key="in_slbuf")
+
+        with c2:
+            st.markdown("**1 · Leg-in / Boring / Leg-out**")
+            atr_p = st.number_input("ATR पीरियड (atrPeriod)", 2, 200, 14, 1, key="in_atr")
+            min_bc = st.number_input("न्यूनतम boring (minBaseCount)", 1, 4, 1, 1, key="in_minbc")
+            max_bc = st.number_input("अधिकतम boring (maxBaseCount)", 1, 4, 3, 1, key="in_maxbc")
+            base_atr = st.number_input("boring ≤ ATR × (maxBaseAtrMult)", 0.1, 5.0, 1.0, 0.1, key="in_baseatr")
+            li_atr = st.number_input("leg-in ≥ ATR × (legInMinAtrMult)", 0.0, 5.0, 1.0, 0.1, key="in_liatr")
+            li_body = st.number_input("leg-in body ≥ (legInMinBodyPct)", 0.0, 1.0, 0.50, 0.05, key="in_libody")
+            li_wick = st.number_input("leg-in wick ≤ (legInMaxClosingWickPct)", 0.0, 1.0, 0.20, 0.05, key="in_liwick")
+            li_size = st.number_input("leg-in ≥ base × (legInToBaseSizeMult)", 0.0, 10.0, 2.0, 0.1, key="in_lisize")
+
+        with c3:
+            st.markdown("**1 · (आगे) + 2 · सत्यापन**")
+            lo_size = st.number_input("leg-out ≥ base × (legOutToBaseSizeMult)", 0.0, 20.0, 4.0, 0.1, key="in_losize")
+            max_lo = st.number_input("leg-out candles (maxLegOut)", 1, 3, 3, 1, key="in_maxlo")
+            join_tol = st.number_input("join सहनशीलता ATR × (legOutJoinTolAtr)", 0.0, 2.0, 0.25, 0.05, key="in_jointol")
+            lo_tr = st.number_input("leg-out TR ≥ ATR × (legOutTrMult)", 0.0, 5.0, 1.2, 0.1, key="in_lotr")
+            max_wick = st.number_input("leg-out wick ≤ (maxWickPct)", 0.0, 1.0, 0.30, 0.05, key="in_maxwick")
+            c_cbli = st.checkbox("CBLI जाँच (useCBLI)", True, key="in_cbli")
+            cbli_p = st.number_input("CBLI सीमा (cbliMaxPct)", 0.0, 1.0, 0.50, 0.05, key="in_cblip")
+            c_form = st.checkbox("Formation DBR/RBD (useFormation)", True, key="in_form")
+            form_tol = st.number_input("Formation सहनशीलता ATR × (formationTolAtr)", 0.0, 2.0, 0.10, 0.05, key="in_formtol")
+
+        with c4:
+            st.markdown("**2 · (आगे) + 3 · Score + MTF**")
+            c_white = st.checkbox("White area (useWhiteArea)", True, key="in_white")
+            c_cov = st.checkbox("Covered leg-out (useCoveredLegOut)", True, key="in_cov")
+            c_mat = st.checkbox("Maturity (useMaturity)", True, key="in_mat")
+            max_touch = st.number_input("अधिकतम touches (maxTouches)", 1, 20, 3, 1, key="in_maxtouch")
+            distal = st.selectbox("Distal विधि (distalMode)",
+                                  ["Pattern lowest/highest (course)", "Boring only"], key="in_distal")
+            c_vol = st.checkbox("Volume अनिवार्य (requireVolume)", False, key="in_vol")
+            vol_sma = st.number_input("Volume SMA (volSmaPeriod)", 2, 200, 20, 1, key="in_volsma")
+            hq_lo = st.number_input("HQ leg-out TR × (hqLegOutTrMult)", 0.0, 10.0, 2.0, 0.1, key="in_hqlo")
+
+        c5, c6, c7, c8 = st.columns(4)
+        with c5:
+            hq_li = st.number_input("HQ leg-in ATR × (hqLegInAtrMult)", 0.0, 10.0, 1.5, 0.1, key="in_hqli")
+            heavy = st.number_input("भारी body (legOutBodyHeavyPct)", 0.0, 1.0, 0.60, 0.05, key="in_heavy")
+            gap_b = st.number_input("Genuine gap बोनस", 0, 50, 10, 1, key="in_gapb")
+            on_b = st.number_input("Overnight gap बोनस", 0, 50, 15, 1, key="in_onb")
+        with c6:
+            min_score_p = st.number_input("न्यूनतम मान्य स्कोर (minValidScore)", 0, 200, 40, 1, key="in_minscorep")
+            hq_thr = st.number_input("HQ सीमा (hqScoreThreshold)", 0, 300, 90, 1, key="in_hqthr")
+            min_score_ui = st.slider("टेबल में सिर्फ़ इतने स्कोर से ऊपर", 0, 150, 40, 5, key="in_minscore")
+            only_hq = st.checkbox("सिर्फ़ HQ ज़ोन (★)", value=False, key="in_onlyhq")
+        with c7:
+            s_mcap = st.checkbox("मार्केट कैप दिखाएँ (showMcap)", True, key="in_mcap")
+            min_mcap = st.number_input("न्यूनतम मार्केट कैप ₹Cr (minMcapCr)", 0.0, 1e6, 50000.0, 1000.0, key="in_minmcap")
+            s_info = st.checkbox("Info लेबल (showInfo)", True, key="in_info")
+            only_mtf = st.checkbox("सिर्फ़ MTF-confirmed", value=False, key="in_onlymtf")
+        with c8:
+            s_mtf = st.checkbox("MTF गणना (showMTF)", True, key="in_showmtf")
+            peers = st.multiselect("MTF समय-सीमाएँ (tf1…tf9)", list(ALL_TFS),
+                                   default=["3m", "5m", "10m", "15m", "30m", "1h", "75m", "2h", "1d"],
+                                   key="in_peers")
+            scan_bars = st.number_input("कितने बार पीछे (scanBars)", 200, 5000, 900, 100, key="in_scanbars")
+            max_syms = st.number_input("अधिकतम स्क्रिप्ट (0 = सभी)", 0, 2000, 100, 10, key="in_maxsyms")
+
+        st.markdown("**4 · प्रदर्शन / Shadow / Swing**")
+        if True:
+            d1, d2, d3 = st.columns(3)
+            shadow_atr = d1.number_input("Shadow दूरी ATR × (shadowAtr)", 0.0, 1.0, 0.08, 0.01, key="in_shadowatr")
+            s_shadow = d2.checkbox("Shadow ज़ोन (showShadow)", True, key="in_shadow")
+            s_flags = d3.checkbox("BASE BREAK / SWING फ़्लैग (showFlags)", True, key="in_flags")
+            sw_l = d1.number_input("Swing बाएँ (swingLeft)", 1, 20, 3, 1, key="in_swl")
+            sw_r = d2.number_input("Swing दाएँ (swingRight)", 1, 20, 3, 1, key="in_swr")
+            max_store = d3.number_input("ज़ोन भंडार (maxStored)", 10, 400, 220, 10, key="in_maxstore")
+
+    inp = PineInputs(
+        accountCapital=float(cap), riskPct=float(risk), targetRR=float(rr),
+        traderType=str(st.session_state.get("in_ttype", "Auto")),
+        bufferMode=bmode,
+        bufAggrPct=float(b_aggr), bufDailyPct=float(b_day), bufSwingPct=float(b_swing),
+        slBufferAtr=float(sl_buf),
+        atrPeriod=int(atr_p), minBaseCount=int(min_bc), maxBaseCount=int(max_bc),
+        maxBaseAtrMult=float(base_atr), legInMinAtrMult=float(li_atr),
+        legInMinBodyPct=float(li_body), legInMaxClosingWickPct=float(li_wick),
+        legInToBaseSizeMult=float(li_size), legOutToBaseSizeMult=float(lo_size),
+        maxLegOut=int(max_lo), legOutJoinTolAtr=float(join_tol), legOutTrMult=float(lo_tr),
+        maxWickPct=float(max_wick),
+        useCBLI=bool(c_cbli), cbliMaxPct=float(cbli_p), useFormation=bool(c_form),
+        formationTolAtr=float(form_tol), useWhiteArea=bool(c_white),
+        useCoveredLegOut=bool(c_cov), useMaturity=bool(c_mat), maxTouches=int(max_touch),
+        distalMode=distal, requireVolume=bool(c_vol), useImbalance=False,
+        volSmaPeriod=int(vol_sma), hqLegOutTrMult=float(hq_lo), hqLegInAtrMult=float(hq_li),
+        legOutBodyHeavyPct=float(heavy), genuineGapBonus=int(gap_b),
+        overnightGapBonus=int(on_b), minValidScore=int(min_score_p),
+        hqScoreThreshold=int(hq_thr),
+        showInfo=bool(s_info), showMcap=bool(s_mcap), minMcapCr=float(min_mcap),
+        showMTF=bool(s_mtf), filterDistantMTF=True, mtfNearPct=8.0,
+        showShadow=bool(s_shadow), showFlags=bool(s_flags), shadowAtr=float(shadow_atr),
+        swingLeft=int(sw_l), swingRight=int(sw_r), maxStored=int(max_store),
+        scanRangePct=float(st.session_state.get("in_range", 10.0)),
+        scanBars=int(scan_bars),
+    ).sanitized()
+
+    ui_opts = dict(min_score=int(min_score_ui), only_mtf=bool(only_mtf),
+                   only_hq=bool(only_hq), peers=tuple(peers),
+                   min_mcap=float(min_mcap), show_mcap=bool(s_mcap),
+                   max_syms=int(max_syms))
+    return inp, ui_opts
 
 
 def stretch(fn, *a, **k):
@@ -1292,267 +1576,34 @@ def fmt_t(ms: int) -> str:
     return datetime.fromtimestamp(ms / 1000, IST).strftime("%d-%b %H:%M")
 
 
-def css():
-    st.markdown("""
-    <style>
-      .block-container{padding-top:1.2rem;padding-bottom:2rem;}
-      h1,h2,h3{letter-spacing:.2px;}
-      .hero{background:linear-gradient(100deg,#0b132b 0%,#1c2541 45%,#3a506b 100%);
-            padding:18px 24px;border-radius:14px;color:#fff;margin-bottom:14px;
-            box-shadow:0 6px 22px rgba(11,19,43,.25);}
-      .hero h1{margin:0;font-size:1.55rem;color:#fff;}
-      .hero p{margin:.35rem 0 0;color:#c9d6e8;font-size:.85rem;}
-      .pill{display:inline-block;padding:2px 10px;border-radius:999px;font-size:.72rem;
-            font-weight:600;letter-spacing:.3px;}
-      .p-d{background:#d7f5e3;color:#0b6b3a;}
-      .p-s{background:#ffe0e0;color:#9b1c1c;}
-      .p-n{background:#e9edf5;color:#33415c;}
-      div[data-testid="stMetricValue"]{font-size:1.35rem;}
-      section[data-testid="stSidebar"] div[data-testid="stVerticalBlock"]{gap:.35rem;}
-
-      /* ───── Google Sheets जैसी शीट ───── */
-      .gs-bar{display:flex;align-items:center;gap:10px;font-size:12px;color:#5f6368;
-              margin:.2rem 0 .45rem;}
-      .gs-bar b{color:#202124;}
-      .gs-wrap{border:1px solid #dadce0;border-radius:6px;background:#fff;
-               box-shadow:0 1px 3px rgba(60,64,67,.10);overflow:hidden;}
-      .gs-scroll{max-height:620px;overflow:auto;}
-      table.gs{border-collapse:separate;border-spacing:0;width:100%;
-               font-family:Roboto,'Noto Sans Devanagari',Arial,sans-serif;
-               font-size:12.5px;color:#202124;}
-      table.gs th,table.gs td{border-right:1px solid #e8eaed;border-bottom:1px solid #e8eaed;
-               padding:5px 9px;white-space:nowrap;vertical-align:middle;}
-      table.gs thead th{position:sticky;background:#f1f3f4;font-weight:700;color:#3c4043;
-               text-align:left;z-index:2;}
-      table.gs thead tr.gs-letters th{top:0;background:#e8eaed;color:#5f6368;font-size:10px;
-               text-align:center;padding:1px 6px;z-index:3;font-weight:600;}
-      table.gs thead tr.gs-head th{top:19px;box-shadow:inset 0 -1px 0 #dadce0;}
-      table.gs th.gs-rn,table.gs td.gs-rn{position:sticky;left:0;z-index:1;background:#f8f9fa;
-               color:#80868b;text-align:center;font-size:10px;padding:5px 6px;
-               min-width:34px;border-right:1px solid #dadce0;}
-      table.gs thead th.gs-rn{z-index:4;}
-      table.gs tbody tr:hover td{background:#f1f8ff;}
-      table.gs tbody tr:hover td.gs-rn{background:#f1f3f4;}
-      table.gs td.num{text-align:right;font-variant-numeric:tabular-nums;}
-      table.gs td.ctr{text-align:center;}
-      table.gs a{color:#1a73e8;text-decoration:none;font-weight:600;}
-      table.gs a:hover{text-decoration:underline;}
-      .gs-pill{display:inline-block;padding:1px 8px;border-radius:11px;font-size:10.5px;
-               font-weight:700;}
-      .gs-d{background:#ceead6;color:#0b6b3a;}
-      .gs-s{background:#fce8e6;color:#a50e0e;}
-      .gs-fresh{color:#0b6b3a;font-weight:600;}
-      .gs-trig{color:#1a73e8;font-weight:600;}
-      .gs-imm{color:#b06000;font-weight:600;}
-      .gs-cov{color:#7b61ff;font-weight:600;}
-      .gs-exh{color:#80868b;font-weight:600;}
-      .gs-ok{color:#0b6b3a;font-weight:700;}
-      .gs-no{color:#d93025;font-weight:700;}
-    </style>""", unsafe_allow_html=True)
+def tv_url(symbol: str, tf: str) -> str:
+    """https://www.tradingview.com/chart/?symbol=NSE:SBIN&interval=15"""
+    from urllib.parse import quote
+    return (f"https://www.tradingview.com/chart/?symbol={quote('NSE:' + str(symbol))}"
+            f"&interval={TV_TF.get(str(tf), '15')}")
 
 
-# ---------------------------------------------------------------------------
-# 1 · SIDEBAR  — Pine के सारे input, वही default, वही नाम
-# ---------------------------------------------------------------------------
-TFS_ALL = list(ALL_TFS)
+def _col_letter(i: int) -> str:
+    """0 → A, 25 → Z, 26 → AA"""
+    out, i = "", i + 1
+    while i:
+        i, r = divmod(i - 1, 26)
+        out = chr(65 + r) + out
+    return out
 
 
-def reset_inputs():
-    for k in list(st.session_state.keys()):
-        if str(k).startswith("in_"):
-            del st.session_state[k]
+def _lerp(c1, c2, t):
+    return tuple(int(round(a + (b - a) * t)) for a, b in zip(c1, c2))
 
 
-def preset_loose():
-    """Pine default से थोड़ा ढीला — सिर्फ़ खोज के लिए।"""
-    for k, v in {"in_losize": 3.0, "in_lisize": 1.5, "in_minscorep": 30,
-                 "in_baseatr": 1.2, "in_libody": 0.40, "in_liwick": 0.30}.items():
-        st.session_state[k] = v
+def _score_bg(sc: float) -> str:
+    """Google Sheets जैसा conditional रंग: लाल → पीला → हरा"""
+    low, mid, high = (252, 232, 230), (254, 247, 224), (206, 234, 214)
+    t = max(0.0, min(1.0, (float(sc) - 30.0) / 90.0))
+    c = _lerp(low, mid, t / 0.5) if t <= 0.5 else _lerp(mid, high, (t - 0.5) / 0.5)
+    return f"rgb({c[0]},{c[1]},{c[2]})"
 
 
-def sidebar():
-    sb = st.sidebar
-    sb.markdown("## 📐 ज़ोन MTF स्कैनर")
-    sb.caption("Pine v6 · Zone MTF (KTP rules) — ₹ मूल्य, सभी 13 TF")
-    c_r1, c_r2 = sb.columns(2)
-    c_r1.button("↺ Pine default", on_click=reset_inputs, width="stretch",
-                help="सारे input वापस Pine v6 के मूल default पर")
-    c_r2.button("🔓 ढीला", on_click=preset_loose, width="stretch",
-                help="कुछ ज़्यादा ज़ोन दिखेंगे (Pine default नहीं — प्रयोग के लिए)")
-
-    # ---------------- स्कैन सेटिंग (ऐप स्तर) ----------------
-    with sb.expander("🔭 स्कैन सेटिंग", expanded=True):
-        uni = st.selectbox(
-            "यूनिवर्स", ["NIFTY 50", "F&O (NSE लाइव)", "NIFTY 50 + F&O", "अपनी सूची"],
-            key="in_uni")
-        custom = ""
-        if uni == "अपनी सूची":
-            custom = st.text_area("स्क्रिप्ट (कॉमा / स्पेस से अलग)", "RELIANCE, TCS, INFY",
-                                  key="in_custom", height=80)
-        scan_range = st.number_input(
-            "स्कैन रेंज — LTP से ±%", 0.5, 100.0, 10.0, 0.5, key="in_range",
-            help="Pine में नहीं है; सिर्फ़ उतने ही ज़ोन दिखेंगे जो LTP से इस % के अंदर हों।")
-        scan_bars = st.number_input(
-            "कितने बार पीछे देखें (scanBars)", 200, 5000, 900, 100, key="in_scanbars",
-            help="तेज़ी के लिए; 1-2-4 ढाँचा इतने बार के अंदर ही खोजा जाएगा।")
-        tfs = st.multiselect("स्कैन के time frame", TFS_ALL, default=TFS_ALL,
-                             format_func=lambda t: f"{t} · {TF_LABEL_HI[t]}",
-                             key="in_tfs",
-                             help="डिफ़ॉल्ट = सभी 13 time frame।")
-        min_score = st.slider("सिर्फ़ इतने स्कोर से ऊपर", 0, 150, 40, 5, key="in_minscore")
-        states = st.multiselect("ज़ोन की स्थिति दिखाएँ", ALL_STATES,
-                                default=["Fresh", "Triggered", "Immature", "Covered"],
-                                format_func=lambda s: STATE_HI[s], key="in_states")
-        max_syms = st.number_input("अधिकतम स्क्रिप्ट (0 = सभी)", 0, 2000, 50, 10,
-                                   key="in_maxsyms",
-                                   help="F&O में ~200 स्क्रिप्ट हैं; पहली बार डेटा लाने में समय लगता है।")
-        only_mtf = st.checkbox("सिर्फ़ MTF-confirmed ज़ोन", value=False, key="in_onlymtf")
-        only_hq = st.checkbox("सिर्फ़ HQ ज़ोन (score ≥ HQ threshold)", value=False, key="in_onlyhq")
-
-    # ---------------- G0 ----------------
-    with sb.expander("0 · पूँजी, जोखिम, बफ़र"):
-        cap = st.number_input("खाता पूँजी ₹ (accountCapital)", 1000.0, 1e9, 25000.0, 1000.0,
-                              key="in_cap")
-        risk = st.number_input("जोखिम % (riskPct)", 0.05, 10.0, 0.5, 0.05, key="in_risk")
-        rr = st.number_input("टारगेट RR (targetRR)", 0.5, 20.0, 5.0, 0.5, key="in_rr")
-        ttype = st.selectbox(
-            "ट्रेडर प्रकार (traderType)",
-            ["Auto", "Aggressive (1M)", "Hourly (3M/5M)", "Daily (10M/15M)",
-             "Weekly/Swing (1H/75M/2H)", "Monthly (D)"], key="in_ttype")
-        bmode = st.selectbox("बफ़र विधि (bufferMode)",
-                             ["DATR % (course)", "Chart ATR ×"], key="in_bmode")
-        b_aggr = st.number_input("Aggressive बफ़र % (bufAggrPct)", 0.0, 100.0, 2.0, 0.5,
-                                 key="in_baggr")
-        b_day = st.number_input("Daily बफ़र % (bufDailyPct)", 0.0, 100.0, 5.0, 0.5,
-                                key="in_bday")
-        b_swing = st.number_input("Swing बफ़र % (bufSwingPct)", 0.0, 100.0, 10.0, 0.5,
-                                  key="in_bswing")
-        sl_buf = st.number_input("SL बफ़र ATR × (slBufferAtr)", 0.0, 5.0, 0.1, 0.05,
-                                 key="in_slbuf")
-
-    # ---------------- G1 ----------------
-    with sb.expander("1 · Leg-in / Boring / Leg-out (1-2-4)"):
-        atr_p = st.number_input("ATR पीरियड (atrPeriod)", 2, 200, 14, 1, key="in_atr")
-        min_bc = st.number_input("न्यूनतम boring (minBaseCount)", 1, 4, 1, 1, key="in_minbc")
-        max_bc = st.number_input("अधिकतम boring (maxBaseCount)", 1, 4, 3, 1, key="in_maxbc",
-                                 help="4 से ज़्यादा = trap")
-        base_atr = st.number_input("boring ≤ ATR × (maxBaseAtrMult)", 0.1, 5.0, 1.0, 0.1,
-                                   key="in_baseatr")
-        li_atr = st.number_input("leg-in ≥ ATR × (legInMinAtrMult)", 0.0, 5.0, 1.0, 0.1,
-                                 key="in_liatr")
-        li_body = st.number_input("leg-in body ≥ % (legInMinBodyPct)", 0.0, 1.0, 0.50, 0.05,
-                                  key="in_libody")
-        li_wick = st.number_input("leg-in closing wick ≤ % (legInMaxClosingWickPct)",
-                                  0.0, 1.0, 0.20, 0.05, key="in_liwick")
-        li_size = st.number_input("leg-in ≥ base × (legInToBaseSizeMult)", 0.0, 10.0, 2.0, 0.1,
-                                  key="in_lisize")
-        lo_size = st.number_input("leg-out ≥ base × (legOutToBaseSizeMult)", 0.0, 20.0, 4.0, 0.1,
-                                  key="in_losize")
-        max_lo = st.number_input("leg-out के अधिकतम candles (maxLegOut)", 1, 3, 3, 1,
-                                 key="in_maxlo")
-        join_tol = st.number_input("leg-out join सहनशीलता ATR × (legOutJoinTolAtr)",
-                                   0.0, 2.0, 0.25, 0.05, key="in_jointol")
-        lo_tr = st.number_input("leg-out TR ≥ ATR × (legOutTrMult)", 0.0, 5.0, 1.2, 0.1,
-                                key="in_lotr")
-        max_wick = st.number_input("leg-out wick ≤ % (maxWickPct)", 0.0, 1.0, 0.30, 0.05,
-                                   key="in_maxwick")
-
-    # ---------------- G2 ----------------
-    with sb.expander("2 · सत्यापन नियम"):
-        c_cbli = st.checkbox("CBLI जाँच (useCBLI)", True, key="in_cbli")
-        cbli_p = st.number_input("CBLI सीमा % (cbliMaxPct)", 0.0, 1.0, 0.50, 0.05,
-                                 key="in_cblip")
-        c_form = st.checkbox("Formation (DBR/RBD) जाँच (useFormation)", True, key="in_form")
-        form_tol = st.number_input("Formation सहनशीलता ATR × (formationTolAtr)",
-                                   0.0, 2.0, 0.10, 0.05, key="in_formtol")
-        c_white = st.checkbox("White area (useWhiteArea)", True, key="in_white")
-        c_cov = st.checkbox("Covered leg-out (useCoveredLegOut)", True, key="in_cov")
-        c_mat = st.checkbox("Maturity (useMaturity)", True, key="in_mat")
-        max_touch = st.number_input("अधिकतम touches (maxTouches)", 1, 20, 3, 1,
-                                    key="in_maxtouch")
-        distal = st.selectbox("Distal विधि (distalMode)",
-                              ["Pattern lowest/highest (course)", "Boring only"],
-                              key="in_distal")
-        c_vol = st.checkbox("Volume अनिवार्य (requireVolume)", False, key="in_vol")
-        c_imb = st.checkbox("Imbalance जाँच (useImbalance)", False, key="in_imb")
-
-    # ---------------- G3 ----------------
-    with sb.expander("3 · Quality score"):
-        vol_sma = st.number_input("Volume SMA (volSmaPeriod)", 2, 200, 20, 1, key="in_volsma")
-        hq_lo = st.number_input("HQ leg-out TR ≥ leg-in × (hqLegOutTrMult)", 0.0, 10.0, 2.0,
-                                0.1, key="in_hqlo")
-        hq_li = st.number_input("HQ leg-in ≥ ATR × (hqLegInAtrMult)", 0.0, 10.0, 1.5, 0.1,
-                                key="in_hqli")
-        heavy = st.number_input("भारी body % (legOutBodyHeavyPct)", 0.0, 1.0, 0.60, 0.05,
-                                key="in_heavy")
-        gap_b = st.number_input("Genuine gap बोनस (genuineGapBonus)", 0, 50, 10, 1,
-                                key="in_gapb")
-        on_b = st.number_input("Overnight gap बोनस (overnightGapBonus)", 0, 50, 15, 1,
-                               key="in_onb")
-        min_score_p = st.number_input("न्यूनतम मान्य स्कोर (minValidScore)", 0, 200, 40, 1,
-                                      key="in_minscorep")
-        hq_thr = st.number_input("HQ सीमा (hqScoreThreshold)", 0, 300, 90, 1, key="in_hqthr")
-
-    # ---------------- G4 + GM + GS ----------------
-    with sb.expander("4 · प्रदर्शन / MTF / Shadow"):
-        s_info = st.checkbox("Info लेबल (showInfo)", True, key="in_info")
-        s_mcap = st.checkbox("मार्केट कैप (showMcap)", True, key="in_mcap")
-        min_mcap = st.number_input("न्यूनतम मार्केट कैप ₹Cr (minMcapCr)", 0.0, 1e6, 50000.0,
-                                   1000.0, key="in_minmcap")
-        s_mtf = st.checkbox("MTF पंक्तियाँ (showMTF)", True, key="in_showmtf")
-        f_dmtf = st.checkbox("दूर के MTF ज़ोन छाँटें (filterDistantMTF)", True, key="in_fdmtf")
-        mtf_near = st.number_input("MTF निकटता % (mtfNearPct)", 0.5, 50.0, 8.0, 0.5,
-                                   key="in_mtfnear")
-        peers = st.multiselect(
-            "MTF समय-सीमाएँ (Pine tf1…tf9)", TFS_ALL,
-            default=["3m", "5m", "10m", "15m", "30m", "1h", "75m", "2h", "1d"],
-            format_func=lambda t: f"{t} · {TF_LABEL_HI[t]}", key="in_peers")
-        s_shadow = st.checkbox("Shadow ज़ोन (showShadow)", True, key="in_shadow")
-        s_flags = st.checkbox("BASE BREAK / SWING फ़्लैग (showFlags)", True, key="in_flags")
-        shadow_atr = st.number_input("Shadow दूरी ATR × (shadowAtr)", 0.0, 1.0, 0.08, 0.01,
-                                     key="in_shadowatr")
-        sw_l = st.number_input("Swing बाएँ (swingLeft)", 1, 20, 3, 1, key="in_swl")
-        sw_r = st.number_input("Swing दाएँ (swingRight)", 1, 20, 3, 1, key="in_swr")
-        max_store = st.number_input("ज़ोन भंडार (maxStored)", 10, 400, 220, 10,
-                                    key="in_maxstore")
-
-    inp = PineInputs(
-        accountCapital=float(cap), riskPct=float(risk), targetRR=float(rr),
-        traderType=ttype, bufferMode=bmode,
-        bufAggrPct=float(b_aggr), bufDailyPct=float(b_day), bufSwingPct=float(b_swing),
-        slBufferAtr=float(sl_buf),
-        atrPeriod=int(atr_p), minBaseCount=int(min_bc), maxBaseCount=int(max_bc),
-        maxBaseAtrMult=float(base_atr), legInMinAtrMult=float(li_atr),
-        legInMinBodyPct=float(li_body), legInMaxClosingWickPct=float(li_wick),
-        legInToBaseSizeMult=float(li_size), legOutToBaseSizeMult=float(lo_size),
-        maxLegOut=int(max_lo), legOutJoinTolAtr=float(join_tol), legOutTrMult=float(lo_tr),
-        maxWickPct=float(max_wick),
-        useCBLI=bool(c_cbli), cbliMaxPct=float(cbli_p), useFormation=bool(c_form),
-        formationTolAtr=float(form_tol), useWhiteArea=bool(c_white),
-        useCoveredLegOut=bool(c_cov), useMaturity=bool(c_mat), maxTouches=int(max_touch),
-        distalMode=distal, requireVolume=bool(c_vol), useImbalance=bool(c_imb),
-        volSmaPeriod=int(vol_sma), hqLegOutTrMult=float(hq_lo), hqLegInAtrMult=float(hq_li),
-        legOutBodyHeavyPct=float(heavy), genuineGapBonus=int(gap_b),
-        overnightGapBonus=int(on_b), minValidScore=int(min_score_p),
-        hqScoreThreshold=int(hq_thr),
-        showInfo=bool(s_info), showMcap=bool(s_mcap), minMcapCr=float(min_mcap),
-        showMTF=bool(s_mtf), filterDistantMTF=bool(f_dmtf), mtfNearPct=float(mtf_near),
-        showShadow=bool(s_shadow), showFlags=bool(s_flags), shadowAtr=float(shadow_atr),
-        swingLeft=int(sw_l), swingRight=int(sw_r), maxStored=int(max_store),
-        scanRangePct=float(scan_range), scanBars=int(scan_bars),
-    ).sanitized()
-
-    opts = dict(universe=uni, custom=custom, range_pct=float(scan_range), tfs=tuple(tfs),
-                max_syms=int(max_syms),
-                min_score=int(min_score), states=list(states), only_mtf=bool(only_mtf),
-                only_hq=bool(only_hq), peers=tuple(peers), min_mcap=float(min_mcap),
-                show_mcap=bool(s_mcap))
-    return inp, opts
-
-
-# ---------------------------------------------------------------------------
-# 2 · SCAN
-# ---------------------------------------------------------------------------
 def resolve_universe(uni: str, custom: str):
     if uni == "NIFTY 50":
         return list(dict.fromkeys(NIFTY50))
@@ -1572,7 +1623,7 @@ def resolve_universe(uni: str, custom: str):
 
 
 def run_scan(symbols, inp, opts, ph, pbar):
-    tfs = list(opts["tfs"]) or TFS_ALL
+    tfs = list(opts["tfs"]) or list(ALL_TFS)
     frames = load_frames(symbols, tfs)          # disk cache की वजह से तेज़
     rows, snaps, atrs, ltps, errs = [], {}, {}, {}, {}
     jobs = [(s, frames[s]) for s in symbols if s in frames]
@@ -1623,122 +1674,6 @@ def run_scan(symbols, inp, opts, ph, pbar):
         df = df.sort_values(["dist_pct", "score"], ascending=[True, False]).reset_index(drop=True)
     return dict(rows=df, snaps=snaps, atr=atrs, ltp=ltps, errs=errs,
                 at=datetime.now(IST), scanned=len(jobs))
-
-
-# ---------------------------------------------------------------------------
-# 3 · TABLE / CHART
-# ---------------------------------------------------------------------------
-# ---- TradingView लिंक (ज़ोन के टाइम फ्रेम पर ही खुले) ----
-TV_TF = {"3m": "3", "5m": "5", "10m": "10", "15m": "15", "30m": "30", "75m": "75",
-         "1h": "60", "2h": "120", "4h": "240", "6h": "360", "1d": "D", "1w": "W",
-         "1M": "M"}
-
-
-def tv_url(symbol: str, tf: str) -> str:
-    """https://www.tradingview.com/chart/?symbol=NSE:SBIN&interval=15"""
-    from urllib.parse import quote
-    return (f"https://www.tradingview.com/chart/?symbol={quote('NSE:' + str(symbol))}"
-            f"&interval={TV_TF.get(str(tf), '15')}")
-
-
-def _col_letter(i: int) -> str:
-    """0 → A, 25 → Z, 26 → AA"""
-    out, i = "", i + 1
-    while i:
-        i, r = divmod(i - 1, 26)
-        out = chr(65 + r) + out
-    return out
-
-
-def _lerp(c1, c2, t):
-    return tuple(int(round(a + (b - a) * t)) for a, b in zip(c1, c2))
-
-
-def _score_bg(sc: float) -> str:
-    """Google Sheets जैसा conditional रंग: लाल → पीला → हरा"""
-    low, mid, high = (252, 232, 230), (254, 247, 224), (206, 234, 214)
-    t = max(0.0, min(1.0, (float(sc) - 30.0) / 90.0))
-    c = _lerp(low, mid, t / 0.5) if t <= 0.5 else _lerp(mid, high, (t - 0.5) / 0.5)
-    return f"rgb({c[0]},{c[1]},{c[2]})"
-
-
-_STATE_CLS = {"Fresh": "gs-fresh", "Triggered": "gs-trig", "Immature": "gs-imm",
-              "Covered": "gs-cov", "Exhausted": "gs-exh", "Broken": "gs-no"}
-
-
-def sheet_html(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0,
-               max_rows: int = 400) -> str:
-    """Google Sheets जैसी टेबल — column letters, row numbers, sticky header,
-    रंग-कोडेड स्कोर, और symbol/TF पर TradingView लिंक (उसी TF का interval)।"""
-    if df is None or df.empty:
-        return ""
-    d = df.head(max_rows)
-    cols = [("स्क्रिप्ट", "s"), ("TF", "s"), ("पक्ष", "s"), ("पैटर्न", "ctr"),
-            ("बेस", "s"), ("एंट्री", "num"), ("डिस्टल", "num"), ("SL", "num"),
-            ("T1", "num"), ("दूरी %", "num"), ("स्कोर", "ctr"), ("HQ", "ctr"),
-            ("MTF", "ctr"), ("स्थिति", "s"), ("XRPT", "num"), ("मात्रा", "num")]
-    if show_mcap:
-        cols.append(("मार्केट कैप ₹Cr", "num"))
-    cols += [("बना (IST)", "ctr"), ("चार्ट", "ctr")]
-
-    letters = "".join(f"<th>{_col_letter(i)}</th>" for i in range(len(cols) + 1))
-    head = "".join(f'<th class="{a}">{t}</th>' for t, a in cols)
-
-    body = []
-    for n, (_, r) in enumerate(d.iterrows(), start=2):
-        u = tv_url(r["symbol"], r["tf"])
-        sym = (f'<a href="{u}" target="_blank" rel="noopener" '
-               f'title="TradingView पर {r["symbol"]} · {r["tf"]}">{r["symbol"]}</a>')
-        tf_c = (f'<a href="{u}" target="_blank" rel="noopener" '
-                f'title="TradingView · {r["tf"]}">{r["tf"]}</a>')
-        side = (f'<span class="gs-pill {"gs-d" if r["demand"] else "gs-s"}">'
-                f'{"मांग" if r["demand"] else "आपूर्ति"}</span>')
-        stt = (f'<span class="{_STATE_CLS.get(str(r["state"]), "")}">'
-               f'{r["state_hi"]}</span>')
-        sc_bg = _score_bg(r["score"])
-        cap = ""
-        if show_mcap:
-            mv = r.get("mcap_cr", float("nan"))
-            if mv is None or (isinstance(mv, float) and pd.isna(mv)):
-                cap = '<td class="num">—</td>'
-            else:
-                ok = float(mv) >= float(min_mcap)
-                cap = (f'<td class="num">{float(mv):,.0f} '
-                       f'<span class="{"gs-ok" if ok else "gs-no"}">'
-                       f'{"✓" if ok else "✗"}</span></td>')
-        hq_cell = '<span style="color:#f9ab00;font-size:14px">★</span>' if r["hq"] else ""
-        mtf_cell = ('<span class="gs-ok">✓</span>' if r["mtf"]
-                    else '<span class="gs-exh">–</span>')
-        t1c = f'<td class="ctr"><a href="{u}" target="_blank" rel="noopener">📈</a></td>'
-        body.append(
-            f'<tr><td class="gs-rn">{n}</td>'
-            f'<td>{sym}</td><td>{tf_c}</td><td>{side}</td>'
-            f'<td class="ctr">{r["pattern"]}</td>'
-            f'<td>{int(r["base_count"])} · {_GRADE_HI.get(int(r["base_count"]), "")}</td>'
-            f'<td class="num">{r["prox"]:,.2f}</td>'
-            f'<td class="num">{r["dist"]:,.2f}</td>'
-            f'<td class="num">{r["sl"]:,.2f}</td>'
-            f'<td class="num">{r["tp"]:,.2f}</td>'
-            f'<td class="num">{r["dist_pct"]:.2f}%</td>'
-            f'<td class="ctr" style="background:{sc_bg};font-weight:700">{int(r["score"])}</td>'
-            f'<td class="ctr">{hq_cell}</td>'
-            f'<td class="ctr">{mtf_cell}</td>'
-            f'<td>{stt}</td>'
-            f'<td class="num">1:{r["xrpt_rr"]:.2f}</td>'
-            f'<td class="num">{int(r["qty"])}</td>'
-            f'{cap}'
-            f'<td class="ctr">{r["created_ist"]}</td>'
-            f'{t1c}</tr>')
-
-    more = ""
-    if len(df) > len(d):
-        more = (f'<div class="gs-bar">… और {len(df) - len(d)} पंक्तियाँ छिपी हैं '
-                f'(CSV डाउनलोड करें)</div>')
-    return (
-        '<div class="gs-wrap"><div class="gs-scroll"><table class="gs">'
-        f'<thead><tr class="gs-letters"><th class="gs-rn"></th>{letters}</tr>'
-        f'<tr class="gs-head"><th class="gs-rn">1</th>{head}</tr></thead>'
-        f'<tbody>{"".join(body)}</tbody></table></div></div>{more}')
 
 
 def zone_table(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0):
@@ -1911,17 +1846,6 @@ def mtf_panel(snap: dict, tfs, peers):
     return pd.DataFrame(rows)
 
 
-# ---------------------------------------------------------------------------
-# 4 · MAIN
-# ---------------------------------------------------------------------------
-REQ_TXT = """streamlit
-yfinance
-pandas
-numpy
-plotly      # वैकल्पिक — न हो तो Altair चार्ट चलेंगे
-requests"""
-
-
 def deps_guard() -> bool:
     """ज़रूरी पैकेज हैं या नहीं — Streamlit Cloud पर साफ़ संदेश दिखाने के लिए।"""
     missing = []
@@ -1938,183 +1862,286 @@ def deps_guard() -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# 3 · MTF गिनती + Google-Sheets शीट (स्क्रीनशॉट वाला फ़ॉर्मैट)
+# ---------------------------------------------------------------------------
+def mtf_count(demand: bool, prox: float, dist: float, atr_val: float, chart_tf: str,
+              snapshots: dict, peers=None):
+    """कितने पड़ोसी TF इस ज़ोन की पुष्टि करते हैं (Pine का ±0.5×ATR बैंड)।"""
+    a = atr_val if np.isfinite(atr_val) else 0.0
+    top = max(prox, dist) + 0.5 * a
+    bot = min(prox, dist) - 0.5 * a
+    keys = [k for k in snapshots if (peers is None or k in peers)]
+    hits = []
+    for peer in adjacent_tfs(chart_tf, keys):
+        lvl = (snapshots.get(peer) or {}).get("demand" if demand else "supply")
+        if lvl is not None and bot <= lvl <= top:
+            hits.append(peer)
+    return len(hits), hits
+
+
+def annotate(res: dict, peers=None) -> pd.DataFrame:
+    """हर ज़ोन पर Multi-TF गिनती + current-month future symbol जोड़ो।"""
+    df = res["rows"]
+    if df is None or df.empty:
+        return df
+    n_list, tf_list = [], []
+    for _, z in df.iterrows():
+        n, hits = mtf_count(z["demand"], z["prox"], z["dist"],
+                            res["atr"].get(z["symbol"], {}).get(z["tf"], float("nan")),
+                            z["tf"], res["snaps"].get(z["symbol"], {}), peers)
+        n_list.append(n)
+        tf_list.append(",".join(hits))
+    df["mtf_n"] = n_list
+    df["mtf_tfs"] = tf_list
+    if "fut_symbol" not in df.columns:
+        df["fut_symbol"] = df["symbol"].astype(str) + "1!"
+    return df
+
+
+def fut_url(symbol: str, tf: str) -> str:
+    """Current-month (front) future — TradingView का NSE:SBIN1! continuous contract."""
+    from urllib.parse import quote
+    return (f"https://www.tradingview.com/chart/?symbol={quote('NSE:' + str(symbol) + '1!')}"
+            f"&interval={TV_TF.get(str(tf), '15')}")
+
+
+def _dist_bar(pct: float, rng: float) -> str:
+    """Distance का mini bar + % (स्क्रीनशॉट जैसा)।"""
+    r = max(0.01, float(rng))
+    w = max(3.0, min(100.0, float(pct) / r * 100.0))
+    col = "#3fb950" if pct <= r * 0.2 else ("#d29922" if pct <= r * 0.5 else "#f85149")
+    return (f'<span class="gs-track"><span class="gs-fill" style="width:{w:.0f}%;'
+            f'background:{col}"></span></span><span class="gs-sm">{pct:.2f}%</span>')
+
+
+def sheet_html(df: pd.DataFrame, dark: bool = False, show_mcap=True, min_mcap=50000.0,
+               extra: bool = False, range_pct: float = 10.0, max_rows: int = 600) -> str:
+    """स्क्रीनशॉट वाली Google-Sheets टेबल — row numbers 0 से, नीले लिंक,
+    🔴/🟢 Zone Side, ⭐ Multi-TF, ₹ मूल्य, Distance bar."""
+    if df is None or df.empty:
+        return ""
+    d = df.head(max_rows)
+    cols = ["Equity (Cash)", "Current-Month Future", "TF", "Zone Side", "Pattern", "Status",
+            "Multi-TF Highlight", "Proximal (₹)", "Distal (₹)", "Current LTP", "Distance"]
+    if extra:
+        cols += ["Score", "SL", "T1", "XRPT", "Qty"]
+        if show_mcap:
+            cols += ["Mkt Cap (₹Cr)"]
+
+    head = "".join(f"<th>{c}</th>" for c in cols)
+    body = []
+    for n, (_, r) in enumerate(d.iterrows(), start=0):
+        u_cash = tv_url(r["symbol"], r["tf"])
+        u_fut = fut_url(r["symbol"], r["tf"])
+        dem = bool(r["demand"])
+        dot = ('<span class="gs-dot gs-dot-d">●</span>' if dem
+               else '<span class="gs-dot gs-dot-s">●</span>')
+        side = f'{dot} <span class="{"gs-dot-d" if dem else "gs-dot-s"}">{"Demand" if dem else "Supply"}</span>'
+        state = str(r["state"])
+        st_txt = STATE_SHORT.get(state, state)
+        mtf_n = int(r.get("mtf_n", 0) or 0)
+        if mtf_n >= 1:
+            mtf_cell = (f'<span title="पुष्टि करने वाले TF: {r.get("mtf_tfs", "")}">'
+                        f'<span class="gs-star">★</span> Multi-TF ({mtf_n}×)</span>')
+        else:
+            mtf_cell = '<span class="gs-sm">—</span>'
+        ltp = float(r["ltp"]) if pd.notna(r.get("ltp")) else float("nan")
+        ltp_txt = f"₹{ltp:,.2f}" if np.isfinite(ltp) else "—"
+        cells = [
+            f'<td><a href="{u_cash}" target="_blank" rel="noopener" '
+            f'title="TradingView · NSE:{r["symbol"]} · {r["tf"]}">{r["symbol"]}</a></td>',
+            f'<td><a class="fut" href="{u_fut}" target="_blank" rel="noopener" '
+            f'title="TradingView · NSE:{r["symbol"]}1! · {r["tf"]}">{r["fut_symbol"]}</a></td>',
+            f'<td title="{TF_LABEL_HI.get(str(r["tf"]), "")}">{r["tf"]}</td>',
+            f'<td>{side}</td>',
+            f'<td class="ctr">{r["pattern"]}</td>',
+            f'<td><span class="{_STATE_CLS.get(state, "")}">{st_txt}</span></td>',
+            f'<td>{mtf_cell}</td>',
+            f'<td class="num">{float(r["prox"]):,.2f}</td>',
+            f'<td class="num">{float(r["dist"]):,.2f}</td>',
+            f'<td class="num">{ltp_txt}</td>',
+            f'<td>{_dist_bar(float(r["dist_pct"]), range_pct)}</td>',
+        ]
+        if extra:
+            sc = float(r["score"])
+            cells += [
+                f'<td class="ctr" style="background:{_score_bg(sc)};color:#111;font-weight:700">'
+                f'{int(sc)}{" ★" if r["hq"] else ""}</td>',
+                f'<td class="num">{float(r["sl"]):,.2f}</td>',
+                f'<td class="num">{float(r["tp"]):,.2f}</td>',
+                f'<td class="num">1:{float(r["xrpt_rr"]):.2f}</td>',
+                f'<td class="num">{int(r["qty"])}</td>',
+            ]
+            if show_mcap:
+                mv = r.get("mcap_cr", float("nan"))
+                if mv is None or (isinstance(mv, float) and pd.isna(mv)):
+                    cells.append('<td class="num gs-sm">—</td>')
+                else:
+                    ok = float(mv) >= float(min_mcap)
+                    cells.append(f'<td class="num">{float(mv):,.0f} '
+                                 f'<span class="{"gs-ok" if ok else "gs-no"}">'
+                                 f'{"✓" if ok else "✗"}</span></td>')
+        body.append(f'<tr><td class="gs-rn">{n}</td>' + "".join(cells) + "</tr>")
+
+    more = ""
+    if len(df) > len(d):
+        more = (f'<div class="gs-bar">… और {len(df) - len(d)} पंक्तियाँ — CSV डाउनलोड करें</div>')
+    return ('<div class="gs-wrap"><div class="gs-scroll"><table class="gs">'
+            f'<thead><tr><th class="gs-rn"></th>{head}</tr></thead>'
+            f'<tbody>{"".join(body)}</tbody></table></div></div>{more}')
+
+
+# ---------------------------------------------------------------------------
+# 4 · स्कैन के लिए यूनिवर्स
+# ---------------------------------------------------------------------------
+def pick_symbols(tb: dict):
+    txt = (tb.get("symbols_txt") or "").strip()
+    if txt:
+        return [s.strip().upper() for s in txt.replace("\n", ",").split(",") if s.strip()]
+    uni = tb["universe"]
+    if uni == "NIFTY 50":
+        return list(dict.fromkeys(NIFTY50))
+    if uni == "NIFTY 50 + F&O":
+        try:
+            u = list(live_fno_universe())
+        except Exception:                                        # noqa: BLE001
+            u = []
+        return list(dict.fromkeys(list(NIFTY50) + (u or list(FALLBACK_FNO))))
+    if uni == "अपनी सूची":
+        return []
+    try:                                                          # "NSE All F&O"
+        u = live_fno_universe()
+        return list(dict.fromkeys(u)) if u else list(dict.fromkeys(FALLBACK_FNO))
+    except Exception:                                            # noqa: BLE001
+        return list(dict.fromkeys(FALLBACK_FNO))
+
+
+# ---------------------------------------------------------------------------
+# 5 · MAIN
+# ---------------------------------------------------------------------------
+REQ_TXT = """streamlit
+yfinance
+pandas
+numpy
+plotly      # वैकल्पिक — न हो तो Altair चार्ट चलेंगे
+requests"""
+
+
 def main():
     css()
     if not deps_guard():
         return
-    inp, opts = sidebar()
 
-    st.markdown("""
-    <div class="hero">
-      <h1>📐 ज़ोन MTF स्कैनर — KTP नियम (Pine v6)</h1>
-      <p>1-2-4 ढाँचा · CBLI · Formation · White-area · Covered leg-out · Maturity · DATR बफ़र ·
-      XRPT · Quality score · MTF confirmation — और स्कैन <b>सभी 13 time frame</b> पर, आपकी दी हुई range में।</p>
-    </div>""", unsafe_allow_html=True)
+    st.markdown('<div class="hero"><h1>📐 ज़ोन MTF स्कैनर — KTP नियम (Pine v6)</h1>'
+                '<span>1-2-4 ढाँचा · CBLI · Formation · White-area · Covered leg-out · '
+                'Maturity · DATR बफ़र · XRPT · Quality score · MTF — स्कैन: सभी 13 TF, '
+                'आपकी दी हुई range में</span></div>', unsafe_allow_html=True)
 
-    c1, c2, c3 = st.columns([1.1, 1, 2])
-    with c1:
-        go_scan = st.button("🔍 स्कैन शुरू करें", type="primary", width="stretch")
-    with c2:
-        if st.button("♻️ डेटा रीफ़्रेश", width="stretch"):
-            clear_cache()
-            st.session_state.pop("scan", None)
-            st.rerun()
-    with c3:
-        mo = market_open_now()
-        st.caption(("🟢 बाज़ार खुला है · " if mo else "🔴 बाज़ार बंद है · ")
-                   + datetime.now(IST).strftime("%d %b %Y, %H:%M IST"))
+    tb = top_bar()
+    inp, uo = pine_panel()
+    dark = is_dark()
+    rng = tb["range_pct"]
 
-    if go_scan:
-        syms = resolve_universe(opts["universe"], opts["custom"])
-        lim = int(opts.get("max_syms") or 0)
+    # ── स्कैन ────────────────────────────────────────────────────────────
+    if tb["go"]:
+        syms = pick_symbols(tb)
+        lim = int(uo.get("max_syms") or 0)
         if lim and len(syms) > lim:
-            st.caption(f"पहली {lim} स्क्रिप्ट स्कैन होंगी (कुल {len(syms)})।")
             syms = syms[:lim]
         if not syms:
-            st.error("कोई स्क्रिप्ट नहीं चुनी गई।")
-            st.stop()
-        ph = st.empty()
-        pbar = st.progress(0.0, text="डेटा लाया जा रहा है…")
-        with ph.container():
-            st.info(f"{len(syms)} स्क्रिप्ट × {len(opts['tfs'])} time frame स्कैन हो रहा है…")
-        res = run_scan(syms, inp, opts, ph, pbar)
-        pbar.empty()
-        ph.empty()
-        res["inputs"] = inp
-        res["opts"] = opts
-        res["symbols"] = syms
-        st.session_state["scan"] = res
-        st.toast(f"स्कैन पूरा — {len(res['rows'])} ज़ोन", icon="✅")
+            st.error("कोई स्क्रिप्ट नहीं चुनी — ऊपर यूनिवर्स चुनें या स्क्रिप्ट बॉक्स में नाम लिखें।")
+        else:
+            ph = st.empty()
+            pbar = st.progress(0.0, text=f"{len(syms)} स्क्रिप्ट × {len(tb['tfs'])} TF — डेटा लाया जा रहा है…")
+            opts = dict(tfs=tb["tfs"], peers=uo["peers"], range_pct=rng,
+                        universe=tb["universe"], custom=tb["symbols_txt"])
+            res = run_scan(syms, inp, opts, ph, pbar)
+            pbar.empty()
+            ph.empty()
+            res.update(inputs=inp, opts=opts, ui=uo, symbols=syms)
+            annotate(res, uo["peers"])
+            st.session_state["scan"] = res
+            st.toast(f"स्कैन पूरा — {len(res['rows'])} ज़ोन", icon="✅")
 
     res = st.session_state.get("scan")
     if not res:
-        st.info("⬅️ बाईं ओर सेटिंग देखें और **स्कैन शुरू करें** दबाएँ। "
-                "स्कैन में सभी 13 time frame एक साथ देखे जाते हैं।")
-        with st.expander("Pine v6 नियम — संक्षेप में"):
+        st.info("⬆️ ऊपर यूनिवर्स / TF चुनें और **⚡ Scan** दबाएँ — स्कैन सभी 13 time frame पर, "
+                "आपकी दी हुई range में चलेगा।")
+        with st.expander("Pine v6 नियम — संक्षेप में", expanded=True):
             st.markdown(PINE_HELP)
         return
 
     df_all: pd.DataFrame = res["rows"]
-    opt_s = res["opts"]
+    uo = res.get("ui", uo)
     inp_s: PineInputs = res["inputs"]
-    syms = res["symbols"]
 
-    # ---- market cap (display only, Pine minMcapCr) ----
-    if opt_s.get("show_mcap") and not df_all.empty:
-        try:
-            caps = market_caps(sorted(df_all["symbol"].unique()))
-            df_all["mcap_cr"] = df_all["symbol"].map(caps)
-        except Exception:                                        # noqa: BLE001
-            df_all["mcap_cr"] = np.nan
-
-    # ---- filters (UI, बिना दोबारा स्कैन) ----
-    if df_all.empty:
-        st.warning("इस रन में कोई ज़ोन नहीं बना। स्कैन रेंज बढ़ाएँ या नियम ढीले करें "
+    if df_all is None or df_all.empty:
+        st.warning("इस रन में कोई ज़ोन नहीं बना। रेंज बढ़ाएँ या नियम ढीले करें "
                    "(minBaseCount / legOutToBaseSizeMult / minValidScore)।")
         return
 
-    f = df_all.copy()
-    f = f[f["dist_pct"] <= opt_s["range_pct"]]
-    f = f[f["score"] >= opt_s["min_score"]]
-    if opt_s["states"]:
-        f = f[f["state"].isin(opt_s["states"])]
-    if opt_s["only_mtf"]:
+    # market cap (सिर्फ़ दिखाने के लिए — Pine minMcapCr)
+    if uo.get("show_mcap") and "mcap_cr" not in df_all.columns:
+        try:
+            caps = market_caps(sorted(df_all["symbol"].unique()))
+            df_all["mcap_cr"] = df_all["symbol"].map(caps)
+            res["rows"] = df_all
+        except Exception:                                        # noqa: BLE001
+            df_all["mcap_cr"] = np.nan
+
+    # ── टूलबार के फ़िल्टर (बिना दोबारा स्कैन) ───────────────────────────
+    f = df_all[df_all["dist_pct"] <= rng].copy()
+    if tb["side"] != "All":
+        f = f[f["side"] == tb["side"]]
+    if tb["status"] != "All":
+        f = f[f["state"] == tb["status"]]
+    if uo.get("min_score", 0):
+        f = f[f["score"] >= uo["min_score"]]
+    if uo.get("only_mtf"):
         f = f[f["mtf"]]
-    if opt_s["only_hq"]:
+    if uo.get("only_hq"):
         f = f[f["hq"]]
 
-    # ---- KPI ----
-    m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("स्कैन हुई स्क्रिप्ट", res["scanned"])
-    m2.metric("कुल ज़ोन (13 TF)", len(df_all))
-    m3.metric("रेंज + फ़िल्टर में", len(f))
-    m4.metric("ताज़ा + सक्रिय", int(f["state"].isin(["Fresh", "Triggered"]).sum()))
-    m5.metric("हाई-क्वालिटी ★", int(f["hq"].sum()))
-    st.caption(f"रेंज ±{opt_s['range_pct']:.1f}% · स्कैन समय {res['at']:%d-%b %H:%M:%S} IST · "
-               f"{len(opt_s['tfs'])} TF · रन में त्रुटि: {len(res['errs'])}")
-
-    if res["errs"]:
+    if res.get("errs"):
         with st.expander(f"⚠️ {len(res['errs'])} स्क्रिप्ट में समस्या"):
-            st.write(pd.DataFrame({"स्क्रिप्ट": list(res["errs"]), "कारण": list(res["errs"].values())}))
+            st.write(pd.DataFrame({"स्क्रिप्ट": list(res["errs"]),
+                                   "कारण": list(res["errs"].values())}))
 
-    t1, t2, t3, t4 = st.tabs(["📋 स्कैन परिणाम", "🕯️ ज़ोन डिटेल + चार्ट",
-                              "🔗 MTF तालिका", "📖 नियम व सेटिंग"])
+    # ── शीट कंट्रोल पंक्ति ──────────────────────────────────────────────
+    n_mtf = int((f["mtf_n"] >= 1).sum()) if "mtf_n" in f else 0
+    c1, c2, c3, c4 = cols([3.4, 1.35, .85, .85])
+    c1.markdown(
+        f'<div class="gs-bar"><b>Sheet1</b> · {len(f)} पंक्तियाँ · '
+        f'{res["scanned"]} स्क्रिप्ट · {len(df_all)} ज़ोन · '
+        f'Fresh+Tested {int(f["state"].isin(["Fresh", "Triggered"]).sum())} · '
+        f'HQ ★{int(f["hq"].sum())} · Multi-TF {n_mtf} · '
+        f'{res["at"]:%d-%b %H:%M} IST · रेंज ±{rng:.1f}%</div>',
+        unsafe_allow_html=True)
+    extra_cols = c2.checkbox("अतिरिक्त कॉलम (Score · SL · T1)", value=False,
+                             key="in_extra", help="स्क्रीनशॉट वाले 11 कॉलम + Pine के अंक")
+    tbl = zone_table(f, uo.get("show_mcap", True), uo.get("min_mcap", 50000.0))
+    put(c3, "download_button", "⬇️ CSV",
+        tbl.to_csv(index=False).encode("utf-8-sig"),
+        file_name=f"zone_mtf_{datetime.now(IST):%Y%m%d_%H%M}.csv",
+        mime="text/csv")
+    put(c4, "download_button", "⬇️ TSV",
+        tbl.to_csv(index=False, sep="\t").encode("utf-8-sig"),
+        file_name=f"zone_mtf_{datetime.now(IST):%Y%m%d_%H%M}.tsv",
+        mime="text/tab-separated-values")
 
-    # ---------------- TAB 1 ----------------
-    with t1:
-        if f.empty:
-            st.warning("इन फ़िल्टर पर कोई ज़ोन नहीं। फ़िल्टर ढीले करें।")
-        else:
-            tbl = zone_table(f, opt_s.get("show_mcap", True), opt_s.get("min_mcap", 50000.0))
+    if f.empty:
+        st.warning("इन फ़िल्टर पर कोई ज़ोन नहीं — टूलबार में Zone Side / Status / रेंज ढीले करें।")
+    else:
+        st.markdown(sheet_html(f, dark, uo.get("show_mcap", True),
+                               uo.get("min_mcap", 50000.0), extra=extra_cols,
+                               range_pct=rng), unsafe_allow_html=True)
 
-            # ── Google Sheets जैसा दृश्य (symbol/TF पर TradingView लिंक) ──
-            st.markdown(
-                f'<div class="gs-bar"><b>📄 शीट दृश्य</b> · {len(f)} पंक्तियाँ · '
-                f'<b>स्क्रिप्ट / TF / 📈</b> पर क्लिक → TradingView उसी टाइम फ्रेम पर खुलेगा '
-                f'(NSE:स्क्रिप्ट · interval = ज़ोन का TF)</div>',
-                unsafe_allow_html=True)
-            st.markdown(sheet_html(f, opt_s.get("show_mcap", True),
-                                   opt_s.get("min_mcap", 50000.0)),
-                        unsafe_allow_html=True)
+    # ── आगे के टैब ──────────────────────────────────────────────────────
+    t2, t3, t4, t5 = st.tabs(["🕯️ ज़ोन डिटेल + चार्ट", "🔗 MTF तालिका",
+                              "🎯 फ़िल्टर/सॉर्ट तालिका", "📖 नियम व सेटिंग"])
 
-            c_dl1, c_dl2, c_dl3 = st.columns([1.1, 1.1, 2.2])
-            with c_dl1:
-                dl = tbl.to_csv(index=False).encode("utf-8-sig")
-                st.download_button("⬇️ CSV (Sheets में Import)", dl,
-                                   file_name=f"zone_mtf_{datetime.now(IST):%Y%m%d_%H%M}.csv",
-                                   mime="text/csv", width="stretch")
-            with c_dl2:
-                st.download_button("⬇️ TSV (सीधे पेस्ट)",
-                                   tbl.to_csv(index=False, sep="\t").encode("utf-8-sig"),
-                                   file_name=f"zone_mtf_{datetime.now(IST):%Y%m%d_%H%M}.tsv",
-                                   mime="text/tab-separated-values", width="stretch")
-            with c_dl3:
-                st.caption("Google Sheets → File → Import → Upload (या TSV कॉपी कर सीधे पेस्ट)। "
-                           "TradingView पर 10m/75m/6H जैसा custom TF न हो तो निकटतम TF खुलेगा।")
-
-            # ── इंटरैक्टिव तालिका — सॉर्ट + पंक्ति क्लिक → ज़ोन डिटेल ──
-            with st.expander("🔎 फ़िल्टर/सॉर्ट करने योग्य तालिका — पंक्ति क्लिक → ज़ोन डिटेल", expanded=False):
-                tbl_x = tbl.copy()
-                tbl_x.insert(1, "चार्ट", [tv_url(sy, tf) for sy, tf in zip(f["symbol"], f["tf"])])
-                sel = stretch(st.dataframe, tbl_x, hide_index=True, height=460,
-                        on_select="rerun", selection_mode="single-row", key="res_table",
-                        column_config={
-                            "चार्ट": st.column_config.LinkColumn("चार्ट", display_text="📈 खोलें"),
-                            "स्कोर": st.column_config.ProgressColumn(
-                                "स्कोर", min_value=0, max_value=150, format="%d"),
-                            "दूरी %": st.column_config.NumberColumn("दूरी %", format="%.2f%%"),
-                            "एंट्री (proximal)": st.column_config.NumberColumn(format="%.2f"),
-                            "डिस्टल": st.column_config.NumberColumn(format="%.2f"),
-                            "SL": st.column_config.NumberColumn(format="%.2f"),
-                            "T1": st.column_config.NumberColumn(format="%.2f"),
-                        })
-                try:
-                    picked = sel.selection.rows if sel is not None else []
-                except Exception:                                # noqa: BLE001
-                    picked = []
-                if picked:
-                    pr = f.iloc[picked[0]]
-                    pk = {"symbol": str(pr["symbol"]), "tf": str(pr["tf"]), "bar": int(pr["bar"])}
-                    if st.session_state.get("_pick") != pk:
-                        st.session_state["_pick"] = pk
-                        st.session_state["d_sym"] = pk["symbol"]
-                        st.session_state["d_tf"] = pk["tf"]
-                        st.session_state.pop("d_zone", None)
-                st.caption("किसी पंक्ति पर क्लिक करें → 'ज़ोन डिटेल + चार्ट' टैब में वही ज़ोन खुल जाएगा।")
-
-            # ---- quick summary by TF / side ----
-            ssum = (f.groupby(["tf", "side"], observed=True)
-                     .agg(ज़ोन=("symbol", "count"), औसत_स्कोर=("score", "mean"))
-                     .reset_index())
-            if not ssum.empty:
-                with st.expander("TF-वार सारांश"):
-                    piv = ssum.pivot(index="tf", columns="side", values="ज़ोन").fillna(0).astype(int)
-                    piv = piv.reindex([t for t in TFS_ALL if t in piv.index])
-                    piv.columns = [SIDE_HI.get(c, c) for c in piv.columns]
-                    stretch(st.dataframe, piv, column_config={
-                        c: st.column_config.NumberColumn(c, format="%d") for c in piv.columns})
-
-    # ---------------- TAB 2 ----------------
+    # ---------- ज़ोन डिटेल ----------
     with t2:
         if f.empty:
             st.info("पहले फ़िल्टर में कुछ ज़ोन आने दें।")
@@ -2143,33 +2170,23 @@ def main():
                 format_func=lambda i: (
                     f"{'मांग' if zsub.loc[i,'demand'] else 'आपूर्ति'} · {zsub.loc[i,'pattern']} · "
                     f"एंट्री {zsub.loc[i,'prox']:.2f} · स्कोर {int(zsub.loc[i,'score'])} · "
-                    f"{STATE_HI.get(zsub.loc[i,'state'], zsub.loc[i,'state'])}"))
+                    f"{STATE_SHORT.get(zsub.loc[i,'state'], zsub.loc[i,'state'])}"))
             zrow = zsub.loc[idx]
 
-            k1, k2, k3, k4, k5, k6 = st.columns(6)
-            k1.metric("एंट्री (proximal)", f"{zrow['prox']:.2f}")
-            k2.metric("SL", f"{zrow['sl']:.2f}")
-            k3.metric(f"T1 (1:{inp_s.targetRR:g})", f"{zrow['tp']:.2f}")
-            k4.metric("XRPT 1:R", f"{zrow['xrpt_rr']:.2f}")
-            k5.metric("मात्रा", f"{int(zrow['qty'])}")
-            k6.metric("स्कोर", f"{int(zrow['score'])}" + (" ★HQ" if zrow["hq"] else ""))
+            kk = st.columns(6)
+            kk[0].metric("एंट्री (proximal)", f"{zrow['prox']:.2f}")
+            kk[1].metric("SL", f"{zrow['sl']:.2f}")
+            kk[2].metric(f"T1 (1:{inp_s.targetRR:g})", f"{zrow['tp']:.2f}")
+            kk[3].metric("XRPT 1:R", f"{zrow['xrpt_rr']:.2f}")
+            kk[4].metric("मात्रा", f"{int(zrow['qty'])}")
+            kk[5].metric("स्कोर", f"{int(zrow['score'])}" + (" ★HQ" if zrow["hq"] else ""))
 
-            st.markdown(
-                f"<span class='pill {'p-d' if zrow['demand'] else 'p-s'}'>"
-                f"{SIDE_HI.get(zrow['side'], zrow['side'])}</span> "
-                f"<span class='pill p-n'>{zrow['pattern']} · {zrow['cat_hi']} · "
-                f"{int(zrow['base_count'])} boring</span> "
-                f"<span class='pill p-n'>{STATE_HI.get(zrow['state'], zrow['state'])}</span> "
-                f"<span class='pill p-n'>MTF {'✓' if zrow['mtf'] else '–'}</span> "
-                f"<span class='pill p-n'>बना {zrow['created_ist']}</span>"
-                + ("<span class='pill p-n'>BASE BREAK</span>" if zrow.get("base_break") else "")
-                + ("<span class='pill p-n'>SWING</span>" if zrow.get("swing_break") else ""),
-                unsafe_allow_html=True)
+            b1, b2 = st.columns([1.2, 3])
+            put(b1, "link_button", f"📈 NSE:{zrow['symbol']} · {zrow['tf']}",
+                tv_url(zrow["symbol"], zrow["tf"]))
+            put(b2, "link_button", f"📈 Future NSE:{zrow['fut_symbol']} · {zrow['tf']}",
+                fut_url(zrow["symbol"], zrow["tf"]))
 
-            st.link_button(f"📈 TradingView पर खोलें — NSE:{zrow['symbol']} · {zrow['tf']}",
-                           tv_url(zrow["symbol"], zrow["tf"]), type="primary")
-
-            # chart
             try:
                 frames = load_frames([sym_pick], [tf_pick])
                 df_tf = frames.get(sym_pick, {}).get(tf_pick)
@@ -2187,22 +2204,13 @@ def main():
             if inp_s.showInfo:
                 st.code(info_text(zrow.to_dict(), inp_s.targetRR), language="text")
 
-            with st.expander("इस स्क्रिप्ट के सभी ज़ोन (सभी TF)"):
-                allsub = df_all[df_all["symbol"] == sym_pick]
-                stretch(st.dataframe,
-                        zone_table(allsub, opt_s.get("show_mcap", True), opt_s.get("min_mcap", 50000)),
-                        hide_index=True, height=320)
-
-    # ---------------- TAB 3 ----------------
+    # ---------- MTF ----------
     with t3:
-        st.caption("हर TF का नवीनतम मांग/आपूर्ति proximal — Pine के MTF snapshot जैसा "
-                   "(सिर्फ़ Fresh व Triggered ज़ोन गिने जाते हैं)।")
-        if f.empty:
-            sym2 = sorted(res["snaps"].keys())[0] if res["snaps"] else None
-        else:
-            sym2 = st.selectbox("स्क्रिप्ट", sorted(res["snaps"].keys()), key="m_sym")
+        st.caption("हर TF का नवीनतम मांग/आपूर्ति proximal (सिर्फ़ Fresh व Tested ज़ोन गिने जाते हैं)।")
+        sym2 = st.selectbox("स्क्रिप्ट", sorted(res["snaps"].keys()), key="m_sym") \
+            if res["snaps"] else None
         if sym2:
-            mdf = mtf_panel(res["snaps"].get(sym2, {}), list(opt_s["tfs"]), set(opt_s["peers"]))
+            mdf = mtf_panel(res["snaps"].get(sym2, {}), list(res["opts"]["tfs"]), set(uo["peers"]))
             ltp = res["ltp"].get(sym2)
             if ltp:
                 mdf["LTP से %"] = mdf["मांग proximal"].map(
@@ -2213,19 +2221,46 @@ def main():
                         "आपूर्ति proximal": st.column_config.NumberColumn(format="%.2f"),
                         "LTP से %": st.column_config.NumberColumn(format="%.2f%%"),
                     })
-            mc = f[f["symbol"] == sym2]
-            if not mc.empty:
-                st.caption(f"{sym2} · MTF confirmed ज़ोन: {int(mc['mtf'].sum())}/{len(mc)} · "
-                           f"ताज़ा: {int(mc['state'].eq('Fresh').sum())}")
 
-    # ---------------- TAB 4 ----------------
+    # ---------- इंटरैक्टिव ----------
     with t4:
-        c1, c2 = st.columns([1, 1])
-        with c1:
+        if f.empty:
+            st.info("पहले फ़िल्टर में कुछ ज़ोन आने दें।")
+        else:
+            tx = zone_table(f, uo.get("show_mcap", True), uo.get("min_mcap", 50000.0))
+            tx.insert(1, "चार्ट", [tv_url(sy, tf) for sy, tf in zip(f["symbol"], f["tf"])])
+            tx.insert(2, "Future", [fut_url(sy, tf) for sy, tf in zip(f["symbol"], f["tf"])])
+            sel = stretch(st.dataframe, tx, hide_index=False, height=520,
+                          on_select="rerun", selection_mode="single-row", key="res_table",
+                          column_config={
+                              "चार्ट": st.column_config.LinkColumn("चार्ट", display_text="📈 कैश"),
+                              "Future": st.column_config.LinkColumn("Future", display_text="📈 फ़्यूचर"),
+                              "स्कोर": st.column_config.ProgressColumn(
+                                  "स्कोर", min_value=0, max_value=150, format="%d"),
+                              "दूरी %": st.column_config.NumberColumn("दूरी %", format="%.2f%%"),
+                          })
+            try:
+                picked = sel.selection.rows if sel is not None else []
+            except Exception:                                    # noqa: BLE001
+                picked = []
+            if picked:
+                pr = f.iloc[picked[0]]
+                pkk = {"symbol": str(pr["symbol"]), "tf": str(pr["tf"]), "bar": int(pr["bar"])}
+                if st.session_state.get("_pick") != pkk:
+                    st.session_state["_pick"] = pkk
+                    st.session_state["d_sym"] = pkk["symbol"]
+                    st.session_state["d_tf"] = pkk["tf"]
+                    st.session_state.pop("d_zone", None)
+            st.caption("पंक्ति क्लिक → 'ज़ोन डिटेल + चार्ट' टैब में वही ज़ोन।")
+
+    # ---------- नियम ----------
+    with t5:
+        cA, cB = st.columns([1, 1])
+        with cA:
             st.markdown("#### इस रन के इनपुट (Pine v6)")
-            st.json({k: (v if not isinstance(v, float) else round(v, 4))
+            st.json({k: (round(v, 4) if isinstance(v, float) else v)
                      for k, v in inp_s.__dict__.items()})
-        with c2:
+        with cB:
             st.markdown("#### Pine नियम — संक्षेप में")
             st.markdown(PINE_HELP)
 
@@ -2244,19 +2279,18 @@ PINE_HELP = """
 - **Formation**: पलटाव पैटर्न (DBR/RBD) में leg-out का open leg-in body के अंदर (±0.10 ATR)
 - **White area**: leg-out body boring body को निगल न ले
 - **Maturity**: hourly TF = 75 मिनट, daily = अगला दिन, weekly = +7, monthly = +21 ट्रेडिंग दिन
-- **Score**: 10 से शुरू, base/leg-in/leg-out/gap/volume पर अंक, < 40 = अमान्य, ≥ 90 = HQ ★
 
 **स्तर**
 - **Proximal** = base का high (मांग) / low (आपूर्ति) — एंट्री
 - **Distal** = course विधि में pattern का सबसे नीचा/ऊँचा, वरना सिर्फ़ boring
-- **SL** = distal ∓ DATR बफ़र (पिछले पूरे दिन का ATR14; बफ़र % ट्रेडर प्रकार से)
+- **SL** = distal ∓ DATR बफ़र (पिछले पूरे दिन का ATR14)
 - **T1** = proximal ± जोखिम × targetRR · **XRPT** = पहले leg-out candle का (open+close)/2
 
-**स्थितियाँ**: Fresh → Triggered (ज़ोन में घुसा + matured) / Immature / Covered (body leg-out के 50% से आगे) /
-Broken (SL पार) / Exhausted (maxTouches से ज़्यादा बार)
+**स्थितियाँ**: Fresh → Tested (ज़ोन में घुसा + matured) / Immature / Covered / Broken / Exhausted
 
-**MTF**: पड़ोसी TF का same-side proximal इस ज़ोन के ± 0.5 × ATR के अंदर हो
-(TF अनुपात 0.2× से 5× के बीच)।
+**MTF**: पड़ोसी TF का same-side proximal इस ज़ोन के ±0.5 × ATR के अंदर हो — शीट में
+**★ Multi-TF (N×)** = कितने TF पुष्टि कर रहे हैं।
 """
+
 
 main()

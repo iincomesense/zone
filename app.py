@@ -21,6 +21,7 @@ from __future__ import annotations
 #  भाग 1 · आयात (imports)
 # ═══════════════════════════════════════════════════════════════════════
 import hashlib
+import json
 import math
 import os
 import pickle
@@ -101,8 +102,8 @@ TF_FETCH: Dict[str, Tuple[str, Optional[str]]] = {
     "1M": ("1mo", None),
 }
 
-TTL = {"1m": 120, "5m": 150, "15m": 150, "30m": 180, "60m": 240,
-       "1d": 900, "1wk": 3600, "1mo": 3600}
+TTL = {"1m": 300, "5m": 900, "15m": 900, "30m": 1200, "60m": 1800,
+       "1d": 3600, "1wk": 21600, "1mo": 21600}
 
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
@@ -117,6 +118,52 @@ NIFTY50 = [
     "SHRIRAMFIN", "SUNPHARMA", "TATACONSUM", "TATASTEEL", "TCS", "TECHM",
     "TITAN", "TRENT", "ULTRACEMCO", "WIPRO",
 ]
+
+# ───────────────────────────────────────────────────────────────────────────
+# GLOBAL INSTRUMENTS — (दिखने का नाम, Yahoo ticker, TradingView cash, TV future)
+# ───────────────────────────────────────────────────────────────────────────
+GLOBAL_INSTRUMENTS = [
+    ("NIFTY 50",     "^NSEI",        "NSE:NIFTY",        "NSE:NIFTY1!"),
+    ("BANK NIFTY",   "^NSEBANK",     "NSE:BANKNIFTY",    "NSE:BANKNIFTY1!"),
+    ("FINNIFTY",     "NIFTY_FIN_SERVICE.NS", "NSE:CNXFINANCE", "NSE:FINNIFTY1!"),
+    ("MIDCPNIFTY",   "^NSEMDCP50",   "NSE:NIFTYMIDCAP150", "NSE:MIDCPNIFTY1!"),
+    ("SENSEX",       "^BSESN",       "BSE:SENSEX",       "BSE:SENSEX1!"),
+    ("INDIA VIX",    "^INDIAVIX",    "NSE:INDIAVIX",     None),
+    ("S&P 500",      "^GSPC",        "SP:SPX",           "CME_MINI:ES1!"),
+    ("NASDAQ 100",   "^NDX",         "NASDAQ:NDX",       "CME_MINI:NQ1!"),
+    ("DOW JONES",    "^DJI",         "DJ:DJI",           "CBOT_MINI:YM1!"),
+    ("FTSE 100",     "^FTSE",        "TVC:UKX",          None),
+    ("DAX 40",       "^GDAXI",       "XETR:DAX",         "EUREX:FDAX1!"),
+    ("NIKKEI 225",   "^N225",        "TVC:NI225",        "OSE:NK1!"),
+    ("HANG SENG",    "^HSI",         "TVC:HSI",          "HKFE:HSI1!"),
+    ("GOLD",         "GC=F",         "COMEX:GC1!",       None),
+    ("SILVER",       "SI=F",         "COMEX:SI1!",       None),
+    ("CRUDE OIL",    "CL=F",         "NYMEX:CL1!",       None),
+    ("NATURAL GAS",  "NG=F",         "NYMEX:NG1!",       None),
+    ("COPPER",       "HG=F",         "COMEX:HG1!",       None),
+    ("USD/INR",      "INR=X",        "FX_IDC:USDINR",    None),
+    ("EUR/USD",      "EURUSD=X",     "FX:EURUSD",        None),
+    ("DOLLAR INDEX", "DX-Y.NYB",     "TVC:DXY",          None),
+    ("BITCOIN",      "BTC-USD",      "BITSTAMP:BTCUSD",  None),
+    ("ETHEREUM",     "ETH-USD",      "BITSTAMP:ETHUSD",  None),
+]
+GLOBAL_MAP = {name.upper(): dict(name=name, yahoo=y, cash=tv, fut=fut)
+              for name, y, tv, fut in GLOBAL_INSTRUMENTS}
+GLOBAL_SYMBOLS = [g[0] for g in GLOBAL_INSTRUMENTS]
+
+
+def sym_meta(sym: str) -> dict:
+    """display symbol → {name, yahoo, cash, fut}"""
+    m = GLOBAL_MAP.get(str(sym).upper())
+    if m:
+        return m
+    return dict(name=sym, yahoo=f"{sym}.NS", cash=f"NSE:{sym}", fut=f"NSE:{sym}1!")
+
+
+def _ticker(sym: str) -> str:
+    """display symbol → Yahoo ticker (global के लिए जैसा है वैसा, stocks के लिए .NS)"""
+    return sym_meta(sym)["yahoo"]
+
 
 FALLBACK_FNO = NIFTY50 + [
     "ABB", "ABCAPITAL", "ADANIGREEN", "ADANIPOWER", "ALKEM", "AMBUJACEM", "APLAPOLLO",
@@ -217,7 +264,7 @@ def market_caps(symbols: Sequence[str], ttl: int = 6 * 3600) -> Dict[str, Option
 
     def one(sym: str):
         try:
-            fi = yf.Ticker(f"{sym}.NS").fast_info
+            fi = yf.Ticker(_ticker(sym)).fast_info
             try:
                 mc = fi.get("marketCap") if hasattr(fi, "get") else fi["marketCap"]
             except Exception:                                  # noqa: BLE001
@@ -240,19 +287,22 @@ def market_caps(symbols: Sequence[str], ttl: int = 6 * 3600) -> Dict[str, Option
 # ---------------------------------------------------------------------------
 # yahoo download
 # ---------------------------------------------------------------------------
-def _flatten(df: pd.DataFrame, sym: str) -> Optional[pd.DataFrame]:
+def _flatten(df: pd.DataFrame, tick: str) -> Optional[pd.DataFrame]:
+    """Yahoo के bulk फ्रेम से एक ticker का हिस्सा निकालो।"""
     if df is None or len(df) == 0:
         return None
     if isinstance(df.columns, pd.MultiIndex):
         # group_by='ticker' -> (Ticker, Price) ; warna (Price, Ticker)
         lvl0 = df.columns.get_level_values(0)
         lvl1 = df.columns.get_level_values(1)
-        if f"{sym}.NS" in lvl0:
-            sub = df[f"{sym}.NS"]
-        elif f"{sym}.NS" in lvl1:
-            sub = df.xs(f"{sym}.NS", axis=1, level=1)
+        if tick in lvl0:
+            sub = df[tick]
+        elif tick in lvl1:
+            sub = df.xs(tick, axis=1, level=1)
         else:
             return None
+        if isinstance(sub.columns, pd.MultiIndex):
+            sub = sub.droplevel(0, axis=1)
     else:
         sub = df
     need = {"Open", "High", "Low", "Close"}
@@ -278,35 +328,53 @@ def _flatten(df: pd.DataFrame, sym: str) -> Optional[pd.DataFrame]:
 
 
 def _resample_session(df: pd.DataFrame, rule: str) -> pd.DataFrame:
-    """NSE session 09:15 se anchored resample (bar-din ke andar hi)."""
+    """दिन के पहले bar से anchored resample (session के अंदर ही) — vectorized।
+
+    पहले हर दिन के लिए अलग `resample()` चलता था (बड़े इतिहास पर बहुत धीमा);
+    अब एक ही groupby — नतीजा बिल्कुल वही (O/H/L/C/V बराबर)।
+    """
     if df is None or df.empty:
         return df
-    chunks = []
-    for _, g in df.groupby(df.index.normalize(), sort=True):
-        if len(g) == 0:
-            continue
-        r = g.resample(rule, origin=g.index[0], closed="left", label="left").agg(
-            {"open": "first", "high": "max", "low": "min",
-             "close": "last", "volume": "sum"})
-        r = r.dropna(subset=["open", "high", "low", "close"])
-        if len(r):
-            chunks.append(r)
-    if not chunks:
+    try:
+        secs_rule = int(pd.Timedelta(rule).total_seconds())
+    except Exception:                                          # noqa: BLE001
+        return df
+    if secs_rule <= 0:
+        return df
+    idx = pd.DatetimeIndex(df.index)
+    wall = idx.tz_localize(None) if idx.tz is not None else idx
+    day = wall.normalize()
+    secs = np.asarray(pd.TimedeltaIndex(wall - day).total_seconds(), dtype="float64")
+    anchor = pd.Series(secs).groupby(day).transform("min").to_numpy()
+    bucket = ((secs - anchor) // secs_rule).astype("int64")
+    g = df.groupby([day.to_numpy(), bucket], sort=True).agg(
+        {"open": "first", "high": "max", "low": "min",
+         "close": "last", "volume": "sum"})
+    g = g.dropna(subset=["open", "high", "low", "close"])
+    if g.empty:
         return pd.DataFrame(columns=df.columns)
-    out = pd.concat(chunks)
-    return out[~out.index.duplicated(keep="last")].sort_index()
+    days = pd.DatetimeIndex(g.index.get_level_values(0))
+    bks = g.index.get_level_values(1).to_numpy()
+    anchors = pd.Series(secs).groupby(day).min()
+    anc = anchors.reindex(days).to_numpy()
+    lbl = days + pd.to_timedelta(anc + bks * secs_rule, unit="s")
+    if idx.tz is not None:
+        lbl = lbl.tz_localize(idx.tz)
+    g.index = pd.DatetimeIndex(lbl)
+    return g.sort_index()
 
 
 def _download_base(symbols: Sequence[str], base: str) -> Dict[str, pd.DataFrame]:
     """Ek base interval ke liye bulk download (yahi sabse tez raasta hai)."""
     interval, period = BASE_SPEC[base]
-    key = _ckey("dl", base, period, tuple(sorted(symbols)))
+    key = _ckey("dl", base, period, tuple(sorted(_ticker(x) for x in symbols)))
     cached = _load(key, TTL.get(base, 300))
     if cached is not None:
         return cached
     if yf is None:
         return {}
-    tickers = [f"{s}.NS" for s in symbols]
+    tick = {s: _ticker(s) for s in symbols}
+    tickers = list(dict.fromkeys(tick.values()))
     raw = None
     try:
         raw = yf.download(tickers, interval=interval, period=period,
@@ -317,7 +385,7 @@ def _download_base(symbols: Sequence[str], base: str) -> Dict[str, pd.DataFrame]
     out: Dict[str, pd.DataFrame] = {}
     if raw is not None and len(raw):
         for s in symbols:
-            f = _flatten(raw, s)
+            f = _flatten(raw, tick[s])
             if f is not None and len(f):
                 out[s] = f
     # jo symbol bulk me nahi aaya use alag se try karo
@@ -325,9 +393,9 @@ def _download_base(symbols: Sequence[str], base: str) -> Dict[str, pd.DataFrame]
     if missing:
         def one(sym):
             try:
-                d = yf.download(f"{sym}.NS", interval=interval, period=period,
+                d = yf.download(tick[sym], interval=interval, period=period,
                                 progress=False, auto_adjust=False, threads=False)
-                return sym, _flatten(d, sym)
+                return sym, _flatten(d, tick[sym])
             except Exception:                                  # noqa: BLE001
                 return sym, None
         with ThreadPoolExecutor(max_workers=8) as ex:
@@ -346,10 +414,23 @@ def load_frames(symbols: Sequence[str], tfs: Sequence[str], progress=None
     tfs = list(dict.fromkeys(tfs))
     bases = sorted({TF_FETCH[tf][0] for tf in tfs if tf in TF_FETCH})
     raw: Dict[str, Dict[str, pd.DataFrame]] = {}
-    for i, base in enumerate(bases):
-        if progress:
-            progress(i, len(bases), base)
-        raw[base] = _download_base(symbols, base)
+    # base intervals समानांतर (IO-bound) — पहला स्कैन काफ़ी तेज़ हो जाता है
+    if len(bases) > 1:
+        with ThreadPoolExecutor(max_workers=min(6, len(bases))) as ex:
+            futs = {ex.submit(_download_base, symbols, b): b for b in bases}
+            for i, fu in enumerate(as_completed(futs)):
+                b = futs[fu]
+                try:
+                    raw[b] = fu.result()
+                except Exception:                              # noqa: BLE001
+                    raw[b] = {}
+                if progress:
+                    progress(i, len(bases), b)
+    else:
+        for i, base in enumerate(bases):
+            if progress:
+                progress(i, len(bases), base)
+            raw[base] = _download_base(symbols, base)
 
     result: Dict[str, Dict[str, pd.DataFrame]] = {}
     for sym in symbols:
@@ -599,7 +680,7 @@ def _grade(bc: int) -> str:
 # ---------------------------------------------------------------------------
 class _S:
     __slots__ = ("o", "h", "l", "c", "v", "t", "dow", "day", "n",
-                 "tr", "atr", "vol_sma", "wp", "bp", "index")
+                 "tr", "atr", "vol_sma", "wp", "bp", "index", "filled", "nb_cum")
 
     def __init__(self, df: pd.DataFrame):
         self.o = df["open"].to_numpy(dtype="float64")
@@ -610,17 +691,17 @@ class _S:
             else np.zeros(len(df))
         idx = pd.DatetimeIndex(df.index)
         self.index = idx
-        # Pine `time` = bar open time, milliseconds
-        self.t = idx.asi8 // 1_000_000
-        self.dow = idx.dayofweek.to_numpy()
+        vals = idx.asi8                                   # epoch ns
+        self.t = vals // 1_000_000                        # Pine `time` (ms)
+        # local दीवार-घड़ी (timezone हटाकर) — पूरी तरह numpy, कोई per-bar boxing नहीं
+        try:
+            wall = idx.tz_localize(None).asi8 if idx.tz is not None else vals
+        except Exception:                                      # noqa: BLE001
+            wall = vals
+        day_id = wall // 86_400_000_000_000
+        self.dow = ((day_id + 3) % 7).astype("int64")      # 1970-01-01 = Thursday(3)
         # dayCount — Pine: `if timeframe.change("D") dayCount += 1`
-        dts = idx.normalize()
-        self.day = np.zeros(len(df), dtype="int64")
-        cnt = 0
-        for i in range(len(df)):
-            if i > 0 and dts[i] != dts[i - 1]:
-                cnt += 1
-            self.day[i] = cnt
+        self.day = np.concatenate(([0], np.cumsum(np.diff(day_id) != 0))).astype("int64")
         self.n = len(df)
 
     def prepare(self, inp: PineInputs) -> None:
@@ -629,6 +710,20 @@ class _S:
         self.vol_sma = _sma(self.v, inp.volSmaPeriod)
         self.wp = _wick_pct(self.o, self.h, self.l, self.c)
         self.bp = _body_pct(self.o, self.h, self.l, self.c)
+
+        # ── तेज़ी के लिए पहले से जाँचे हुए मास्क (सब vectorized) ──
+        rng = self.h - self.l
+        safe = np.where(rng > 0, rng, np.nan)
+        bull = self.c > self.o
+        bear = self.o > self.c
+        cw = np.where(bull, (self.h - self.c) / safe, (self.c - self.l) / safe)
+        self.filled = ((rng > 0) & (bull | bear)
+                       & (self.bp >= inp.legInMinBodyPct)
+                       & (cw <= inp.legInMaxClosingWickPct)
+                       & (self.tr >= inp.legInMinAtrMult * self.atr)
+                       & np.isfinite(self.atr))
+        boring_ok = (self.tr <= inp.maxBaseAtrMult * self.atr)
+        self.nb_cum = np.concatenate(([0], np.cumsum(~boring_ok))).astype("int64")
 
 
 # ---------------------------------------------------------------------------
@@ -959,6 +1054,13 @@ def engine(df: pd.DataFrame,
             if found:
                 break
             for bc in range(I.minBaseCount, I.maxBaseCount + 1):
+                li_ = p - (n_out + bc)
+                if li_ < 0 or not S.filled[li_]:
+                    continue
+                b0_ = p - n_out
+                bl_ = p - (n_out + bc - 1)
+                if S.nb_cum[b0_ + 1] - S.nb_cum[bl_] != 0:      # base में कोई भी बेकार candle
+                    continue
                 cand = _candidate(p, bc, n_out, S, I)
                 if cand is None:
                     continue
@@ -1193,6 +1295,60 @@ def info_text(z: dict, target_rr: float) -> str:
 # ---------------------------------------------------------------------------
 # 9. HIGH LEVEL SCANNER HELPERS
 # ---------------------------------------------------------------------------
+def _atr_last(df: pd.DataFrame, period: int = 14) -> float:
+    """सिर्फ़ आख़िरी ATR (पूरा _S बनाए बिना) — स्कैन तेज़ रखने के लिए।"""
+    try:
+        h = df["high"].to_numpy(dtype="float64")
+        l = df["low"].to_numpy(dtype="float64")
+        c = df["close"].to_numpy(dtype="float64")
+        a = _rma(_true_range(h, l, c), max(1, int(period)))
+        return float(a[-1]) if len(a) else float("nan")
+    except Exception:                                          # noqa: BLE001
+        return float("nan")
+
+
+def eod_band(df: Optional[pd.DataFrame], tf: str, atr_period: int = 14) -> Optional[dict]:
+    """EOD candle का बैंड —  High + ATR14(RMA)  …  Low − ATR14(RMA)
+
+    पूरी हो चुकी candle इस्तेमाल होती है (आज की अधूरी daily/weekly/monthly नहीं)।
+    """
+    if df is None or len(df) < atr_period + 3:
+        return None
+    h = df["high"].to_numpy(dtype="float64")
+    l = df["low"].to_numpy(dtype="float64")
+    c = df["close"].to_numpy(dtype="float64")
+    atr = _rma(_true_range(h, l, c), max(1, int(atr_period)))
+    idx = pd.DatetimeIndex(df.index)
+
+    def pstart(ts):
+        ts = ts.tz_convert(IST) if getattr(ts, "tzinfo", None) else ts.tz_localize("UTC").tz_convert(IST)
+        if tf == "1w":
+            return (ts - pd.Timedelta(days=int(ts.weekday()))).normalize()
+        if tf == "1M":
+            return ts.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        return ts.normalize()
+
+    i = len(df) - 1
+    try:
+        cur = pstart(datetime.now(IST))
+        last = pstart(idx[-1])
+        if last >= cur:                       # आज/इस हफ़्ते की candle अधूरी
+            now = datetime.now(IST)
+            closed_day = (not market_open_now()) and now.hour * 60 + now.minute >= 15 * 60 + 30
+            if not (closed_day and tf == "1d"):
+                i -= 1
+    except Exception:                                          # noqa: BLE001
+        i = len(df) - 1
+    if i < 0:
+        return None
+    a = float(atr[i])
+    if not np.isfinite(a):
+        return None
+    return dict(low=float(l[i]) - a, high=float(h[i]) + a, atr=a,
+                bar_low=float(l[i]), bar_high=float(h[i]),
+                bar_time=int(idx[i].value // 1_000_000))
+
+
 def scan_symbol(symbol: str,
                 frames: Dict[str, pd.DataFrame],
                 daily: Optional[pd.DataFrame],
@@ -1220,9 +1376,7 @@ def scan_symbol(symbol: str,
         for z in zs:
             z["symbol"] = symbol
         per_tf[tf] = zs
-        S = _S(df)
-        S.prepare(I)
-        atr_map[tf] = float(S.atr[-1])
+        atr_map[tf] = _atr_last(df, I.atrPeriod)
 
     snaps = {tf: mtf_snapshot(per_tf[tf]) for tf in tfs}
 
@@ -1280,7 +1434,9 @@ CAT_HI = {"Reversal": "पलटाव", "Continuation": "निरंतरत�
 ALL_STATES = ["Fresh", "Triggered", "Immature", "Covered", "Exhausted"]
 
 # टेबल की पहली पंक्ति — सभी नियंत्रण एक जगह
-UNIVERSES = ["NSE All F&O", "NIFTY 50", "NIFTY 50 + F&O", "अपनी सूची"]
+UNIVERSES = ["NSE All F&O", "NIFTY 50", "Global Instruments", "NSE All + Global", "अपनी सूची"]
+BANDS = ["Daily (EOD)", "Weekly (EOD)", "Monthly (EOD)"]
+BAND_TF = {"Daily (EOD)": "1d", "Weekly (EOD)": "1w", "Monthly (EOD)": "1M"}
 TV_TF = {"3m": "3", "5m": "5", "10m": "10", "15m": "15", "30m": "30", "75m": "75",
          "1h": "60", "2h": "120", "4h": "240", "6h": "360", "1d": "D", "1w": "W",
          "1M": "M"}
@@ -1413,7 +1569,7 @@ def preset_loose():
 # ---------------------------------------------------------------------------
 def top_bar():
     """स्क्रीनशॉट जैसी एक row: यूनिवर्स · TF · ट्रेडर · पक्ष · स्थिति · रेंज · स्क्रिप्ट · Scan"""
-    c = cols([1.35, 2.25, 1.15, .85, .85, .62, 1.35, .62])
+    c = cols([1.45, 2.15, 1.1, .8, .8, 1.0, 1.3, .6])
 
     uni = c[0].selectbox("यूनिवर्स", UNIVERSES, key="in_uni", label_visibility="collapsed")
     tfs = c[1].multiselect("TF", list(ALL_TFS), default=list(ALL_TFS),
@@ -1424,14 +1580,14 @@ def top_bar():
                           label_visibility="collapsed")
     status = c[4].selectbox("स्थिति", ["All"] + ALL_STATES, key="in_status",
                             label_visibility="collapsed")
-    rng = c[5].number_input("रेंज", 0.5, 100.0, 10.0, 0.5, key="in_range",
-                            label_visibility="collapsed")
+    band = c[5].selectbox("रेंज", BANDS, index=1, key="in_band",
+                          label_visibility="collapsed")
     sym_txt = c[6].text_input("स्क्रिप्ट", key="in_symtxt", label_visibility="collapsed",
                               placeholder="RELIANCE, SBIN…")
     go = put(c[7], "button", "⚡ Scan", type="primary", key="btn_scan")
 
     return dict(universe=uni, tfs=tuple(tfs), trader=ttype, side=side, status=status,
-                range_pct=float(rng), symbols_txt=sym_txt.strip(), go=go)
+                band=band, symbols_txt=sym_txt.strip(), go=go)
 
 
 # ---------------------------------------------------------------------------
@@ -1502,7 +1658,7 @@ def pine_panel() -> "PineInputs":
         with c6:
             min_score_p = st.number_input("न्यूनतम मान्य स्कोर (minValidScore)", 0, 200, 40, 1, key="in_minscorep")
             hq_thr = st.number_input("HQ सीमा (hqScoreThreshold)", 0, 300, 90, 1, key="in_hqthr")
-            min_score_ui = st.slider("टेबल में सिर्फ़ इतने स्कोर से ऊपर", 0, 150, 40, 5, key="in_minscore")
+            min_score_ui = st.slider("स्कोर फ़िल्टर", 0, 150, 0, 5, key="in_minscore")
             only_hq = st.checkbox("सिर्फ़ HQ ज़ोन (★)", value=False, key="in_onlyhq")
         with c7:
             s_mcap = st.checkbox("मार्केट कैप दिखाएँ (showMcap)", True, key="in_mcap")
@@ -1514,8 +1670,8 @@ def pine_panel() -> "PineInputs":
             peers = st.multiselect("MTF समय-सीमाएँ (tf1…tf9)", list(ALL_TFS),
                                    default=["3m", "5m", "10m", "15m", "30m", "1h", "75m", "2h", "1d"],
                                    key="in_peers")
-            scan_bars = st.number_input("कितने बार पीछे (scanBars)", 200, 5000, 900, 100, key="in_scanbars")
-            max_syms = st.number_input("अधिकतम स्क्रिप्ट (0 = सभी)", 0, 2000, 100, 10, key="in_maxsyms")
+            scan_bars = st.number_input("कितने बार पीछे (scanBars)", 200, 5000, 500, 100, key="in_scanbars")
+            max_syms = st.number_input("अधिकतम स्क्रिप्ट (0 = सभी)", 0, 3000, 0, 50, key="in_maxsyms")
 
         st.markdown("**4 · प्रदर्शन / Shadow / Swing**")
         if True:
@@ -1622,9 +1778,52 @@ def resolve_universe(uni: str, custom: str):
     return [s.strip().upper() for s in custom.replace("\n", ",").split(",") if s.strip()]
 
 
-def run_scan(symbols, inp, opts, ph, pbar):
+@st.cache_data(ttl=21600, show_spinner=False)
+def cached_fno():
+    """NSE F&O सूची 6 घंटे तक कैश।"""
+    try:
+        u = live_fno_universe()
+        return list(u) if u else list(FALLBACK_FNO)
+    except Exception:                                            # noqa: BLE001
+        return list(FALLBACK_FNO)
+
+
+@st.cache_resource(ttl=1800, max_entries=4, show_spinner=False)
+def cached_frames(symbols: tuple, tfs: tuple):
+    """एक ही यूनिवर्स के candles दोबारा नहीं माँगे जाते।"""
+    return load_frames(list(symbols), list(tfs))
+
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def cached_caps(symbols: tuple):
+    try:
+        return market_caps(list(symbols))
+    except Exception:                                            # noqa: BLE001
+        return {}
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def cached_scan(symbols: tuple, inp_key: str, opts_key: str):
+    """पूरा स्कैन कैश — उसी सेटिंग पर दोबारा Scan दबाने पर तुरंत।"""
+    inp = PineInputs(**json.loads(inp_key)).sanitized()
+    opts = json.loads(opts_key)
+    return _scan_all(list(symbols), inp, opts)
+
+
+def run_scan(symbols, inp, opts):
+    """कैश के ज़रिए स्कैन — दूसरी बार तुरंत।"""
+    return cached_scan(tuple(symbols),
+                       json.dumps(inp.__dict__, default=str, sort_keys=True),
+                       json.dumps({k: (list(v) if isinstance(v, tuple) else v)
+                                   for k, v in opts.items()}, default=str, sort_keys=True))
+
+
+def _scan_all(symbols, inp, opts):
     tfs = list(opts["tfs"]) or list(ALL_TFS)
-    frames = load_frames(symbols, tfs)          # disk cache की वजह से तेज़
+
+    # बैंड के लिए daily/weekly/monthly हमेशा चाहिए
+    need = list(dict.fromkeys(list(tfs) + ["1d", "1w", "1M"]))
+    frames = cached_frames(tuple(symbols), tuple(need))
     rows, snaps, atrs, ltps, errs = [], {}, {}, {}, {}
     jobs = [(s, frames[s]) for s in symbols if s in frames]
     missing = [s for s in symbols if s not in frames]
@@ -1632,7 +1831,8 @@ def run_scan(symbols, inp, opts, ph, pbar):
         errs[s] = "डेटा नहीं मिला"
 
     if not jobs:
-        return dict(rows=pd.DataFrame(), snaps={}, atr={}, ltp={}, errs=errs,
+        return dict(rows=pd.DataFrame(), snaps={}, atr={}, ltp={}, errs=errs, bands={},
+                    band_tf="1w", band_mode="Weekly (EOD)",
                     at=datetime.now(IST), scanned=0)
 
     done = 0
@@ -1642,7 +1842,6 @@ def run_scan(symbols, inp, opts, ph, pbar):
         for fu in as_completed(futs):
             s = futs[fu]
             done += 1
-            pbar.progress(done / len(jobs), text=f"स्कैन: {s}  ({done}/{len(jobs)})")
             try:
                 r = fu.result()
             except Exception as e:                            # noqa: BLE001
@@ -1662,6 +1861,14 @@ def run_scan(symbols, inp, opts, ph, pbar):
                                 atrs.get(z["symbol"], {}).get(z["tf"], float("nan")),
                                 z["tf"], sn)
 
+    # ── स्कैन रेंज बैंड: High+ATR14 … Low−ATR14 (EOD candle) ──
+    btf = BAND_TF.get(opts.get("band", "Weekly (EOD)"), "1w")
+    bands = {}
+    for s in symbols:
+        b = eod_band(frames.get(s, {}).get(btf), btf, inp.atrPeriod)
+        if b:
+            bands[s] = b
+
     df = pd.DataFrame(rows)
     if not df.empty:
         df.insert(0, "symbol", df.pop("symbol"))
@@ -1672,7 +1879,8 @@ def run_scan(symbols, inp, opts, ph, pbar):
         df["tf_hi"] = df["tf"].map(TF_LABEL_HI).fillna(df["tf"])
         df["created_ist"] = df["time"].map(fmt_t)
         df = df.sort_values(["dist_pct", "score"], ascending=[True, False]).reset_index(drop=True)
-    return dict(rows=df, snaps=snaps, atr=atrs, ltp=ltps, errs=errs,
+    return dict(rows=df, snaps=snaps, atr=atrs, ltp=ltps, errs=errs, bands=bands,
+                band_tf=btf, band_mode=opts.get("band", "Weekly (EOD)"),
                 at=datetime.now(IST), scanned=len(jobs))
 
 
@@ -1925,7 +2133,7 @@ def sheet_html(df: pd.DataFrame, dark: bool = False, show_mcap=True, min_mcap=50
     cols = ["Equity (Cash)", "Current-Month Future", "TF", "Zone Side", "Pattern", "Status",
             "Multi-TF Highlight", "Proximal (₹)", "Distal (₹)", "Current LTP", "Distance"]
     if extra:
-        cols += ["Score", "SL", "T1", "XRPT", "Qty"]
+        cols += ["Score", "SL", "T1", "XRPT", "Qty", "Range Low", "Range High"]
         if show_mcap:
             cols += ["Mkt Cap (₹Cr)"]
 
@@ -1972,6 +2180,10 @@ def sheet_html(df: pd.DataFrame, dark: bool = False, show_mcap=True, min_mcap=50
                 f'<td class="num">{float(r["tp"]):,.2f}</td>',
                 f'<td class="num">1:{float(r["xrpt_rr"]):.2f}</td>',
                 f'<td class="num">{int(r["qty"])}</td>',
+                f'<td class="num gs-sm">{float(r.get("band_low") or float("nan")):,.2f}</td>'
+                if pd.notna(r.get("band_low")) else '<td class="num gs-sm">—</td>',
+                f'<td class="num gs-sm">{float(r.get("band_high") or float("nan")):,.2f}</td>'
+                if pd.notna(r.get("band_high")) else '<td class="num gs-sm">—</td>',
             ]
             if show_mcap:
                 mv = r.get("mcap_cr", float("nan"))
@@ -1984,37 +2196,37 @@ def sheet_html(df: pd.DataFrame, dark: bool = False, show_mcap=True, min_mcap=50
                                  f'{"✓" if ok else "✗"}</span></td>')
         body.append(f'<tr><td class="gs-rn">{n}</td>' + "".join(cells) + "</tr>")
 
-    more = ""
-    if len(df) > len(d):
-        more = (f'<div class="gs-bar">… और {len(df) - len(d)} पंक्तियाँ — CSV डाउनलोड करें</div>')
     return ('<div class="gs-wrap"><div class="gs-scroll"><table class="gs">'
             f'<thead><tr><th class="gs-rn"></th>{head}</tr></thead>'
-            f'<tbody>{"".join(body)}</tbody></table></div></div>{more}')
+            f'<tbody>{"".join(body)}</tbody></table></div></div>')
 
 
 # ---------------------------------------------------------------------------
 # 4 · स्कैन के लिए यूनिवर्स
 # ---------------------------------------------------------------------------
+def all_fno() -> List[str]:
+    """NSE की पूरी F&O सूची (कैश के साथ) — न मिले तो fallback।"""
+    try:
+        u = cached_fno()
+    except Exception:                                            # noqa: BLE001
+        u = None
+    return list(dict.fromkeys(u)) if u else list(dict.fromkeys(FALLBACK_FNO))
+
+
 def pick_symbols(tb: dict):
-    txt = (tb.get("symbols_txt") or "").strip()
+    txt = (tb.get("symbols_txt") or "").strip().replace("/", ",")
     if txt:
         return [s.strip().upper() for s in txt.replace("\n", ",").split(",") if s.strip()]
     uni = tb["universe"]
     if uni == "NIFTY 50":
         return list(dict.fromkeys(NIFTY50))
-    if uni == "NIFTY 50 + F&O":
-        try:
-            u = list(live_fno_universe())
-        except Exception:                                        # noqa: BLE001
-            u = []
-        return list(dict.fromkeys(list(NIFTY50) + (u or list(FALLBACK_FNO))))
+    if uni == "Global Instruments":
+        return list(dict.fromkeys(GLOBAL_SYMBOLS))
+    if uni == "NSE All + Global":
+        return list(dict.fromkeys(all_fno() + GLOBAL_SYMBOLS))
     if uni == "अपनी सूची":
         return []
-    try:                                                          # "NSE All F&O"
-        u = live_fno_universe()
-        return list(dict.fromkeys(u)) if u else list(dict.fromkeys(FALLBACK_FNO))
-    except Exception:                                            # noqa: BLE001
-        return list(dict.fromkeys(FALLBACK_FNO))
+    return all_fno()                                              # "NSE All F&O"
 
 
 # ---------------------------------------------------------------------------
@@ -2033,15 +2245,9 @@ def main():
     if not deps_guard():
         return
 
-    st.markdown('<div class="hero"><h1>📐 ज़ोन MTF स्कैनर — KTP नियम (Pine v6)</h1>'
-                '<span>1-2-4 ढाँचा · CBLI · Formation · White-area · Covered leg-out · '
-                'Maturity · DATR बफ़र · XRPT · Quality score · MTF — स्कैन: सभी 13 TF, '
-                'आपकी दी हुई range में</span></div>', unsafe_allow_html=True)
-
     tb = top_bar()
     inp, uo = pine_panel()
     dark = is_dark()
-    rng = tb["range_pct"]
 
     # ── स्कैन ────────────────────────────────────────────────────────────
     if tb["go"]:
@@ -2052,24 +2258,17 @@ def main():
         if not syms:
             st.error("कोई स्क्रिप्ट नहीं चुनी — ऊपर यूनिवर्स चुनें या स्क्रिप्ट बॉक्स में नाम लिखें।")
         else:
-            ph = st.empty()
-            pbar = st.progress(0.0, text=f"{len(syms)} स्क्रिप्ट × {len(tb['tfs'])} TF — डेटा लाया जा रहा है…")
-            opts = dict(tfs=tb["tfs"], peers=uo["peers"], range_pct=rng,
+            opts = dict(tfs=tb["tfs"], peers=uo["peers"], band=tb["band"],
                         universe=tb["universe"], custom=tb["symbols_txt"])
-            res = run_scan(syms, inp, opts, ph, pbar)
-            pbar.empty()
-            ph.empty()
+            with st.spinner(f"{len(syms)} स्क्रिप्ट · {len(tb['tfs'])} TF स्कैन हो रहा है…"):
+                res = run_scan(syms, inp, opts)
             res.update(inputs=inp, opts=opts, ui=uo, symbols=syms)
             annotate(res, uo["peers"])
             st.session_state["scan"] = res
-            st.toast(f"स्कैन पूरा — {len(res['rows'])} ज़ोन", icon="✅")
 
     res = st.session_state.get("scan")
     if not res:
-        st.info("⬆️ ऊपर यूनिवर्स / TF चुनें और **⚡ Scan** दबाएँ — स्कैन सभी 13 time frame पर, "
-                "आपकी दी हुई range में चलेगा।")
-        with st.expander("Pine v6 नियम — संक्षेप में", expanded=True):
-            st.markdown(PINE_HELP)
+        st.caption("⚡ Scan दबाएँ")
         return
 
     df_all: pd.DataFrame = res["rows"]
@@ -2081,17 +2280,18 @@ def main():
                    "(minBaseCount / legOutToBaseSizeMult / minValidScore)।")
         return
 
-    # market cap (सिर्फ़ दिखाने के लिए — Pine minMcapCr)
-    if uo.get("show_mcap") and "mcap_cr" not in df_all.columns:
-        try:
-            caps = market_caps(sorted(df_all["symbol"].unique()))
-            df_all["mcap_cr"] = df_all["symbol"].map(caps)
-            res["rows"] = df_all
-        except Exception:                                        # noqa: BLE001
-            df_all["mcap_cr"] = np.nan
+
+    # ── स्कैन रेंज: चुनी हुई EOD candle का High+ATR14 … Low−ATR14 बैंड ──
+    bands = res.get("bands") or {}
+    if bands:
+        lo = df_all["symbol"].map(lambda x: (bands.get(x) or {}).get("low", -np.inf))
+        hi = df_all["symbol"].map(lambda x: (bands.get(x) or {}).get("high", np.inf))
+        df_all = df_all[(df_all["prox"] >= lo) & (df_all["prox"] <= hi)].copy()
+        df_all["band_low"] = df_all["symbol"].map(lambda x: (bands.get(x) or {}).get("low"))
+        df_all["band_high"] = df_all["symbol"].map(lambda x: (bands.get(x) or {}).get("high"))
 
     # ── टूलबार के फ़िल्टर (बिना दोबारा स्कैन) ───────────────────────────
-    f = df_all[df_all["dist_pct"] <= rng].copy()
+    f = df_all.copy()
     if tb["side"] != "All":
         f = f[f["side"] == tb["side"]]
     if tb["status"] != "All":
@@ -2108,34 +2308,38 @@ def main():
             st.write(pd.DataFrame({"स्क्रिप्ट": list(res["errs"]),
                                    "कारण": list(res["errs"].values())}))
 
-    # ── शीट कंट्रोल पंक्ति ──────────────────────────────────────────────
-    n_mtf = int((f["mtf_n"] >= 1).sum()) if "mtf_n" in f else 0
-    c1, c2, c3, c4 = cols([3.4, 1.35, .85, .85])
-    c1.markdown(
-        f'<div class="gs-bar"><b>Sheet1</b> · {len(f)} पंक्तियाँ · '
-        f'{res["scanned"]} स्क्रिप्ट · {len(df_all)} ज़ोन · '
-        f'Fresh+Tested {int(f["state"].isin(["Fresh", "Triggered"]).sum())} · '
-        f'HQ ★{int(f["hq"].sum())} · Multi-TF {n_mtf} · '
-        f'{res["at"]:%d-%b %H:%M} IST · रेंज ±{rng:.1f}%</div>',
-        unsafe_allow_html=True)
-    extra_cols = c2.checkbox("अतिरिक्त कॉलम (Score · SL · T1)", value=False,
-                             key="in_extra", help="स्क्रीनशॉट वाले 11 कॉलम + Pine के अंक")
+    # ── शीट पंक्ति: सिर्फ़ कॉलम-टॉगल + डाउनलोड (कोई डिस्क्रिप्शन नहीं) ──
+    c1, c2, c3, c4 = cols([.9, .9, 3.2, 1.0])
+    with c1:
+        extra_cols = st.toggle("➕ कॉलम", value=False, key="in_extra")
     tbl = zone_table(f, uo.get("show_mcap", True), uo.get("min_mcap", 50000.0))
-    put(c3, "download_button", "⬇️ CSV",
+    put(c2, "download_button", "⬇️ CSV",
         tbl.to_csv(index=False).encode("utf-8-sig"),
         file_name=f"zone_mtf_{datetime.now(IST):%Y%m%d_%H%M}.csv",
         mime="text/csv")
+    with c3:
+        if extra_cols and uo.get("show_mcap") and not f.empty:
+            syms_vis = tuple(sorted(f["symbol"].unique())[:120])
+            try:
+                caps = cached_caps(syms_vis)
+                f["mcap_cr"] = f["symbol"].map(caps)
+            except Exception:                                    # noqa: BLE001
+                f["mcap_cr"] = np.nan
     put(c4, "download_button", "⬇️ TSV",
         tbl.to_csv(index=False, sep="\t").encode("utf-8-sig"),
         file_name=f"zone_mtf_{datetime.now(IST):%Y%m%d_%H%M}.tsv",
         mime="text/tab-separated-values")
 
     if f.empty:
-        st.warning("इन फ़िल्टर पर कोई ज़ोन नहीं — टूलबार में Zone Side / Status / रेंज ढीले करें।")
+        st.caption("— कोई ज़ोन नहीं —")
     else:
+        try:
+            scale = float(max(1.0, f["dist_pct"].quantile(0.90)))
+        except Exception:                                        # noqa: BLE001
+            scale = 5.0
         st.markdown(sheet_html(f, dark, uo.get("show_mcap", True),
                                uo.get("min_mcap", 50000.0), extra=extra_cols,
-                               range_pct=rng), unsafe_allow_html=True)
+                               range_pct=scale), unsafe_allow_html=True)
 
     # ── आगे के टैब ──────────────────────────────────────────────────────
     t2, t3, t4, t5 = st.tabs(["🕯️ ज़ोन डिटेल + चार्ट", "🔗 MTF तालिका",
@@ -2188,7 +2392,7 @@ def main():
                 fut_url(zrow["symbol"], zrow["tf"]))
 
             try:
-                frames = load_frames([sym_pick], [tf_pick])
+                frames = cached_frames((sym_pick,), (tf_pick, "1d", "1w", "1M"))
                 df_tf = frames.get(sym_pick, {}).get(tf_pick)
             except Exception as e:                                # noqa: BLE001
                 df_tf = None
@@ -2206,7 +2410,6 @@ def main():
 
     # ---------- MTF ----------
     with t3:
-        st.caption("हर TF का नवीनतम मांग/आपूर्ति proximal (सिर्फ़ Fresh व Tested ज़ोन गिने जाते हैं)।")
         sym2 = st.selectbox("स्क्रिप्ट", sorted(res["snaps"].keys()), key="m_sym") \
             if res["snaps"] else None
         if sym2:
@@ -2251,7 +2454,6 @@ def main():
                     st.session_state["d_sym"] = pkk["symbol"]
                     st.session_state["d_tf"] = pkk["tf"]
                     st.session_state.pop("d_zone", None)
-            st.caption("पंक्ति क्लिक → 'ज़ोन डिटेल + चार्ट' टैब में वही ज़ोन।")
 
     # ---------- नियम ----------
     with t5:

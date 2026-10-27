@@ -104,8 +104,13 @@ TF_FETCH: Dict[str, Tuple[str, Optional[str]]] = {
     "1M": ("1mo", None),
 }
 
-TTL = {"1m": 300, "5m": 900, "15m": 900, "30m": 1200, "60m": 1800,
-       "1d": 3600, "1wk": 21600, "1mo": 21600}
+TTL = {"1m": 600, "5m": 900, "15m": 1800, "30m": 2700, "60m": 3600,
+       "1d": 14400, "1wk": 43200, "1mo": 86400}
+
+
+def _bar_ttl(base: str) -> float:
+    """डेटा कब तक ताज़ा माना जाए — बड़ा TF, लंबा कैश (बार-बार डाउनलोड नहीं)।"""
+    return float(TTL.get(base, 1800))
 
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
@@ -402,7 +407,7 @@ def _download_base(symbols: Sequence[str], base: str) -> Dict[str, pd.DataFrame]
     """Ek base interval ke liye bulk download (yahi sabse tez raasta hai)."""
     interval, period = BASE_SPEC[base]
     key = _ckey("dl", base, period, tuple(sorted(_ticker(x) for x in symbols)))
-    cached = _load(key, TTL.get(base, 300))
+    cached = _load(key, _bar_ttl(base))
     if cached is not None:
         return cached
     if yf is None:
@@ -883,7 +888,8 @@ STATE_FRESH, STATE_TESTED, STATE_BROKEN = "Fresh", "Tested", "Broken"
 
 
 def engine(df: pd.DataFrame, I: PineInputs, tf: str, htf_daily: Optional[pd.DataFrame] = None,
-           return_all: bool = False, want_snapshot: bool = True) -> List[dict]:
+           return_all: bool = False, want_snapshot: bool = True,
+           snap_out: Optional[dict] = None) -> List[dict]:
     """Pine के chart engine जैसा — हर बार पर नया ज़ोन, फिर state update।
 
     return_all=True → Broken ज़ोन भी लौटें (गिनती/दिखाने के लिए)।
@@ -1001,6 +1007,8 @@ def engine(df: pd.DataFrame, I: PineInputs, tf: str, htf_daily: Optional[pd.Data
         z["atr_now"] = float(S.atr[-1]) if np.isfinite(S.atr[-1]) else float("nan")
     snap = snap_prev if want_snapshot else snap_last
     _LAST_SNAP["snap"] = snap
+    if snap_out is not None:
+        snap_out["snap"] = snap
     return out
 
 
@@ -1116,6 +1124,45 @@ def eod_band(df: Optional[pd.DataFrame], tf: str, atr_period: int = 14) -> Optio
 # ---------------------------------------------------------------------------
 # 8. SCAN — एक symbol के सभी TF + MTF snapshot
 # ---------------------------------------------------------------------------
+_EMPTY_SNAP = {"demand": None, "supply": None, "demand_time": 0, "supply_time": 0}
+_ZCACHE: Dict[tuple, tuple] = {}
+_ZVER = "z3"           # इंजन बदले तो बढ़ाएँ — पुराना कैश अपने आप बेकार
+
+
+def _inputs_hash(I: PineInputs) -> str:
+    blob = json.dumps(I.__dict__, default=str, sort_keys=True)
+    return hashlib.sha1(blob.encode()).hexdigest()[:12]
+
+
+def _bar_id(df: pd.DataFrame) -> int:
+    """उस TF के आख़िरी बार की पहचान — नया बार बना तो बदल जाएगी।"""
+    try:
+        return int(pd.Timestamp(df.index[-1]).value // 10 ** 9)
+    except Exception:                                          # noqa: BLE001
+        return 0
+
+
+def _zones_for(symbol: str, tf: str, df: pd.DataFrame, I: PineInputs, ihash: str,
+               store: dict):
+    """Pine इंजन का नतीजा — जब तक उसी TF का नया बार न बने, दोबारा नहीं चलता।
+
+    (1w का ज़ोन हफ़्ते भर, 1d का दिन भर, 1M का महीने भर वही रहता है।)
+    """
+    bid = _bar_id(df)
+    ent = store.get(tf)
+    if isinstance(ent, dict) and ent.get("bid") == bid and ent.get("rows") is not None:
+        return ent["rows"], (ent.get("snap") or _EMPTY_SNAP), True
+    mem = _ZCACHE.get((symbol, tf, ihash))
+    if mem and mem[0] == bid:
+        return mem[1], mem[2], True
+    bag: dict = {}
+    zs = engine(df, I, tf, return_all=False, snap_out=bag)
+    snap = bag.get("snap") or dict(_EMPTY_SNAP)
+    _ZCACHE[(symbol, tf, ihash)] = (bid, zs, snap)
+    store[tf] = {"bid": bid, "rows": zs, "snap": snap}
+    return zs, snap, False
+
+
 def scan_symbol(symbol: str,
                 frames: Dict[str, pd.DataFrame],
                 daily: Optional[pd.DataFrame],
@@ -1124,6 +1171,10 @@ def scan_symbol(symbol: str,
                 tfs: Sequence[str] = ALL_TFS,
                 ltp: Optional[float] = None) -> dict:
     I = inputs.sanitized()
+    ihash = _inputs_hash(I)
+    skey = _ckey(_ZVER, ihash, symbol)
+    store = _load(skey, 7 * 86400) or {}
+    dirty = False
     per_tf: Dict[str, List[dict]] = {}
     atr_map: Dict[str, float] = {}
     snaps: Dict[str, dict] = {}
@@ -1132,20 +1183,21 @@ def scan_symbol(symbol: str,
         if df is None or len(df) < 30:
             per_tf[tf] = []
             atr_map[tf] = float("nan")
-            snaps[tf] = {"demand": None, "supply": None, "demand_time": 0, "supply_time": 0}
+            snaps[tf] = dict(_EMPTY_SNAP)
             continue
-        zs = engine(df, I, tf, return_all=False)
-        for z in zs:
-            z["symbol"] = symbol
-        per_tf[tf] = zs
-        snaps[tf] = _LAST_SNAP.get("snap") or {"demand": None, "supply": None,
-                                               "demand_time": 0, "supply_time": 0}
+        zs, snap, hit = _zones_for(symbol, tf, df, I, ihash, store)
+        dirty = dirty or not hit
+        per_tf[tf] = [dict(z) for z in zs]
+        snaps[tf] = snap
         atr_map[tf] = _atr_last(df, I.atrPeriod)
+    if dirty:
+        _save(skey, store)
 
     rows: List[dict] = []
     px = ltp if ltp else _last_close(frames, tfs)
     for tf in tfs:
         for z in per_tf[tf]:
+            z["symbol"] = symbol
             z["mtf_n"], z["mtf_tfs"] = mtf_hits(z["demand"], z["prox"], z["dist"],
                                                 z["atr_now"], tf, snaps)
             z["mtf"] = z["mtf_n"] >= 1
@@ -1207,8 +1259,44 @@ def put(col, fn, *a, **k):
         return getattr(col, fn)(*a, use_container_width=True, **k)
 
 
-def _html(src: str) -> None:
+try:
+    import inspect as _inspect
+    _JS_SORT = "unsafe_allow_javascript" in _inspect.signature(st.html).parameters
+except Exception:                                              # noqa: BLE001
+    _JS_SORT = False
+
+SORT_COLS = ["दूरी %", "स्कोर", "स्क्रिप्ट", "TF", "पैटर्न", "स्थिति", "Proximal",
+             "Distal", "LTP", "SL", "T1", "Qty", "Mkt Cap"]
+_SORT_MAP = {"दूरी %": "dist_pct", "स्कोर": "score", "स्क्रिप्ट": "symbol", "TF": "tf",
+             "पैटर्न": "pattern", "स्थिति": "state", "Proximal": "prox", "Distal": "dist",
+             "LTP": "ltp", "SL": "sl", "T1": "tp", "Qty": "qty", "Mkt Cap": "mcap_cr"}
+
+
+def sort_df(df: pd.DataFrame, col: str, desc: bool) -> pd.DataFrame:
+    """fallback — जब सिर-क्लिक सॉर्ट (JS) उपलब्ध न हो।"""
+    key = _SORT_MAP.get(col, "dist_pct")
+    if key not in df.columns:
+        return df
+    out = df.copy()
+    if key == "tf":
+        out["_k"] = out["tf"].map(lambda t: TF_SECONDS.get(str(t), 0))
+        key = "_k"
+    try:
+        return out.sort_values(key, ascending=not desc, kind="mergesort").reset_index(drop=True)
+    except Exception:                                          # noqa: BLE001
+        return out
+
+
+def _html(src: str, js: bool = False) -> None:
     """कच्चा HTML/CSS — markdown पार्सर से नहीं गुज़रता।"""
+    if js:
+        try:
+            st.html(src, unsafe_allow_javascript=True)
+            return
+        except TypeError:
+            pass
+        except Exception:                                      # noqa: BLE001
+            pass
     try:
         st.html(src)
     except Exception:                                          # noqa: BLE001
@@ -1229,7 +1317,7 @@ def is_dark() -> bool:
     return False
 
 
-SHEET_CSS = """
+SHEET_CSS = r"""
 .gs-wrap{border-radius:6px;overflow:hidden;}
 .gs-scroll{max-height:min(72vh,760px);overflow:auto;}
 table.gs{border-collapse:separate;border-spacing:0;width:100%;
@@ -1251,6 +1339,11 @@ table.gs a.fut{font-weight:700;}
           vertical-align:middle;margin-right:6px;}
 .gs-fill{display:block;height:6px;border-radius:4px;}
 .gs-sm{font-size:11px;opacity:.85;}
+table.gs thead th.srt{cursor:pointer;}
+table.gs thead th.srt:hover{filter:brightness(1.18);}
+table.gs thead th.srt::after{content:"\21C5";font-size:9px;opacity:.40;margin-left:5px;}
+table.gs thead th.srt.s-asc::after{content:"\25B2";opacity:.95;}
+table.gs thead th.srt.s-desc::after{content:"\25BC";opacity:.95;}
 """
 
 SHEET_CSS_DARK = """
@@ -1292,6 +1385,24 @@ h1,h2,h3{letter-spacing:.2px;}
     _html("<style>" + base + SHEET_CSS + extra + "</style>")
 
 
+def hard_reset():
+    """सारा कैश (डेटा + ज़ोन) साफ़ — अगला स्कैन बिल्कुल ताज़ा।"""
+    try:
+        clear_cache()
+    except Exception:                                          # noqa: BLE001
+        pass
+    try:
+        _ZCACHE.clear()
+    except Exception:                                          # noqa: BLE001
+        pass
+    for fn in (cached_scan, cached_frames, cached_caps, cached_fno):
+        try:
+            fn.clear()
+        except Exception:                                      # noqa: BLE001
+            pass
+    st.session_state.pop("scan", None)
+
+
 def reset_inputs():
     for k in list(st.session_state.keys()):
         if str(k).startswith("in_"):
@@ -1331,9 +1442,10 @@ def top_bar():
 def pine_panel(slot=None):
     host = slot if slot is not None else st
     with host.expander("⚙️ इनपुट", expanded=False):
-        b1, b2, _ = st.columns([1, 1, 4])
+        b1, b2, b3, _ = st.columns([1, 1, 1.15, 3])
         put(b1, "button", "↺ Pine default", on_click=reset_inputs)
         put(b2, "button", "🔓 ढीला", on_click=preset_loose)
+        put(b3, "button", "♻️ कैश साफ़", on_click=hard_reset)
 
         c1, c2, c3, c4 = st.columns(4)
         with c1:
@@ -1432,7 +1544,7 @@ def cached_fno():
         return list(FALLBACK_FNO)
 
 
-@st.cache_resource(ttl=1800, max_entries=4, show_spinner=False)
+@st.cache_resource(ttl=3600, max_entries=4, show_spinner=False)
 def cached_frames(symbols: tuple, tfs: tuple):
     return load_frames(list(symbols), list(tfs))
 
@@ -1452,7 +1564,7 @@ def run_scan(symbols, inp, opts):
                                    for k, v in opts.items()}, default=str, sort_keys=True))
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def cached_scan(symbols: tuple, inp_key: str, opts_key: str):
     inp = PineInputs(**json.loads(inp_key)).sanitized()
     return _scan_all(list(symbols), inp, json.loads(opts_key))
@@ -1537,18 +1649,94 @@ def _dist_bar(pct: float, rng: float) -> str:
             f'background:{col}"></span></span><span class="gs-sm">{pct:.2f}%</span>')
 
 
+_SORT_JS = r"""
+<script>
+(function(){
+  function num(v){
+    return (v !== null && v !== '' && /^[-+]?\d*\.?\d+$/.test(v)) ? parseFloat(v) : null;
+  }
+  function val(td){
+    if(!td) return '';
+    var v = td.getAttribute('data-v');
+    return (v === null) ? td.textContent.trim() : v;
+  }
+  function wire(t){
+    if(t.dataset.srtWired === '1') return;
+    t.dataset.srtWired = '1';
+    var ths = Array.prototype.slice.call(t.querySelectorAll('thead th'));
+    var tb = t.querySelector('tbody');
+    if(!tb) return;
+    ths.forEach(function(th, idx){
+      if(!th.hasAttribute('data-sort')) return;
+      th.addEventListener('click', function(){
+        var dir = th.classList.contains('s-asc') ? 'desc' : 'asc';
+        ths.forEach(function(o){ o.classList.remove('s-asc','s-desc'); });
+        th.classList.add(dir === 'asc' ? 's-asc' : 's-desc');
+        var rows = Array.prototype.slice.call(tb.querySelectorAll('tr'));
+        rows.sort(function(a, b){
+          var av = val(a.cells[idx]), bv = val(b.cells[idx]);
+          var an = num(av), bn = num(bv), c;
+          if(an !== null && bn !== null){ c = an - bn; }
+          else { c = String(av).localeCompare(String(bv), 'en', {numeric:true}); }
+          return dir === 'asc' ? c : -c;
+        });
+        rows.forEach(function(r, i){
+          tb.appendChild(r);
+          var rn = r.cells[0];
+          if(rn && rn.classList.contains('gs-rn')){
+            rn.textContent = i;
+            rn.setAttribute('data-v', i);
+          }
+        });
+      });
+    });
+  }
+  function boot(){ Array.prototype.forEach.call(document.querySelectorAll('table.gs'), wire); }
+  boot(); setTimeout(boot, 250); setTimeout(boot, 1000);
+})();
+</script>
+"""
+
+_STATE_ORDER = {"Fresh": 0, "Tested": 1, "Broken": 2}
+
+
+def _th(label: str, sortable: bool = True, dir0: str = "") -> str:
+    if not sortable:
+        return f"<th>{label}</th>"
+    cls = "srt" + (f" s-{dir0}" if dir0 else "")
+    d = f' data-dir="{dir0}"' if dir0 else ""
+    return f'<th class="{cls}" data-sort="1"{d}>{label}</th>'
+
+
+def _td(inner: str, dv=None, cls: str = "", style: str = "") -> str:
+    c = f' class="{cls}"' if cls else ""
+    st = f' style="{style}"' if style else ""
+    if dv is None:
+        return f"<td{c}{st}>{inner}</td>"
+    if isinstance(dv, float):
+        dv = f"{dv:.4f}"
+    return f'<td{c}{st} data-v="{dv}">{inner}</td>'
+
+
 def sheet_html(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0, extra=False,
                range_pct: float = 3.0, max_rows: int = 600) -> str:
+    """Google-Sheets जैसी टेबल — हर हेडर पर क्लिक करते ही उस कॉलम पर सॉर्ट (▲/▼)।"""
     if df is None or df.empty:
         return ""
     d = df.head(max_rows)
-    cols_ = ["Equity (Cash)", "Current-Month Future", "TF", "Zone Side", "Pattern", "Status",
-             "Multi-TF Highlight", "Proximal (₹)", "Distal (₹)", "Current LTP", "Distance"]
+    heads = [_th("", sortable=False)]
+    heads += [
+        _th("Equity (Cash)"), _th("Current-Month Future"),
+        _th("TF"), _th("Zone Side"), _th("Pattern"), _th("Status"),
+        _th("Multi-TF Highlight"),
+        _th("Proximal (₹)"), _th("Distal (₹)"), _th("Current LTP"),
+        _th("Distance", dir0="asc"),
+    ]
     if extra:
-        cols_ += ["Score", "SL", "T1", "Qty", "Range Low", "Range High"]
+        heads += [_th("Score"), _th("SL"), _th("T1"), _th("Qty"),
+                  _th("Range Low"), _th("Range High")]
         if show_mcap:
-            cols_ += ["Mkt Cap (₹Cr)"]
-    head = "".join(f"<th>{c}</th>" for c in cols_)
+            heads += [_th("Mkt Cap (₹Cr)")]
     body = []
     for n, (_, r) in enumerate(d.iterrows(), start=0):
         meta = sym_meta(r["symbol"])
@@ -1558,7 +1746,8 @@ def sheet_html(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0, extra=False,
         dem = bool(r["demand"])
         dot = ('<span class="gs-dot gs-dot-d">●</span>' if dem
                else '<span class="gs-dot gs-dot-s">●</span>')
-        side = f'{dot} <span class="{"gs-dot-d" if dem else "gs-dot-s"}">{"Demand" if dem else "Supply"}</span>'
+        side = (f'{dot} <span class="{"gs-dot-d" if dem else "gs-dot-s"}">'
+                f'{"Demand" if dem else "Supply"}</span>')
         state = str(r["state"])
         mtf_n = int(r.get("mtf_n", 0) or 0)
         mtf_cell = (f'<span title="पुष्टि करने वाले TF: {r.get("mtf_tfs", "")}">'
@@ -1567,47 +1756,50 @@ def sheet_html(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0, extra=False,
         ltp = float(r["ltp"]) if pd.notna(r.get("ltp")) else float("nan")
         ltp_txt = f"₹{ltp:,.2f}" if np.isfinite(ltp) else "—"
         cells = [
-            f'<td><a href="{u_cash}" target="_blank" rel="noopener" '
-            f'title="TradingView · {meta.get("cash")} · {r["tf"]}">{r["symbol"]}</a></td>',
-            (f'<td><a class="fut" href="{u_fut}" target="_blank" rel="noopener" '
-             f'title="TradingView · {meta.get("fut")} · {r["tf"]}">{fut_lbl}</a></td>'
-             if meta.get("fut") else '<td class="gs-sm">—</td>'),
-            f'<td>{r["tf"]}</td>',
-            f'<td>{side}</td>',
-            f'<td class="ctr">{r["pattern"]}</td>',
-            f'<td><span class="{_STATE_CLS.get(state, "")}">{state}</span></td>',
-            f'<td>{mtf_cell}</td>',
-            f'<td class="num">{float(r["prox"]):,.2f}</td>',
-            f'<td class="num">{float(r["dist"]):,.2f}</td>',
-            f'<td class="num">{ltp_txt}</td>',
-            f'<td>{_dist_bar(float(r["dist_pct"]), range_pct)}</td>',
+            _td(str(n), n, "gs-rn"),
+            _td(f'<a href="{u_cash}" target="_blank" rel="noopener" '
+                f'title="TradingView · {meta.get("cash")} · {r["tf"]}">{r["symbol"]}</a>',
+                r["symbol"]),
+            (_td(f'<a class="fut" href="{u_fut}" target="_blank" rel="noopener" '
+                 f'title="TradingView · {meta.get("fut")} · {r["tf"]}">{fut_lbl}</a>', fut_lbl)
+             if meta.get("fut") else _td('<span class="gs-sm">—</span>', "~")),
+            _td(str(r["tf"]), TF_SECONDS.get(str(r["tf"]), 0)),
+            _td(side, "Demand" if dem else "Supply"),
+            _td(str(r["pattern"]), r["pattern"], "ctr"),
+            _td(f'<span class="{_STATE_CLS.get(state, "")}">{state}</span>',
+                _STATE_ORDER.get(state, 9)),
+            _td(mtf_cell, mtf_n),
+            _td(f'{float(r["prox"]):,.2f}', float(r["prox"]), "num"),
+            _td(f'{float(r["dist"]):,.2f}', float(r["dist"]), "num"),
+            _td(ltp_txt, ltp if np.isfinite(ltp) else -1e18, "num"),
+            _td(_dist_bar(float(r["dist_pct"]), range_pct), float(r["dist_pct"])),
         ]
         if extra:
             sc = float(r["score"])
             cells += [
-                f'<td class="ctr" style="background:{_score_bg(sc)};color:#111;font-weight:700">'
-                f'{int(sc)}{" ★" if r["hq"] else ""}</td>',
-                f'<td class="num">{float(r["sl"]):,.2f}</td>',
-                f'<td class="num">{float(r["tp"]):,.2f}</td>',
-                f'<td class="num">{int(r["qty"])}</td>',
-                (f'<td class="num gs-sm">{float(r["band_low"]):,.2f}</td>'
-                 if pd.notna(r.get("band_low")) else '<td class="num gs-sm">—</td>'),
-                (f'<td class="num gs-sm">{float(r["band_high"]):,.2f}</td>'
-                 if pd.notna(r.get("band_high")) else '<td class="num gs-sm">—</td>'),
+                _td(f'{int(sc)}{" ★" if r["hq"] else ""}', sc, "ctr",
+                    style=f"background:{_score_bg(sc)};color:#111;font-weight:700"),
+                _td(f'{float(r["sl"]):,.2f}', float(r["sl"]), "num"),
+                _td(f'{float(r["tp"]):,.2f}', float(r["tp"]), "num"),
+                _td(f'{int(r["qty"])}', int(r["qty"]), "num"),
+                (_td(f'{float(r["band_low"]):,.2f}', float(r["band_low"]), "num gs-sm")
+                 if pd.notna(r.get("band_low")) else _td("—", -1e18, "num gs-sm")),
+                (_td(f'{float(r["band_high"]):,.2f}', float(r["band_high"]), "num gs-sm")
+                 if pd.notna(r.get("band_high")) else _td("—", -1e18, "num gs-sm")),
             ]
             if show_mcap:
                 mv = r.get("mcap_cr", float("nan"))
                 if mv is None or (isinstance(mv, float) and pd.isna(mv)):
-                    cells.append('<td class="num gs-sm">—</td>')
+                    cells.append(_td('<span class="gs-sm">—</span>', -1e18, "num gs-sm"))
                 else:
                     ok = float(mv) >= float(min_mcap)
-                    cells.append(f'<td class="num">{float(mv):,.0f} '
-                                 f'<span class="{"gs-ok" if ok else "gs-no"}">'
-                                 f'{"✓" if ok else "✗"}</span></td>')
-        body.append(f'<tr><td class="gs-rn">{n}</td>' + "".join(cells) + "</tr>")
+                    cells.append(_td(
+                        f'{float(mv):,.0f} <span class="{"gs-ok" if ok else "gs-no"}">'
+                        f'{"✓" if ok else "✗"}</span>', float(mv), "num"))
+        body.append("<tr>" + "".join(cells) + "</tr>")
     return ('<div class="gs-wrap"><div class="gs-scroll"><table class="gs">'
-            f'<thead><tr><th class="gs-rn"></th>{head}</tr></thead>'
-            f'<tbody>{"".join(body)}</tbody></table></div></div>')
+            f'<thead><tr>{"".join(heads)}</tr></thead>'
+            f'<tbody>{"".join(body)}</tbody></table></div></div>' + _SORT_JS)
 
 
 def zone_table(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0) -> pd.DataFrame:
@@ -1748,6 +1940,14 @@ def _main():
 
     with ctrl[1]:
         extra_cols = st.toggle("➕ कॉलम", value=False, key="in_extra")
+    if not _JS_SORT:
+        with ctrl[4]:
+            s1, s2 = st.columns([2.3, 1])
+            _sc = s1.selectbox("क्रम", SORT_COLS, key="srt_col",
+                               label_visibility="collapsed")
+            _sd = s2.selectbox("दिशा", ["▲", "▼"], key="srt_dir",
+                               label_visibility="collapsed")
+            f = sort_df(f, _sc, _sd == "▼")
     if extra_cols and not f.empty:
         try:
             f["mcap_cr"] = f["symbol"].map(cached_caps(tuple(sorted(f["symbol"].unique())[:120])))
@@ -1768,7 +1968,7 @@ def _main():
         except Exception:                                        # noqa: BLE001
             scale = 3.0
         _html(sheet_html(f, uo.get("show_mcap", True), 50000.0, extra=extra_cols,
-                         range_pct=scale))
+                         range_pct=scale), js=_JS_SORT)
 
     # ── MTF (बंद खंड) ───────────────────────────────────────────────────
     with st.expander("🔗 MTF", expanded=False):

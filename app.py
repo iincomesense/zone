@@ -547,7 +547,7 @@ def stretch(fn, *a, **k):
 
 # ═══════════════════════════════════════════════════════════════════════
 #           f_candidate (boring 1..4, leg-out 1..3) · Power · Score/10 ·
-#           Fresh → Triggered → Broken/Covered/Exhausted · MTF snapshot
+#           Fresh → Tested (1st touch) → Broken (2nd touch / SL) · MTF snapshot
 # ═══════════════════════════════════════════════════════════════════════
 
 
@@ -568,33 +568,35 @@ class PineInputs:
     # ---- 0 · Capital, risk, buffer (SETS) ----
     accountCapital: float = 25000.0
     riskPct: float = 0.5
-    targetRR: float = 5.0
+    targetRR: float = 3.0
     hourlyRR: float = 3.0
-    monthlyRR: float = 10.0
+    monthlyRR: float = 3.0
+    target2RR: float = 5.0
     halfQty3: bool = True
     traderType: str = "Auto (25×)"
     bufferMode: str = "DATR % (course)"
     bufAggrPct: float = 2.0
-    bufDailyPct: float = 5.0
-    bufSwingPct: float = 10.0
+    bufDailyPct: float = 2.0
+    bufSwingPct: float = 2.0
     slBufferAtr: float = 0.1
     entryBuffer: bool = False
     # ---- 1 · Strictness & core candle rules ----
     strict: bool = False
     atrPeriod: int = 14
-    filledMinBody: float = 0.50
-    legInAtrMult: float = 1.0
-    legOutAtrMult: float = 1.0
+    filledMinBody: float = 0.60
+    legInAtrMult: float = 1.2
+    legOutAtrMult: float = 1.2
     boringAtrMult: float = 1.0
     minBaseCountInput: int = 1
     maxBaseCountInput: int = 3
-    legInToBaseSizeMult: float = 2.0
-    legOutToBaseSizeMult: float = 4.0
+    legInToBaseSizeMult: float = 1.5
+    legOutToBaseSizeMult: float = 2.5
+    legOutEachMinBody: float = 0.50
     maxLegOut: int = 3
     allowTwoLegOut: bool = True
     legOutJoinTolAtr: float = 0.25
     useCBLI: bool = True
-    cbliMode: str = "Body size >50% (lecture)"
+    cbliMode: str = "Covers >50% (notes)"
     cbliMaxPct: float = 0.50
     useFormation: bool = True
     formationTolAtr: float = 0.10
@@ -605,10 +607,11 @@ class PineInputs:
     powerMode: str = "All leg-outs (max 3)"
     powerMinRR: float = 3.0
     powerBestRR: float = 5.0
+    powerOnBody: bool = True
     # ---- 1B · Flexible rules (score) ----
-    useWhiteArea: bool = False
+    useWhiteArea: bool = True
     coreFresh: bool = True
-    coreOpposite: bool = False
+    coreOpposite: bool = True
     oppositeRR: float = 5.0
     corePlayground: bool = False
     playRR: float = 10.0
@@ -622,8 +625,9 @@ class PineInputs:
     useCoveredLegOut: bool = True
     coverPct: float = 0.50
     useMaturity: bool = True
+    maturityBars: int = 3
     immatureWithTrend: bool = False
-    useTimeRule: bool = True
+    useTimeRule: bool = False
     maxTouches: int = 3
     meltingReversalOnly: bool = True
     reRunDays: int = 30
@@ -664,6 +668,7 @@ class PineInputs:
         d["swingLeft"] = int(max(1, min(20, self.swingLeft)))
         d["swingRight"] = int(max(1, min(20, self.swingRight)))
         d["maxTouches"] = int(max(1, self.maxTouches))
+        d["maturityBars"] = int(max(0, self.maturityBars))
         d["maxStored"] = int(max(10, min(self.maxStored, 240)))
         d["scanBars"] = int(max(200, min(self.scanBars, 5000)))
         return PineInputs(**d)
@@ -889,7 +894,7 @@ def _candidate(p: int, bc: int, nout: int, S: _S, I: PineInputs):
         return (3, "Boring size 0")
     # ---- 4. 1-2-4 part 1 ----
     if in_range < I.legInToBaseSizeMult * base_size:
-        return (4, "1-2-4: leg-in < 2× boring")
+        return (4, f"1-2-4: leg-in < {I.legInToBaseSizeMult:g}× boring")
     # ---- 5. Leg-out: Filled + TR ≥ ATR ----
     demand, supply = bool(S.bull[fo]), bool(S.bear[fo])
     if not (demand or supply):
@@ -900,15 +905,20 @@ def _candidate(p: int, bc: int, nout: int, S: _S, I: PineInputs):
         return (5, "Leg-out not filled")
     # ---- 6. 3 तक leg-out (same colour, open ≈ prev close) ----
     out_high, out_low = h[fo], l[fo]
+    ob_hi, ob_lo = max(o[fo], c[fo]), min(o[fo], c[fo])          # leg-out body extent
     for k in range(fo + 1, p + 1):
         same = S.bull[k] if demand else S.bear[k]
         if (not same) or abs(o[k] - c[k - 1]) > I.legOutJoinTolAtr * atr[k - 1]:
             return (6, "Leg-outs not continuous")
+        if S.bp[k] < I.legOutEachMinBody:
+            return (6, "Leg-out wick ≥ 50%")
         out_high = max(out_high, h[k])
         out_low = min(out_low, l[k])
-    # ---- 7. 1-2-4 part 2 ----
-    if (out_high - out_low) < I.legOutToBaseSizeMult * base_size:
-        return (7, "1-2-4: leg-out < 4× boring")
+        ob_hi = max(ob_hi, o[k], c[k])
+        ob_lo = min(ob_lo, o[k], c[k])
+    # ---- 7. 1-2-4 part 2: leg-out body से body ≥ boring (wick से wick) × N ----
+    if (ob_hi - ob_lo) < I.legOutToBaseSizeMult * base_size:
+        return (7, f"1-2-4: leg-out < {I.legOutToBaseSizeMult:g}× boring")
     pat = ("RBR" if in_bull else "DBR") if demand else ("DBD" if in_bear else "RBD")
     reversal = pat in ("DBR", "RBD")
     # ---- 8. Formation of leg-out (DBR/RBD) ----
@@ -970,8 +980,10 @@ def _candidate(p: int, bc: int, nout: int, S: _S, I: PineInputs):
         cover=float(fo_top - I.coverPct * (fo_top - fo_bot)) if demand
         else float(fo_bot + I.coverPct * (fo_top - fo_bot)),
         xrpt=float(max(o[p], c[p]) if demand else min(o[p], c[p])),
-        pow_first=float(h[fo] if demand else l[fo]),
-        pow_all=float(out_high if demand else out_low),
+        pow_first=float((c[fo] if I.powerOnBody else h[fo]) if demand
+                        else (c[fo] if I.powerOnBody else l[fo])),
+        pow_all=float((ob_hi if I.powerOnBody else out_high) if demand
+                      else (ob_lo if I.powerOnBody else out_low)),
         white=bool(white_ok and form_ok), fav_colour=bool(any_bear if demand else any_bull),
         plus=bool(plus_b), long_out=bool((h[fo] - l[fo]) > I.legOutTooLong * in_range),
         notes_pass=notes_pass, inst=int(disp) + int(rel_vol) + int(sweep) + int(imb),
@@ -990,7 +1002,7 @@ def _pow_rr(cand: dict, I: PineInputs) -> float:
 # ---------------------------------------------------------------------------
 # 5. ENGINE — ज़ोन + states + MTF snapshot (Pine का chart engine)
 # ---------------------------------------------------------------------------
-STATE_FRESH, STATE_TRIG = "Fresh", "Triggered"
+STATE_FRESH, STATE_TRIG = "Fresh", "Tested"
 STATE_BROKEN, STATE_COVERED, STATE_IMMATURE = "Broken", "Covered", "Immature"
 STATE_SKIPPED, STATE_EXHAUSTED = "Skipped", "Exhausted"
 ALIVE_STATES = (STATE_FRESH, STATE_TRIG)
@@ -1126,7 +1138,7 @@ def engine(df: pd.DataFrame, I: PineInputs, tf: str, htf_daily: Optional[pd.Data
                     if risk <= 0:
                         break
                     tp = entry + risk * t1 if dem else entry - risk * t1
-                    t5 = entry + risk * 5 if dem else entry - risk * 5
+                    t5 = entry + risk * I.target2RR if dem else entry - risk * I.target2RR
                     xrr = ((cand["xrpt"] - entry) if dem else (entry - cand["xrpt"])) / risk
                     qty = int(math.floor(I.accountCapital * I.riskPct / 100.0 / risk))
                     if I.halfQty3 and bc >= 3:
@@ -1177,6 +1189,7 @@ def engine(df: pd.DataFrame, I: PineInputs, tf: str, htf_daily: Optional[pd.Data
                         sl=float(sl), tp=float(tp), t5=float(t5), risk=float(risk), qty=qty,
                         cover=cand["cover"], xrr=float(xrr), pow_rr=float(pw), best=bool(best),
                         room_tf=room, score_base=int(score_base), score=int(score_base),
+                        single_lo=bool(cand["nout"] == 1),
                         hq=False, pattern=cand["pattern"], category=cand["category"],
                         reversal=cand["category"] == "Reversal",
                         base_count=bc, leg_outs=cand["nout"], grade=_grade(bc),
@@ -1211,10 +1224,11 @@ def engine(df: pd.DataFrame, I: PineInputs, tf: str, htf_daily: Optional[pd.Data
                 dem = z["demand"]
                 hit_sl = (lo_ <= z["sl"]) if dem else (hi_ >= z["sl"])
                 in_z = (lo_ <= z["entry"]) if dem else (hi_ >= z["entry"])
+                touch = (lo_ <= z["prox"]) if dem else (hi_ >= z["prox"])
                 if z["state"] == STATE_FRESH:
-                    if in_z:
+                    if touch:
                         trend_now = act_now[0] if dem else act_now[1]
-                        if (eff_maturity and not _matured(tt, z, S, p)
+                        if (eff_maturity and p - z["created_bar"] < I.maturityBars
                                 and not (I.immatureWithTrend and trend_now)):
                             z["state"] = STATE_IMMATURE
                         elif I.useTimeRule and not _entry_allowed(tt, S, p, intraday):
@@ -1222,7 +1236,7 @@ def engine(df: pd.DataFrame, I: PineInputs, tf: str, htf_daily: Optional[pd.Data
                         elif hit_sl:
                             z["state"] = STATE_BROKEN
                         else:
-                            z["state"] = STATE_TRIG
+                            z["state"] = STATE_TRIG          # पहला टच → Tested
                             z["touches"] = 1
                             z["outside"] = False
                             z["entry_bar"] = p
@@ -1239,18 +1253,12 @@ def engine(df: pd.DataFrame, I: PineInputs, tf: str, htf_daily: Optional[pd.Data
                                 z["six"] = 1 if p - z["entry_bar"] + 1 <= 6 else -1
                         if not z["target_hit"] and z["six"] == 0 and p - z["entry_bar"] + 1 > 6:
                             z["six"] = -1
-                        if not in_z:
+                        if not touch:
                             z["outside"] = True
                         elif z["outside"]:
-                            z["touches"] += 1
+                            z["touches"] += 1             # दूसरा टच → Broken
                             z["outside"] = False
-                            limit = 1 if (I.coreFresh and not (z["reversal"] and z["target_hit"])) else I.maxTouches
-                            if z["touches"] > limit or (I.meltingReversalOnly and z["target_hit"]
-                                                        and not z["reversal"]):
-                                z["state"] = STATE_EXHAUSTED
-                            elif (z["target_hit"] and z["first_run"] is not None
-                                  and S.t[p] - z["first_run"] > I.reRunDays * 86_400_000):
-                                z["old_retest"] = True
+                            z["state"] = STATE_BROKEN
                 if z["state"] == STATE_BROKEN and z["broken_at"] is None:
                     z["broken_at"] = p
                 if z["state"] not in ALIVE_STATES:
@@ -1433,7 +1441,7 @@ def eod_band(df: Optional[pd.DataFrame], tf: str, atr_period: int = 14) -> Optio
 # ---------------------------------------------------------------------------
 _EMPTY_SNAP = {"demand": None, "supply": None, "demand_time": 0, "supply_time": 0}
 _ZCACHE: Dict[tuple, tuple] = {}
-_ZVER = "z7"           # इंजन बदले तो बढ़ाएँ — पुराना कैश अपने आप बेकार
+_ZVER = "z8"           # इंजन बदले तो बढ़ाएँ — पुराना कैश अपने आप बेकार
 
 
 def _inputs_hash(I: PineInputs) -> str:
@@ -1591,13 +1599,13 @@ def _last_close(frames: Dict[str, pd.DataFrame], tfs: Sequence[str]) -> float:
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v7 · KTP rules · 2026-10-27"
+APP_BUILD = "v8 · KTP rules (आपके चुने नियम) · 2026-10-27"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
 
-STATE_HI = {"Fresh": "Fresh", "Triggered": "Triggered"}
-ALL_STATES = ["Fresh", "Triggered"]
+STATE_HI = {"Fresh": "Fresh", "Tested": "Tested"}
+ALL_STATES = ["Fresh", "Tested"]
 SIDE_HI = {"Demand": "मांग (Demand)", "Supply": "आपूर्ति (Supply)"}
 CAT_HI = {"Reversal": "पलटाव", "Continuation": "निरंतरता"}
 
@@ -1607,7 +1615,7 @@ BAND_TF = {"Daily (EOD)": "1d", "Weekly (EOD)": "1w", "Monthly (EOD)": "1M"}
 TV_TF = {"3m": "3", "5m": "5", "10m": "10", "15m": "15", "30m": "30", "75m": "75",
          "1h": "60", "2h": "120", "4h": "240", "6h": "360", "1d": "D", "1w": "W",
          "1M": "M"}
-_STATE_CLS = {"Fresh": "gs-fresh", "Triggered": "gs-trig", "Broken": "gs-no"}
+_STATE_CLS = {"Fresh": "gs-fresh", "Tested": "gs-trig", "Broken": "gs-no"}
 
 
 def cols(spec, gap="small"):
@@ -1816,9 +1824,9 @@ def pine_panel(slot=None):
         t0, t1, t2, t3, t4, t5 = st.tabs(["अनिवार्य नियम", "लचीले नियम", "Candle नियम",
                                           "नोट्स नियम", "SETS · जोखिम", "Score · Pulse · MTF"])
         with t0:
-            st.caption("हमेशा चालू: **Filled-Unfilled-Filled · 1-2-4 · TR vs ATR**। "
-                       "साथ में **Power of leg-out** — Entry = Proximal, SL = Distal; "
-                       "लेग-आउट के अंदर ही कम से कम 1:3, 1:5 मिले तो ★ Best।")
+            st.caption("हमेशा चालू: **Filled-Unfilled-Filled · 1-2-4 · TR vs ATR · White area · "
+                       "Formation · CBLI**। साथ में **Power of leg-out** — Entry = Proximal, "
+                       "SL = Distal; leg-out की close तक कम से कम 1:3, 1:5 पर ★।")
             a1, a2, a3, a4 = st.columns(4)
             core_power = a1.checkbox("Power of leg-out (अनिवार्य)", D.corePower, key="in_corepower")
             power_mode = a2.selectbox("Power किस पर मापें", POWER_MODES,
@@ -1835,6 +1843,9 @@ def pine_panel(slot=None):
             li_base = a10.number_input("1-2-4: Leg-in ≥ boring ×", 1.0, 10.0, D.legInToBaseSizeMult, 0.25, key="in_libase")
             lo_base = a11.number_input("1-2-4: Leg-out ≥ boring ×", 1.0, 20.0, D.legOutToBaseSizeMult, 0.25, key="in_lobase")
             atrp = a12.number_input("ATR Period (कोर्स: 14)", 2, 200, D.atrPeriod, 1, key="in_atr")
+            a13, a14, _, _ = st.columns(4)
+            lo_each = a13.number_input("Leg-out 2/3: हर candle की min body %", 0.0, 1.0, D.legOutEachMinBody, 0.05, key="in_loeach")
+            pow_body = a14.checkbox("Power: leg-out close (body) तक", D.powerOnBody, key="in_powbody")
         with t1:
             st.caption("बंद = सिर्फ़ स्कोर में गिनती · चालू = अनिवार्य (फेल हुआ तो ज़ोन नहीं दिखेगा)")
             f1, f2, f3, f4 = st.columns(4)
@@ -1874,6 +1885,7 @@ def pine_panel(slot=None):
             covered = n5.checkbox("Covered leg-out = trap", D.useCoveredLegOut, key="in_covered")
             cover_pct = n6.number_input("Covered: पहली leg-out body का %", 0.1, 1.0, D.coverPct, 0.05, key="in_coverpct")
             maturity = n7.checkbox("Zone maturity", D.useMaturity, key="in_maturity")
+            mat_bars = n7.number_input("Maturity: कितनी candle बाद", 0, 50, D.maturityBars, 1, key="in_matbars")
             imm_trend = n8.checkbox("Pulse/Trend साथ हो तो immature भी", D.immatureWithTrend, key="in_immtrend")
             n9, n10, n11, n12 = st.columns(4)
             time_rule = n9.checkbox("Entry time नियम (intraday)", D.useTimeRule, key="in_timerule")
@@ -1887,10 +1899,11 @@ def pine_panel(slot=None):
             s1, s2, s3, s4 = st.columns(4)
             cap = s1.number_input("Account Capital (₹)", 1000.0, 1e9, D.accountCapital, 1000.0, key="in_cap")
             risk = s2.number_input("Risk % per trade", 0.05, 10.0, D.riskPct, 0.05, key="in_risk")
-            rr = s3.number_input("Target RR (Daily/Weekly)", 1.0, 20.0, D.targetRR, 0.5, key="in_rr")
+            rr = s3.number_input("Target 1 RR (Daily/Weekly)", 1.0, 20.0, D.targetRR, 0.5, key="in_rr")
             hrr = s4.number_input("Hourly: पहला target RR", 1.0, 20.0, D.hourlyRR, 0.5, key="in_hrr")
             s5, s6, s7, s8 = st.columns(4)
             mrr = s5.number_input("Monthly: पहला target RR", 1.0, 50.0, D.monthlyRR, 0.5, key="in_mrr")
+            t2rr = s5.number_input("Target 2 RR (सभी)", 1.0, 50.0, D.target2RR, 0.5, key="in_t2rr")
             half = s6.checkbox("3+ boring → आधी quantity", D.halfQty3, key="in_half")
             ttype = s7.selectbox("Trader type", TRADER_TYPES, index=0, key="in_ttype")
             bmode = s8.selectbox("SL buffer तरीका", ["DATR % (course)", "Chart ATR ×"], key="in_bmode")
@@ -1927,6 +1940,8 @@ def pine_panel(slot=None):
 
     inp = PineInputs(
         accountCapital=float(cap), riskPct=float(risk), targetRR=float(rr), hourlyRR=float(hrr),
+        target2RR=float(t2rr), legOutEachMinBody=float(lo_each), powerOnBody=bool(pow_body),
+        maturityBars=int(mat_bars),
         monthlyRR=float(mrr), halfQty3=bool(half), traderType=str(ttype), bufferMode=str(bmode),
         bufAggrPct=float(b_aggr), bufDailyPct=float(b_daily), bufSwingPct=float(b_swing),
         slBufferAtr=float(slb), entryBuffer=bool(ebuf),
@@ -2129,7 +2144,7 @@ _SORT_JS = r"""
 </script>
 """
 
-_STATE_ORDER = {"Fresh": 0, "Triggered": 1, "Broken": 2}
+_STATE_ORDER = {"Fresh": 0, "Tested": 1, "Broken": 2}
 
 
 def _th(label: str, sortable: bool = True, dir0: str = "") -> str:
@@ -2166,7 +2181,7 @@ def sheet_html(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0, extra=False,
         _th("Distance", dir0="asc"),
     ]
     if extra:
-        heads += [_th("Entry"), _th("SL"), _th("T1"), _th("Qty"), _th("Boring"),
+        heads += [_th("Entry"), _th("SL"), _th("T1"), _th("T2"), _th("Qty"), _th("Boring"),
                   _th("Rules /5"), _th("Inst /4"), _th("Pulse · Trend"), _th("Room"),
                   _th("Range Low"), _th("Range High")]
         if show_mcap:
@@ -2204,7 +2219,8 @@ def sheet_html(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0, extra=False,
                 _STATE_ORDER.get(state, 9)),
             _td(f'{int(r["score"])}', int(r["score"]), "ctr",
                 style=f"background:{_score_bg(float(r['score']))};color:#111;font-weight:700",),
-            _td(f'{"★ " if r.get("best") else ""}1:{float(r.get("pow_rr", 0)):.1f}',
+            _td(f'{"★ " if r.get("best") else ""}1:{float(r.get("pow_rr", 0)):.1f}'
+                f'{" · 1 LO" if r.get("single_lo") else ""}',
                 float(r.get("pow_rr", 0)), "ctr" + (" gs-star" if r.get("best") else "")),
             _td(mtf_cell, mtf_n),
             _td(f'{float(r["prox"]):,.2f}', float(r["prox"]), "num"),
@@ -2219,6 +2235,7 @@ def sheet_html(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0, extra=False,
                 _td(f'{float(r["entry"]):,.2f}', float(r["entry"]), "num"),
                 _td(f'{float(r["sl"]):,.2f}', float(r["sl"]), "num"),
                 _td(f'{float(r["tp"]):,.2f}', float(r["tp"]), "num"),
+                _td(f'{float(r["t5"]):,.2f}', float(r["t5"]), "num"),
                 _td(f'{int(r["qty"])}', int(r["qty"]), "num"),
                 _td(f'{int(r["base_count"])}', int(r["base_count"]), "ctr"),
                 _td(f'{int(r.get("notes_pass", 0))}', int(r.get("notes_pass", 0)), "ctr"),
@@ -2258,6 +2275,7 @@ def zone_table(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0) -> pd.DataFra
         "डिस्टल": df["dist"].round(2),
         "SL": df["sl"].round(2),
         "T1": df["tp"].round(2),
+        "T2": df["t5"].round(2),
         "दूरी %": df["dist_pct"].round(2),
         "स्कोर /10": df["score"].astype(int),
         "फ़ैसला": df["verdict"],

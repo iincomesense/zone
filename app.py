@@ -639,8 +639,8 @@ class PineInputs:
     relVolMult: float = 1.5
     sweepLen: int = 10
     # ---- 4 · Score · Pulse · Trend ----
-    minScore: int = 5
-    greatScore: int = 7
+    minScore: int = 6
+    greatScore: int = 8
     hideNoTrade: bool = False
     emaFast: int = 20
     trendThr: float = 0.5
@@ -987,6 +987,7 @@ def _candidate(p: int, bc: int, nout: int, S: _S, I: PineInputs):
         white=bool(white_ok and form_ok), fav_colour=bool(any_bear if demand else any_bull),
         plus=bool(plus_b), long_out=bool((h[fo] - l[fo]) > I.legOutTooLong * in_range),
         notes_pass=notes_pass, inst=int(disp) + int(rel_vol) + int(sweep) + int(imb),
+        strong_gap=bool(gap_out and gap_size < in_range),
         b0=b0, bl=bl, li=li,
     )
 
@@ -1161,18 +1162,19 @@ def engine(df: pd.DataFrame, I: PineInputs, tf: str, htf_daily: Optional[pd.Data
                                 elif (not dem) and old["prox"] < entry:
                                     r_ = (entry - old["prox"]) / risk
                                     room = r_ if room is None else min(room, r_)
-                        if (old["state"] == STATE_BROKEN and old.get("broken_at") is not None
-                                and bl <= old["broken_at"] <= b0):
-                            for b in range(bl, b0 + 1):
-                                if ((old["demand"] and S.c[b] < old["dist"])
-                                        or ((not old["demand"]) and S.c[b] > old["dist"])):
+                        # Break zone: उल्टा ज़ोन, leg-out की close उसकी distal के पार
+                        if old["demand"] != dem and (old["state"] in ALIVE_STATES or (
+                                old["state"] == STATE_BROKEN and old.get("broken_at") is not None
+                                and old["broken_at"] >= p - cand["nout"] + 1)):
+                            for k in range(p - cand["nout"] + 1, p + 1):
+                                if (dem and S.c[k] > old["dist"]) or ((not dem) and S.c[k] < old["dist"]):
                                     base_brk = True
                                     break
                     ok_h = sw_h is not None and sw_h_bar < bl and h_conf < bl and h_brk is not None
                     ok_l = sw_l is not None and sw_l_bar < bl and l_conf < bl and l_brk is not None
                     broke_h = ok_h and h_brk >= bl
                     broke_l = ok_l and l_brk >= bl
-                    swing_brk = broke_h or broke_l
+                    swing_brk = broke_h if dem else broke_l     # DZ: swing high · SZ: swing low
                     # ---- अनिवार्य: Power of leg-out (Entry=Proximal, SL=Distal) ----
                     pw = _pow_rr(cand, I)
                     if I.corePower and pw < I.powerMinRR:
@@ -1182,14 +1184,16 @@ def engine(df: pd.DataFrame, I: PineInputs, tf: str, htf_daily: Optional[pd.Data
                     best = pw >= I.powerBestRR
                     # ---- Score the Trade (Room + Pulse/Trend अंक scan में जुड़ते हैं) ----
                     score_base = (2 + int(cand["white"]) + 1 + int(best) + int(bc <= 2)
-                                  + int(cand["fav_colour"]) + int(follow or base_brk or swing_brk))
+                                  + int(cand["fav_colour"]) + int(follow) + int(base_brk) + int(swing_brk))
                     z = dict(
                         demand=dem, side="Demand" if dem else "Supply",
                         prox=cand["prox"], dist=cand["dist"], entry=float(entry),
                         sl=float(sl), tp=float(tp), t5=float(t5), risk=float(risk), qty=qty,
                         cover=cand["cover"], xrr=float(xrr), pow_rr=float(pw), best=bool(best),
                         room_tf=room, score_base=int(score_base), score=int(score_base),
-                        single_lo=bool(cand["nout"] == 1),
+                        single_lo=bool(cand["nout"] == 1), strong=bool(cand["strong_gap"]),
+                        tags=" ".join(t for t, on in (("FU", follow), ("BZ", base_brk), ("SB", swing_brk),
+                                                       ("Strong", cand["strong_gap"])) if on),
                         hq=False, pattern=cand["pattern"], category=cand["category"],
                         reversal=cand["category"] == "Reversal",
                         base_count=bc, leg_outs=cand["nout"], grade=_grade(bc),
@@ -1378,7 +1382,7 @@ def verdict(score: int, I: PineInputs) -> str:
 def info_text(z: dict, target_rr: float) -> str:
     s = (f"{z['pattern']} · {z['category']} · {z['base_count']} boring "
          f"({_grade(z['base_count'])})")
-    s += f"\nScore {z['score']}/10 · Rules {z.get('notes_pass', 0)}/5 · Inst {z.get('inst', 0)}/4"
+    s += f"\nScore {z['score']}/12 · Rules {z.get('notes_pass', 0)}/5 · Inst {z.get('inst', 0)}/4"
     s += f"\nE {z['entry']:.2f}  SL {z['sl']:.2f}  Qty {z['qty']}"
     s += f"\nT1 1:{z.get('t1_rr', target_rr):g} {z['tp']:.2f} · Power 1:{z.get('pow_rr', 0):.1f}"
     s += (" ★" if z.get("best") else "") + f"\n{z['state']}"
@@ -1441,7 +1445,7 @@ def eod_band(df: Optional[pd.DataFrame], tf: str, atr_period: int = 14) -> Optio
 # ---------------------------------------------------------------------------
 _EMPTY_SNAP = {"demand": None, "supply": None, "demand_time": 0, "supply_time": 0}
 _ZCACHE: Dict[tuple, tuple] = {}
-_ZVER = "z8"           # इंजन बदले तो बढ़ाएँ — पुराना कैश अपने आप बेकार
+_ZVER = "z9"           # इंजन बदले तो बढ़ाएँ — पुराना कैश अपने आप बेकार
 
 
 def _inputs_hash(I: PineInputs) -> str:
@@ -1562,7 +1566,7 @@ def scan_symbol(symbol: str,
             if I.coreMTF == MTF_CORE_MODES[2] and not act_ok:
                 drop("Higher-TF not in favour")
                 continue
-            # ---- Score the Trade (10 अंक) ----
+            # ---- Score the Trade (12 अंक: कोर्स के 10, जिनमें follow-up/break तीन हिस्सों में) ----
             room_pt = 1 if (room is None or room >= 10 or z["xrr"] >= 10) else 0
             z["score"] = int(z["score_base"] + room_pt + int(act_ok))
             z["hq"] = z["score"] >= I.greatScore
@@ -1599,7 +1603,7 @@ def _last_close(frames: Dict[str, pd.DataFrame], tfs: Sequence[str]) -> float:
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v8 · KTP rules (आपके चुने नियम) · 2026-10-27"
+APP_BUILD = "v9 · KTP rules · FU/BZ/SB · 2026-10-27"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -1919,8 +1923,8 @@ def pine_panel(slot=None):
             maxst = s16.number_input("Max zones / TF", 10, 240, D.maxStored, 10, key="in_maxst")
         with t5:
             g1, g2, g3, g4 = st.columns(4)
-            min_score = g1.number_input("Min score (कम = NO TRADE)", 0, 10, D.minScore, 1, key="in_minscore")
-            great = g2.number_input("Great score", 0, 10, D.greatScore, 1, key="in_great")
+            min_score = g1.number_input("Min score (कम = NO TRADE)", 0, 12, D.minScore, 1, key="in_minscore")
+            great = g2.number_input("Great score", 0, 12, D.greatScore, 1, key="in_great")
             hide_nt = g3.checkbox("NO-TRADE ज़ोन छिपाएँ", D.hideNoTrade, key="in_hident")
             ema = g4.number_input("EMA (pulse & trend)", 2, 200, D.emaFast, 1, key="in_ema")
             g5, g6, g7, g8 = st.columns(4)
@@ -2083,7 +2087,7 @@ def _lerp(c1, c2, t):
 
 def _score_bg(sc: float) -> str:
     low, mid, high = (252, 232, 230), (254, 247, 224), (206, 234, 214)
-    t = max(0.0, min(1.0, (float(sc) - 3.0) / 7.0))
+    t = max(0.0, min(1.0, (float(sc) - 4.0) / 8.0))
     c = _lerp(low, mid, t / 0.5) if t <= 0.5 else _lerp(mid, high, (t - 0.5) / 0.5)
     return f"rgb({c[0]},{c[1]},{c[2]})"
 
@@ -2175,7 +2179,7 @@ def sheet_html(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0, extra=False,
     heads += [
         _th("Equity (Cash)"), _th("Current-Month Future"),
         _th("TF"), _th("Zone Side"), _th("Pattern"), _th("Status"),
-        _th("Score /10"), _th("Power"),
+        _th("Score /12"), _th("Power"), _th("निशान"),
         _th("Multi-TF Highlight"),
         _th("Proximal (₹)"), _th("Distal (₹)"), _th("Current LTP"),
         _th("Distance", dir0="asc"),
@@ -2222,6 +2226,8 @@ def sheet_html(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0, extra=False,
             _td(f'{"★ " if r.get("best") else ""}1:{float(r.get("pow_rr", 0)):.1f}'
                 f'{" · 1 LO" if r.get("single_lo") else ""}',
                 float(r.get("pow_rr", 0)), "ctr" + (" gs-star" if r.get("best") else "")),
+            _td(f'<span class="gs-star">{r.get("tags") or ""}</span>' if r.get("tags") else '<span class="gs-sm">—</span>',
+                str(r.get("tags") or "~")),
             _td(mtf_cell, mtf_n),
             _td(f'{float(r["prox"]):,.2f}', float(r["prox"]), "num"),
             _td(f'{float(r["dist"]):,.2f}', float(r["dist"]), "num"),
@@ -2277,7 +2283,8 @@ def zone_table(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0) -> pd.DataFra
         "T1": df["tp"].round(2),
         "T2": df["t5"].round(2),
         "दूरी %": df["dist_pct"].round(2),
-        "स्कोर /10": df["score"].astype(int),
+        "स्कोर /12": df["score"].astype(int),
+        "निशान": df["tags"].fillna(""),
         "फ़ैसला": df["verdict"],
         "Power (1:x)": df["pow_rr"].round(1),
         "★ Best": df["best"].map(lambda v: "★" if v else ""),

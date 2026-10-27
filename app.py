@@ -21,6 +21,7 @@ from __future__ import annotations
 #  भाग 1 · आयात (imports)
 # ═══════════════════════════════════════════════════════════════════════
 import hashlib
+import io
 import json
 import math
 import os
@@ -123,40 +124,47 @@ NIFTY50 = [
 # GLOBAL INSTRUMENTS — (दिखने का नाम, Yahoo ticker, TradingView cash, TV future)
 # ───────────────────────────────────────────────────────────────────────────
 GLOBAL_INSTRUMENTS = [
-    ("NIFTY 50",     "^NSEI",        "NSE:NIFTY",        "NSE:NIFTY1!"),
-    ("BANK NIFTY",   "^NSEBANK",     "NSE:BANKNIFTY",    "NSE:BANKNIFTY1!"),
-    ("FINNIFTY",     "NIFTY_FIN_SERVICE.NS", "NSE:CNXFINANCE", "NSE:FINNIFTY1!"),
-    ("MIDCPNIFTY",   "^NSEMDCP50",   "NSE:NIFTYMIDCAP150", "NSE:MIDCPNIFTY1!"),
-    ("SENSEX",       "^BSESN",       "BSE:SENSEX",       "BSE:SENSEX1!"),
-    ("INDIA VIX",    "^INDIAVIX",    "NSE:INDIAVIX",     None),
-    ("S&P 500",      "^GSPC",        "SP:SPX",           "CME_MINI:ES1!"),
-    ("NASDAQ 100",   "^NDX",         "NASDAQ:NDX",       "CME_MINI:NQ1!"),
-    ("DOW JONES",    "^DJI",         "DJ:DJI",           "CBOT_MINI:YM1!"),
-    ("FTSE 100",     "^FTSE",        "TVC:UKX",          None),
-    ("DAX 40",       "^GDAXI",       "XETR:DAX",         "EUREX:FDAX1!"),
-    ("NIKKEI 225",   "^N225",        "TVC:NI225",        "OSE:NK1!"),
-    ("HANG SENG",    "^HSI",         "TVC:HSI",          "HKFE:HSI1!"),
-    ("GOLD",         "GC=F",         "COMEX:GC1!",       None),
-    ("SILVER",       "SI=F",         "COMEX:SI1!",       None),
-    ("CRUDE OIL",    "CL=F",         "NYMEX:CL1!",       None),
-    ("NATURAL GAS",  "NG=F",         "NYMEX:NG1!",       None),
-    ("COPPER",       "HG=F",         "COMEX:HG1!",       None),
-    ("USD/INR",      "INR=X",        "FX_IDC:USDINR",    None),
-    ("EUR/USD",      "EURUSD=X",     "FX:EURUSD",        None),
-    ("DOLLAR INDEX", "DX-Y.NYB",     "TVC:DXY",          None),
-    ("BITCOIN",      "BTC-USD",      "BITSTAMP:BTCUSD",  None),
-    ("ETHEREUM",     "ETH-USD",      "BITSTAMP:ETHUSD",  None),
+    # (दिखने का नाम, Yahoo ticker, TradingView symbol)
+    ("DXY",        "DX-Y.NYB",  "TVC:DXY"),
+    ("USDINR",     "INR=X",     "FX_IDC:USDINR"),
+    ("TLT",        "TLT",       "AMEX:TLT"),
+    ("US10Y",      "^TNX",      "TVC:US10Y"),
+    ("XAUUSD",     "GC=F",      "OANDA:XAUUSD"),
+    ("XAGUSD",     "SI=F",      "OANDA:XAGUSD"),
+    ("SPOTCRUDE",  "CL=F",      "TVC:USOIL"),
+    ("US30",       "^DJI",      "TVC:DJI"),
+    ("US500",      "^GSPC",     "TVC:SPX"),
+    ("000001",     "000001.SS", "SSE:000001"),
+    ("XIN9",       "2823.HK",   "SGX:CN1!"),
+    ("JP225",      "^N225",     "TVC:NI225"),
+    ("NIFTY1!",    "^NSEI",     "NSE:NIFTY1!"),
+    ("FTSE100",    "^FTSE",     "TVC:UKX"),
+    ("DAX",        "^GDAXI",    "XETR:DAX"),
+    ("Copper",     "HG=F",      "COMEX:HG1!"),
+    ("Aluminium",  "ALI=F",     "COMEX:ALI1!"),
+    ("Zinc",       "ZNC=F",     "COMEX:ZNC1!"),
+    ("NatGas",     "NG=F",      "NYMEX:NG1!"),
+    ("GBYUSD",     "GBPUSD=X",  "FX:GBPUSD"),
+    ("UROUSD",     "EURUSD=X",  "FX:EURUSD"),
+    ("JPYUSD",     "JPYUSD=X",  "FX:JPYUSD"),
+    ("JPYINR",     "JPYINR=X",  "FX_IDC:JPYINR"),
+    ("GBPINR",     "GBPINR=X",  "FX_IDC:GBPINR"),
+    ("Bitcoin",    "BTC-USD",   "BITSTAMP:BTCUSD"),
 ]
-GLOBAL_MAP = {name.upper(): dict(name=name, yahoo=y, cash=tv, fut=fut)
-              for name, y, tv, fut in GLOBAL_INSTRUMENTS}
+GLOBAL_MAP = {name.upper(): dict(name=name, yahoo=y, cash=tv, fut=None)
+              for name, y, tv in GLOBAL_INSTRUMENTS}
 GLOBAL_SYMBOLS = [g[0] for g in GLOBAL_INSTRUMENTS]
 
 
 def sym_meta(sym: str) -> dict:
     """display symbol → {name, yahoo, cash, fut}"""
-    m = GLOBAL_MAP.get(str(sym).upper())
+    up = str(sym).upper()
+    m = GLOBAL_MAP.get(up)
     if m:
         return m
+    if up in IDX_SYMBOLS:                       # सूचकांक (cash index + futures दोनों)
+        return dict(name=sym, yahoo=IDX_YAHOO.get(up, "^NSEI"),
+                    cash=IDX_TV.get(up), fut=IDX_TV.get(up))
     return dict(name=sym, yahoo=f"{sym}.NS", cash=f"NSE:{sym}", fut=f"NSE:{sym}1!")
 
 
@@ -225,25 +233,50 @@ def clear_cache() -> None:
 # ---------------------------------------------------------------------------
 # NSE : live F&O universe
 # ---------------------------------------------------------------------------
-def live_fno_universe(timeout: int = 12) -> List[str]:
-    key = _ckey("fno_universe")
+IDX_SYMBOLS = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50"}
+IDX_YAHOO = {"NIFTY": "^NSEI", "BANKNIFTY": "^NSEBANK", "FINNIFTY": "NIFTY_FIN_SERVICE.NS",
+             "MIDCPNIFTY": "^NSEMDCP50", "NIFTYNXT50": "^NSENXT50"}
+IDX_TV = {"NIFTY": "NSE:NIFTY1!", "BANKNIFTY": "NSE:BANKNIFTY1!", "FINNIFTY": "NSE:FINNIFTY1!",
+          "MIDCPNIFTY": "NSE:MIDCPNIFTY1!", "NIFTYNXT50": "NSE:NIFTYNXT501!"}
+
+
+def live_fno_universe(timeout: int = 20) -> List[str]:
+    """NSE की **FUTURES** सूची — fo_mktlots.csv से (option-only नहीं)।
+
+    Pine/ट्रेडिंगव्यू के futures सिंबल्स (NSE:JSWSTEEL1! आदि) इन्हीं के लिए बनते हैं।
+    """
+    key = _ckey("fno_fut_universe_v2")
     cached = _load(key, 6 * 3600)
     if cached:
         return cached
     out: List[str] = []
+    # 1) NSE archives — फ्यूचर्स का lot-size फ़ाइल = पूरी futures सूची
     try:
-        s = requests.Session()
-        h = {"User-Agent": _UA, "Accept-Language": "en-US,en;q=0.9",
-             "Accept": "*/*"}
-        s.get("https://www.nseindia.com/", headers=h, timeout=timeout)
-        r = s.get("https://www.nseindia.com/api/master-quote",
-                  headers={**h, "Referer": "https://www.nseindia.com/"}, timeout=timeout)
-        if r.status_code == 200:
-            data = r.json()
-            if isinstance(data, list):
-                out = sorted({str(x).strip().upper() for x in data if str(x).strip()})
+        r = requests.get("https://nsearchives.nseindia.com/content/fo/fo_mktlots.csv",
+                         headers={"User-Agent": _UA, "Accept": "*/*"}, timeout=timeout)
+        if r.ok and len(r.content) > 500:
+            df = pd.read_csv(io.StringIO(r.text))
+            df.columns = [str(c).strip() for c in df.columns]
+            col = "SYMBOL" if "SYMBOL" in df.columns else df.columns[1]
+            syms = (df[col].astype(str).str.strip().str.upper()
+                    .replace({"NAN": "", "SYMBOL": ""}))
+            out = sorted({s for s in syms if s and s.isascii()})
     except Exception:                                          # noqa: BLE001
         out = []
+    # 2) वैकल्पिक: NSE का master-quote (जिसमें सिर्फ़ F&O अंडरलाइंग होते हैं)
+    if not out:
+        try:
+            s2 = requests.Session()
+            h = {"User-Agent": _UA, "Accept-Language": "en-US,en;q=0.9", "Accept": "*/*"}
+            s2.get("https://www.nseindia.com/", headers=h, timeout=timeout)
+            r2 = s2.get("https://www.nseindia.com/api/master-quote",
+                        headers={**h, "Referer": "https://www.nseindia.com/"}, timeout=timeout)
+            if r2.status_code == 200:
+                data = r2.json()
+                if isinstance(data, list):
+                    out = sorted({str(x).strip().upper() for x in data if str(x).strip()})
+        except Exception:                                      # noqa: BLE001
+            out = []
     if not out:
         out = list(FALLBACK_FNO)
     _save(key, out)
@@ -478,103 +511,92 @@ def market_open_now(now: Optional[datetime] = None) -> bool:
     return (9, 15) <= (now.hour, now.minute) <= (15, 30)
 
 # ═══════════════════════════════════════════════════════════════════════
-#  भाग 3 · ज़ोन इंजन — Pine v6 "Zone MTF (KTP rules)" का पूरा पोर्ट
-#           1-2-4 · CBLI · formation · white-area · covered leg-out ·
-#           maturity · DATR बफ़र · XRPT · score · states · MTF
+
+
 # ═══════════════════════════════════════════════════════════════════════
-# ---------------------------------------------------------------------------
-# 1. TIMEFRAMES  (Pine: tf1 … tf9  ·  app: saare 13 TF)
-# ---------------------------------------------------------------------------
-TF_SECONDS: Dict[str, int] = {
-    "3m": 180, "5m": 300, "10m": 600, "15m": 900, "30m": 1800,
-    "75m": 4500, "1h": 3600, "2h": 7200, "4h": 14400, "6h": 21600,
-    "1d": 86400, "1w": 604800, "1M": 2592000,
-}
-ALL_TFS: List[str] = ["3m", "5m", "10m", "15m", "30m", "75m", "1h", "2h",
-                      "4h", "6h", "1d", "1w", "1M"]
+#  भाग 3 · ज़ोन इंजन — Pine v6 "Zone MTF" (© iincomesense) का हूबहू पोर्ट
+# ═══════════════════════════════════════════════════════════════════════
 
-TF_LABEL_HI = {
-    "3m": "3 मिनट", "5m": "5 मिनट", "10m": "10 मिनट", "15m": "15 मिनट",
-    "30m": "30 मिनट", "75m": "75 मिनट", "1h": "1 घंटा", "2h": "2 घंटे",
-    "4h": "4 घंटे", "6h": "6 घंटे", "1d": "1 दिन", "1w": "1 हफ़्ता",
-    "1M": "1 महीना",
-}
-
-# ---------------------------------------------------------------------------
-# 2. INPUTS  (Pine ke input.* bilkul waise hi, wahi default)
-# ---------------------------------------------------------------------------
-G0 = "0 · Trade, risk, buffer"
-G1 = "1 · Leg-in / Boring / Leg-out (1-2-4)"
-G2 = "2 · Validation rules"
-G3 = "3 · Quality score (ranking only)"
-G4 = "4 · Display"
-GM = "5 · MTF lines"
-GS = "6 · Shadows & swings"
+# सभी 13 time frame (Pine tf1…tf9 + ऐप के अतिरिक्त)
+ALL_TFS = ["3m", "5m", "10m", "15m", "30m", "75m", "1h", "2h", "4h", "6h", "1d", "1w", "1M"]
+TF_SECONDS = {"3m": 180, "5m": 300, "10m": 600, "15m": 900, "30m": 1800, "75m": 4500,
+              "1h": 3600, "2h": 7200, "4h": 14400, "6h": 21600, "1d": 86400,
+              "1w": 604800, "1M": 2592000}
+TF_LABEL_HI = {"3m": "3 मिनट", "5m": "5 मिनट", "10m": "10 मिनट", "15m": "15 मिनट",
+               "30m": "30 मिनट", "75m": "75 मिनट", "1h": "1 घंटा", "2h": "2 घंटे",
+               "4h": "4 घंटे", "6h": "6 घंटे", "1d": "1 दिन", "1w": "1 हफ़्ता",
+               "1M": "1 महीना"}
 
 
+def stretch(fn, *a, **k):
+    try:
+        return fn(*a, width="stretch", **k)
+    except TypeError:
+        return fn(*a, use_container_width=True, **k)
+
+# ═══════════════════════════════════════════════════════════════════════
+#           f_candidate (bc 1..3) · leg-out hierarchy · CLV pattern ·
+#           imbalance/gap · score · Fresh → Tested → Broken · MTF snapshot
+# ═══════════════════════════════════════════════════════════════════════
+
+
+# ---------------------------------------------------------------------------
+# 1. INPUTS — Pine के input.* बिल्कुल वैसे ही, वही default
+# ---------------------------------------------------------------------------
 @dataclass
 class PineInputs:
-    # ---------------- G0 : trade / risk / buffer -------------------------
+    # ---- मूल inputs ----
     accountCapital: float = 25000.0
     riskPct: float = 0.5
     targetRR: float = 5.0
-    traderType: str = "Auto"          # Auto / Aggressive (1M) / Hourly (3M/5M) /
-                                      # Daily (10M/15M) / Weekly/Swing (1H/75M/2H) / Monthly (D)
-    bufferMode: str = "DATR % (course)"   # or "Chart ATR ×"
-    bufAggrPct: float = 2.0
-    bufDailyPct: float = 5.0
-    bufSwingPct: float = 10.0
     slBufferAtr: float = 0.1
-
-    # ---------------- G1 : 1-2-4 ----------------------------------------
     atrPeriod: int = 14
-    minBaseCount: int = 1
-    maxBaseCount: int = 3
-    maxBaseAtrMult: float = 1.0
-    legInMinAtrMult: float = 1.0
-    legInMinBodyPct: float = 0.50
-    legInMaxClosingWickPct: float = 0.20
-    legInToBaseSizeMult: float = 2.0
-    legOutToBaseSizeMult: float = 4.0
-    maxLegOut: int = 3
-    legOutJoinTolAtr: float = 0.25
-    legOutTrMult: float = 1.2
-    maxWickPct: float = 0.30
-
-    # ---------------- G2 : validation -----------------------------------
-    useCBLI: bool = True
-    cbliMaxPct: float = 0.50
-    useFormation: bool = True
-    formationTolAtr: float = 0.10
-    useWhiteArea: bool = True
-    useCoveredLegOut: bool = True
-    useMaturity: bool = True
-    maxTouches: int = 3
-    distalMode: str = "Pattern lowest/highest (course)"   # or "Boring only"
-    requireVolume: bool = False
-    useImbalance: bool = False
-
-    # ---------------- G3 : quality score --------------------------------
     volSmaPeriod: int = 20
+    legOutTrMult: float = 1.2
+    legOutMinTrRatio: float = 1.0
     hqLegOutTrMult: float = 2.0
     hqLegInAtrMult: float = 1.5
-    legOutBodyHeavyPct: float = 0.60
+    maxBaseAtrMult: float = 1.0
+    maxWickPct: float = 0.30
+    minBaseCountInput: int = 1
+    maxBaseCountInput: int = 3
+    legInMinAtrMult: float = 1.0
+    minClvPct: float = 0.60
+    legInToBaseSizeMult: float = 2.0
+    legInMinBodyPct: float = 0.60
+    useImbalance: bool = True
+    maxImbalanceMult: float = 1.0
+    relaxGapCapOvernight: bool = True
     genuineGapBonus: int = 10
     overnightGapBonus: int = 15
+    rejectOppositeCoverPct: float = 0.50
     minValidScore: int = 40
     hqScoreThreshold: int = 90
+    legOutBodyHeavyPct: float = 0.60
+    testedLegOutRetracePct: float = 1.00
+    maxTestedCount: int = 1
 
-    # ---------------- G4 : display --------------------------------------
-    showInfo: bool = True
-    showMcap: bool = True
-    minMcapCr: float = 50000.0
+    # ---- parity inputs (Pine में हैं, पर zone validation में निष्क्रिय) ----
+    legOutToLegInBodyMult: float = 1.0
+    baseBoringMaxBodyPct: float = 0.55
+    eodHighBufferPct: float = 10.0
+    eodLowBufferPct: float = 10.0
+    scanAfterCandleComplete: bool = True
+    scanMonthlyOnce: bool = True
+    scanWeeklyOnce: bool = True
+    scanDailyOnce: bool = True
+    enableClosingWickCheck: bool = True
+    legInMinClosingWickPct: float = 0.1
+    enableLegOutCoverCheck: bool = True
+    legOutMaxCoverPct: float = 90.0
+    enableHQBaseColourCheck: bool = True
+    hqBaseColourProbabilityPct: float = 90.0
+    enableWhiteAreaCheck: bool = True
 
-    # ---------------- GM : MTF ------------------------------------------
+    # ---- MTF / shadows ----
     showMTF: bool = True
     filterDistantMTF: bool = True
     mtfNearPct: float = 8.0
-
-    # ---------------- GS : shadows & swings -----------------------------
     showShadow: bool = True
     showFlags: bool = True
     shadowAtr: float = 0.08
@@ -582,125 +604,110 @@ class PineInputs:
     swingRight: int = 3
     maxStored: int = 220
 
-    # ---------------- app layer (Pine me nahi, scanner ke liye) ---------
-    scanRangePct: float = 10.0        # "dिया gaya range" — ± % from LTP
-    scanBars: int = 900               # kitne bars par candidate dhoondhe (speed)
+    # ---- app layer (Pine में नहीं — स्कैनर के लिए) ----
+    scanBars: int = 500
 
     def sanitized(self) -> "PineInputs":
         d = asdict(self)
-        d["minBaseCount"] = int(max(1, min(self.minBaseCount, self.maxBaseCount)))
-        d["maxBaseCount"] = int(max(d["minBaseCount"], min(self.maxBaseCount, 4)))
-        d["maxLegOut"] = int(max(1, min(self.maxLegOut, 3)))
+        d["minBaseCountInput"] = int(max(1, self.minBaseCountInput))
+        d["maxBaseCountInput"] = int(max(1, self.maxBaseCountInput))
         d["atrPeriod"] = int(max(1, self.atrPeriod))
-        d["maxTouches"] = int(max(1, self.maxTouches))
-        d["maxStored"] = int(max(10, min(self.maxStored, 400)))
+        d["volSmaPeriod"] = int(max(1, self.volSmaPeriod))
+        d["maxStored"] = int(max(10, min(self.maxStored, 240)))
         d["scanBars"] = int(max(200, min(self.scanBars, 5000)))
-        out = PineInputs(**d)
-        return out
+        return PineInputs(**d)
+
+    # Pine: minBaseCount = max(1, min(minInput, maxInput)); maxBaseCount = min(maxInput, 3)
+    @property
+    def minBaseCount(self) -> int:
+        return max(1, min(int(self.minBaseCountInput), int(self.maxBaseCountInput)))
+
+    @property
+    def maxBaseCount(self) -> int:
+        return min(int(self.maxBaseCountInput), 3)
+
+
+HARD_MAX_BASE_COUNT = 3
 
 
 # ---------------------------------------------------------------------------
-# 3. SMALL MATH HELPERS  (Pine: ta.rma / ta.sma / true_range / wick_pct …)
+# 2. छोटे helpers — Pine: ta.rma / ta.sma / true_range / wick_pct / body_pct
 # ---------------------------------------------------------------------------
 def _rma(x: np.ndarray, n: int) -> np.ndarray:
-    """Pine `ta.rma` — Wilder smoothing, SMA seed, pehle n-1 bars na."""
     out = np.full(len(x), np.nan)
-    if len(x) < n or n <= 0:
+    if len(x) < n or n < 1:
         return out
     seed = np.nanmean(x[:n])
     out[n - 1] = seed
-    prev = seed
+    a = 1.0 / n
     for i in range(n, len(x)):
-        prev = (prev * (n - 1) + x[i]) / n
-        out[i] = prev
+        out[i] = out[i - 1] + a * (x[i] - out[i - 1])
     return out
 
 
 def _sma(x: np.ndarray, n: int) -> np.ndarray:
-    s = pd.Series(x, dtype="float64")
-    return s.rolling(n).mean().to_numpy()
+    out = np.full(len(x), np.nan)
+    if len(x) < n or n < 1:
+        return out
+    c = np.concatenate(([0.0], np.cumsum(x)))
+    out[n - 1:] = (c[n:] - c[:-n]) / n
+    return out
 
 
 def _true_range(h: np.ndarray, l: np.ndarray, c: np.ndarray) -> np.ndarray:
-    tr = h - l
-    if len(tr) > 1:
-        pc = np.concatenate(([np.nan], c[:-1]))
-        tr = np.fmax(tr, np.fmax(np.abs(h - pc), np.abs(l - pc)))
-        tr[0] = h[0] - l[0]
-    return tr
+    """Pine का gap-aware TR: max(h-l, |h-c[1]|, |l-c[1]|)"""
+    prev = np.concatenate(([np.nan], c[:-1]))
+    r = h - l
+    r = np.where(np.isnan(prev), r, np.maximum(r, np.maximum(np.abs(h - prev), np.abs(l - prev))))
+    return r
 
 
 def _wick_pct(o, h, l, c):
     r = h - l
     with np.errstate(divide="ignore", invalid="ignore"):
-        v = ((h - np.fmax(o, c)) + (np.fmin(o, c) - l)) / np.where(r == 0, np.nan, r)
-    return np.nan_to_num(v, nan=0.0)
+        w = ((h - np.maximum(o, c)) + (np.minimum(o, c) - l)) / r
+    return np.where(r == 0, 0.0, w)
 
 
 def _body_pct(o, h, l, c):
     r = h - l
     with np.errstate(divide="ignore", invalid="ignore"):
-        v = np.abs(c - o) / np.where(r == 0, np.nan, r)
-    return np.nan_to_num(v, nan=0.0)
-
-
-def pine_type(tf_sec: float) -> int:
-    """Pine f_type(): 1 Aggressive · 2 Hourly · 3 Daily · 4 Weekly/Swing · 5 Monthly."""
-    if tf_sec <= 60:
-        return 1
-    if tf_sec <= 300:
-        return 2
-    if tf_sec <= 1800:
-        return 3
-    if tf_sec < 86400:
-        return 4
-    return 5
-
-
-_TYPE_NAME = {1: "Aggressive", 2: "Hourly", 3: "Daily", 4: "Weekly/Swing", 5: "Monthly"}
-
-_TYPE_FROM_LABEL = {
-    "Aggressive (1M)": 1,
-    "Hourly (3M/5M)": 2,
-    "Daily (10M/15M)": 3,
-    "Weekly/Swing (1H/75M/2H)": 4,
-    "Monthly (D)": 5,
-}
-
-_GRADE = {1: "Great", 2: "Very good", 3: "Good (½ qty)"}
-_GRADE_HI = {1: "बेहतरीन", 2: "बहुत अच्छा", 3: "अच्छा (आधी मात्रा)"}
+        b = np.abs(c - o) / r
+    return np.where(r == 0, 0.0, b)
 
 
 def _grade(bc: int) -> str:
-    return _GRADE.get(bc, "So-so")
+    return {1: "Great", 2: "Very good", 3: "Good"}.get(bc, "So-so")
+
+
+_GRADE_HI = {1: "बेहतरीन", 2: "बहुत अच्छा", 3: "अच्छा"}
 
 
 # ---------------------------------------------------------------------------
-# 4. SERIES — ek symbol+TF ke arrays (position = absolute index)
+# 3. SERIES — एक symbol+TF के arrays (position = absolute bar index)
 # ---------------------------------------------------------------------------
 class _S:
-    __slots__ = ("o", "h", "l", "c", "v", "t", "dow", "day", "n",
-                 "tr", "atr", "vol_sma", "wp", "bp", "index", "filled", "nb_cum")
+    __slots__ = ("o", "h", "l", "c", "v", "t", "dow", "day", "n", "tr", "atr",
+                 "vol_sma", "wp", "bp", "index", "filled", "nb_cum", "overnight",
+                 "_clv_bull", "_clv_bear")
 
     def __init__(self, df: pd.DataFrame):
         self.o = df["open"].to_numpy(dtype="float64")
         self.h = df["high"].to_numpy(dtype="float64")
         self.l = df["low"].to_numpy(dtype="float64")
         self.c = df["close"].to_numpy(dtype="float64")
-        self.v = df["volume"].to_numpy(dtype="float64") if "volume" in df.columns \
-            else np.zeros(len(df))
+        self.v = (df["volume"].to_numpy(dtype="float64") if "volume" in df.columns
+                  else np.zeros(len(df)))
         idx = pd.DatetimeIndex(df.index)
         self.index = idx
-        vals = idx.asi8                                   # epoch ns
-        self.t = vals // 1_000_000                        # Pine `time` (ms)
-        # local दीवार-घड़ी (timezone हटाकर) — पूरी तरह numpy, कोई per-bar boxing नहीं
+        vals = idx.asi8
+        self.t = vals // 1_000_000
         try:
             wall = idx.tz_localize(None).asi8 if idx.tz is not None else vals
         except Exception:                                      # noqa: BLE001
             wall = vals
         day_id = wall // 86_400_000_000_000
-        self.dow = ((day_id + 3) % 7).astype("int64")      # 1970-01-01 = Thursday(3)
-        # dayCount — Pine: `if timeframe.change("D") dayCount += 1`
+        self.dow = ((day_id + 3) % 7).astype("int64")          # 1970-01-01 = Thu
         self.day = np.concatenate(([0], np.cumsum(np.diff(day_id) != 0))).astype("int64")
         self.n = len(df)
 
@@ -710,170 +717,142 @@ class _S:
         self.vol_sma = _sma(self.v, inp.volSmaPeriod)
         self.wp = _wick_pct(self.o, self.h, self.l, self.c)
         self.bp = _body_pct(self.o, self.h, self.l, self.c)
-
-        # ── तेज़ी के लिए पहले से जाँचे हुए मास्क (सब vectorized) ──
+        # Pine: isOvernightGap() => dayofweek != dayofweek[1] or time - time[1] > 86400000
+        prev_dow = np.concatenate(([np.nan], self.dow[:-1]))
+        prev_t = np.concatenate(([np.nan], self.t[:-1]))
+        self.overnight = (self.dow != prev_dow) | ((self.t - prev_t) > 86_400_000)
+        # तेज़ी के लिए vectorized prefilter
         rng = self.h - self.l
-        safe = np.where(rng > 0, rng, np.nan)
-        bull = self.c > self.o
-        bear = self.o > self.c
-        cw = np.where(bull, (self.h - self.c) / safe, (self.c - self.l) / safe)
-        self.filled = ((rng > 0) & (bull | bear)
-                       & (self.bp >= inp.legInMinBodyPct)
-                       & (cw <= inp.legInMaxClosingWickPct)
-                       & (self.tr >= inp.legInMinAtrMult * self.atr)
+        clv_bull = np.where(rng > 0, (self.c - self.l) / np.where(rng > 0, rng, 1), 0.0)
+        clv_bear = np.where(rng > 0, (self.h - self.c) / np.where(rng > 0, rng, 1), 0.0)
+        self.filled = ((rng > 0) & (self.bp >= inp.legInMinBodyPct)
                        & np.isfinite(self.atr))
-        boring_ok = (self.tr <= inp.maxBaseAtrMult * self.atr)
+        boring_ok = self.tr <= inp.maxBaseAtrMult * self.atr
         self.nb_cum = np.concatenate(([0], np.cumsum(~boring_ok))).astype("int64")
+        self._clv_bull, self._clv_bear = clv_bull, clv_bear
 
 
 # ---------------------------------------------------------------------------
-# 5. CANDIDATE  — Pine f_candidate(bc, nOut) ka seedha port
+# 4. CANDIDATE — Pine का f_candidate(bc)
 # ---------------------------------------------------------------------------
-def _candidate(p: int, bc: int, n_out: int, S: _S, I: PineInputs) -> Optional[dict]:
-    fo = p - (n_out - 1)                 # first leg-out
-    b0 = p - n_out                       # first boring
-    b_last = p - (n_out + bc - 1)        # last boring
-    li = p - (n_out + bc)                # leg-in
-    pi = p - (n_out + bc + 1)            # candle behind leg-in
-    if pi < 0 or li < 0 or fo < 0 or b_last < 0:
+def _candidate(p: int, bc: int, S: _S, I: PineInputs):
+    """पूरी तरह Pine के f_candidate जैसा। bar p = leg-out (index 0)।"""
+    li = p - (bc + 1)                     # leg-in
+    pi = p - (bc + 2)                     # leg-in के पीछे वाली candle
+    if li < 0 or pi < 0:
         return None
-    if not np.isfinite(S.atr[pi]) or not np.isfinite(S.atr[fo]):
+    if not np.isfinite(S.atr[li]):
         return None
-
     o, h, l, c, v = S.o, S.h, S.l, S.c, S.v
-
-    # ---- Leg-in : Filled candle --------------------------------------
-    in_high, in_low = h[li], l[li]
-    in_range = in_high - in_low
-    in_bull = c[li] > o[li]
-    in_bear = o[li] > c[li]
     in_tr = S.tr[li]
-    if in_range <= 0 or not (in_bull or in_bear):
+    in_low, in_high, in_close = l[li], h[li], c[li]
+    in_vol = v[li]
+    in_range = in_high - in_low
+    in_bull = in_close > o[li]
+    in_bear = o[li] > in_close
+    # inRange == 0 or body_pct(li) < legInMinBodyPct
+    if in_range == 0 or S.bp[li] < I.legInMinBodyPct:
         return None
-    if S.bp[li] < I.legInMinBodyPct:
+    # opposite + overlap cover → reject
+    opposite = (in_bull and o[pi] > c[pi]) or (in_bear and c[pi] > o[pi])
+    prev_hi = max(o[pi], c[pi])
+    prev_lo = min(o[pi], c[pi])
+    overlap = max(0.0, min(prev_hi, in_high) - max(prev_lo, in_low))
+    if opposite and overlap / in_range >= I.rejectOppositeCoverPct:
         return None
-    close_wick = (in_high - c[li]) / in_range if in_bull else (c[li] - in_low) / in_range
-    if close_wick > I.legInMaxClosingWickPct:
-        return None
-    if in_tr < I.legInMinAtrMult * S.atr[li]:
+    bull_clv = (in_close - in_low) / in_range
+    bear_clv = (in_high - in_close) / in_range
+
+    # ---- boring base: b = 1..bc (bars ago) ----
+    base_ok = True
+    base_tr = 0.0
+    base_high, base_low = -1.0, 1e9
+    for b in range(1, bc + 1):
+        i = p - b
+        if i < 0 or not np.isfinite(S.atr[i]):
+            base_ok = False
+            break
+        bt = S.tr[i]
+        if bt > I.maxBaseAtrMult * S.atr[i]:
+            base_ok = False
+            break
+        base_tr = max(base_tr, bt)
+        base_high = max(base_high, h[i])
+        base_low = min(base_low, l[i])
+    if not base_ok or base_tr == 0:
         return None
 
-    # ---- CBLI : leg-in ke peeche ulti colour + badi body = trap ------
-    if I.useCBLI:
-        opp = (in_bull and c[pi] < o[pi]) or (in_bear and c[pi] > o[pi])
-        in_body = abs(c[li] - o[li])
-        pi_body = abs(c[pi] - o[pi])
-        if opp and in_body > 0 and pi_body / in_body > I.cbliMaxPct:
-            return None
-
-    # ---- Boring candles ---------------------------------------------
-    base_high, base_low = -1e20, 1e20
-    base_body_hi, base_body_lo = -1e20, 1e20
-    for b in range(b_last, b0 + 1):
-        if not np.isfinite(S.atr[b]) or S.tr[b] > I.maxBaseAtrMult * S.atr[b]:
-            return None
-        base_high = max(base_high, h[b])
-        base_low = min(base_low, l[b])
-        base_body_hi = max(base_body_hi, max(o[b], c[b]))
-        base_body_lo = min(base_body_lo, min(o[b], c[b]))
-    base_size = base_high - base_low
-    if base_size <= 0:
+    # leg-in vs base
+    eff_mult = 1.5 if bc == 1 else I.legInToBaseSizeMult
+    if in_tr < eff_mult * base_tr or not (in_tr >= I.legInMinAtrMult * S.atr[li]):
         return None
 
-    # ---- 1-2-4 part 1 : leg-in >= 2 x boring -------------------------
-    if in_range < I.legInToBaseSizeMult * base_size:
-        return None
-
-    # ---- first leg-out : Filled & explosive --------------------------
-    demand = c[fo] > o[fo]
-    supply = o[fo] > c[fo]
+    # ---- leg-out (bar p) ----
+    out_tr = S.tr[p]
+    demand = c[p] > o[p]
+    supply = o[p] > c[p]
     if not (demand or supply):
         return None
-    out_tr = S.tr[fo]
-    if out_tr < I.legOutTrMult * S.atr[fo]:
-        return None
-    if S.wp[fo] > I.maxWickPct:
-        return None
+    explosive = out_tr >= I.legOutTrMult * S.atr[p]
+    wick_ok = S.wp[p] <= I.maxWickPct
+    hierarchy = (out_tr >= I.legOutMinTrRatio * in_tr) and (in_tr > base_tr)
+    volume_ok = v[p] > in_vol
+    overnight = bool(S.overnight[p])
 
-    # ---- leg-out 2 / 3 : same colour, open ~= previous close ---------
-    out_high, out_low = h[fo], l[fo]
-    if n_out > 1:
-        # Pine: for k = fo-1 downto 0  (k = bars-ago);  position = p - k
-        for k in range(n_out - 2, -1, -1):
-            kp = p - k              # bar "k ago"
-            kp1 = p - (k + 1)       # bar "k+1 ago" (ek bar aur purana)
-            same = (c[kp] > o[kp]) if demand else (o[kp] > c[kp])
-            if not same:
-                return None
-            if abs(o[kp] - c[kp1]) > I.legOutJoinTolAtr * S.atr[kp1]:
-                return None
-            out_high = max(out_high, h[kp])
-            out_low = min(out_low, l[kp])
-
-    # ---- 1-2-4 part 2 : leg-out >= 4 x boring ------------------------
-    out_extent = out_high - out_low
-    if out_extent < I.legOutToBaseSizeMult * base_size:
-        return None
-
-    pat = ("RBR" if in_bull else "DBR") if demand else ("DBD" if in_bear else "RBD")
-    reversal = pat in ("DBR", "RBD")
-
-    # ---- Formation of leg-out (sirf reversal zones) ------------------
-    if I.useFormation and reversal:
-        in_body_hi = max(o[li], c[li])
-        in_body_lo = min(o[li], c[li])
-        tol = I.formationTolAtr * S.atr[fo]
-        if o[fo] > in_body_hi + tol or o[fo] < in_body_lo - tol:
-            return None
-
-    # ---- White area --------------------------------------------------
-    if I.useWhiteArea:
-        out_body_near = min(o[fo], c[fo]) if demand else max(o[fo], c[fo])
-        if demand and out_body_near <= base_body_lo:
-            return None
-        if (not demand) and out_body_near >= base_body_hi:
-            return None
-
-    # ---- optional : imbalance / volume -------------------------------
-    gap = (l[fo] > base_high) if demand else (h[fo] < base_low)
+    gap = False
+    imbalance = True
     if I.useImbalance:
-        imb = gap or ((c[fo] > in_high) if demand else (c[fo] < in_low))
-        if not imb:
-            return None
-    if I.requireVolume and not (v[fo] > v[li]):
+        if demand:
+            gap = l[p] > base_high
+            imbalance = gap or (c[p] > in_high)
+        else:
+            gap = h[p] < base_low
+            imbalance = gap or (c[p] < in_low)
+    body_engulf = min(o[p], c[p]) <= base_low and max(o[p], c[p]) >= base_high
+    if body_engulf and not gap:
         return None
 
-    # ---- opposite-colour boring candle (score) -----------------------
-    opposite_base = False
-    for b in range(b_last, b0 + 1):
-        if (demand and c[b] < o[b]) or (supply and c[b] > o[b]):
-            opposite_base = True
-            break
+    rbr = in_bull and bull_clv >= I.minClvPct and demand
+    dbr = in_bear and bear_clv >= I.minClvPct and demand
+    dbd = in_bear and bear_clv >= I.minClvPct and supply
+    rbd = in_bull and bull_clv >= I.minClvPct and supply
+    if not ((rbr or dbr or dbd or rbd) and explosive and wick_ok and hierarchy
+            and volume_ok and imbalance):
+        return None
 
-    # Pine: dayofweek[fo] != dayofweek[fo+1]  ->  "fo+1 bars ago" = position b0
-    overnight = (S.dow[fo] != S.dow[b0]) or (S.t[fo] - S.t[b0] > 86400000)
-
-    # ---- Quality score ----------------------------------------------
-    score = 10
-    score += 15 if bc == 1 else (5 if bc == 2 else 0)
+    # ---- score ----
+    score = 0
+    if bc == 1:
+        score += 15
     if in_tr >= I.hqLegInAtrMult * S.atr[li]:
         score += 10
     if out_tr >= I.hqLegOutTrMult * in_tr:
         score += 15
-    if out_extent >= 2.0 * in_range:
+    if in_tr >= 2.0 * base_tr and out_tr >= 2.0 * in_tr:
         score += 15
-    if np.isfinite(S.vol_sma[fo]) and v[fo] > S.vol_sma[fo]:
+    if v[p] > S.vol_sma[p]:
         score += 10
-    if v[fo] > v[li]:
-        score += 10
-    out_range = h[fo] - l[fo]
-    body_pos = 0.0
-    if out_range > 0:
-        body_pos = (c[fo] - l[fo]) / out_range if demand else (h[fo] - c[fo]) / out_range
-    if body_pos >= 0.80 or S.bp[fo] >= I.legOutBodyHeavyPct:
-        score += 15
+    out_range = h[p] - l[p]
+    body_pos = (((c[p] - l[p]) if demand else (h[p] - c[p])) / out_range) if out_range > 0 else 0.0
+    if demand:
+        if dbr:
+            if body_pos >= 0.80 or S.bp[p] >= I.legOutBodyHeavyPct:
+                score += 15
+        else:
+            if body_pos >= 0.80:
+                score += 15
+    else:
+        if body_pos >= 0.80:
+            score += 15
+    opposite_base = False
+    for b in range(1, bc + 1):
+        i = p - b
+        if (demand and o[i] > c[i]) or (supply and c[i] > o[i]):
+            opposite_base = True
+            break
     if opposite_base:
         score += 10
+    score += 10
     if gap:
         score += I.genuineGapBonus
     if overnight and gap:
@@ -881,422 +860,211 @@ def _candidate(p: int, bc: int, n_out: int, S: _S, I: PineInputs) -> Optional[di
     if score < I.minValidScore:
         return None
 
-    # ---- levels ------------------------------------------------------
-    course = I.distalMode == "Pattern lowest/highest (course)"
-    if course:
-        d_dist = min(base_low, l[li], l[fo]) if reversal else min(base_low, l[fo])
-        s_dist = max(base_high, h[li], h[fo]) if reversal else max(base_high, h[fo])
-    else:
-        d_dist, s_dist = base_low, base_high
-
+    prox = base_high if demand else base_low
+    dist = base_low if demand else base_high
+    mid = ((h[p] - I.testedLegOutRetracePct * (h[p] - l[p])) if demand
+           else (l[p] + I.testedLegOutRetracePct * (h[p] - l[p])))
     return dict(
-        bc=bc, out_count=n_out,
-        prox=float(base_high if demand else base_low),
-        dist=float(d_dist if demand else s_dist),
-        cover=float((o[fo] + c[fo]) / 2.0),
-        xrpt=float(max(o[p], c[p]) if demand else min(o[p], c[p])),
-        demand=bool(demand), score=int(score), pattern=pat,
-        category="Reversal" if reversal else "Continuation",
+        valid=True, bc=bc, demand=demand, prox=float(prox), dist=float(dist), mid=float(mid),
+        score=int(score),
+        pattern="RBR" if rbr else ("DBR" if dbr else ("DBD" if dbd else "RBD")),
+        category="Continuation" if (rbr or dbd) else "Reversal",
         leg_in_tr=float(in_tr), leg_out_tr=float(out_tr),
-        overnight=bool(overnight), base_high=float(base_high), base_low=float(base_low),
-        in_high=float(in_high), in_low=float(in_low), in_range=float(in_range),
-        base_size=float(base_size), out_extent=float(out_extent),
-        gap=bool(gap), opposite_base=bool(opposite_base), reversal=bool(reversal),
+        out_high=float(h[p]), out_low=float(l[p]), overnight=overnight,
+        base_high=float(base_high), base_low=float(base_low), gap=bool(gap),
     )
 
 
 # ---------------------------------------------------------------------------
-# 6. ENGINE — zone creation + lifecycle (Pine chart Zone block)
+# 5. ENGINE — zones + states + MTF snapshot (Pine का chart engine + f_mtf_engine)
 # ---------------------------------------------------------------------------
-def _matured(tt: int, created_time_ms: int, created_day: int, dc: int,
-             now_ms: int) -> bool:
-    """Pine f_matured(): course maturity rules."""
-    if tt == 1:
-        return True
-    if tt == 2:
-        return (now_ms - created_time_ms) >= 75 * 60000          # 75 min
-    if tt == 3:
-        return dc > created_day                                  # next trading day
-    if tt == 4:
-        return (dc - created_day) >= 7                           # 7 trading days
-    return (dc - created_day) >= 21                              # 21 days
+STATE_FRESH, STATE_TESTED, STATE_BROKEN = "Fresh", "Tested", "Broken"
 
 
-def _buffer(I: PineInputs, ttype: int, chart_atr: float, datr: float) -> float:
-    """Pine: DATR %  ya  Chart ATR ×.  DATR na ho to chart ATR fallback."""
-    buf_pct = I.bufAggrPct if ttype <= 2 else (I.bufDailyPct if ttype == 3 else I.bufSwingPct)
-    if I.bufferMode == "DATR % (course)" and np.isfinite(datr) and datr > 0:
-        return datr * buf_pct / 100.0
-    if np.isfinite(chart_atr):
-        return I.slBufferAtr * chart_atr
-    return 0.0
+def engine(df: pd.DataFrame, I: PineInputs, tf: str, htf_daily: Optional[pd.DataFrame] = None,
+           return_all: bool = False, want_snapshot: bool = True) -> List[dict]:
+    """Pine के chart engine जैसा — हर बार पर नया ज़ोन, फिर state update।
 
-
-def daily_atr_prev(daily: Optional[pd.DataFrame], atr_period: int = 14) -> pd.Series:
-    """Pine request.security(D, ta.rma(true_range(), n)[1], lookahead_on).
-
-    Previous completed day ka daily-ATR — isliye har intraday bar par wahi
-    value milti hai jo TradingView deta hai (koi repaint nahi).
+    return_all=True → Broken ज़ोन भी लौटें (गिनती/दिखाने के लिए)।
     """
-    if daily is None or len(daily) == 0:
-        return pd.Series(dtype="float64")
-    d = daily.copy()
-    h = d["high"].to_numpy(dtype="float64")
-    l = d["low"].to_numpy(dtype="float64")
-    c = d["close"].to_numpy(dtype="float64")
-    atr = _rma(_true_range(h, l, c), atr_period)
-    return pd.Series(atr, index=pd.DatetimeIndex(d.index).normalize()).shift(1)
-
-
-def _map_datr(index: pd.DatetimeIndex, datr: pd.Series) -> np.ndarray:
-    if datr is None or len(datr) == 0:
-        return np.full(len(index), np.nan)
-    norm = pd.DatetimeIndex(index).normalize()
-    out = np.full(len(index), np.nan)
-    vals = datr.reindex(norm)
-    m = vals.notna().to_numpy()
-    out[m] = vals.to_numpy(dtype="float64")[m]
-    # agar us din ka daily bar na ho to pichhla available value (ffill)
-    if np.isnan(out).any():
-        ff = pd.Series(out).ffill().bfill()
-        out = ff.to_numpy(dtype="float64")
-    return out
-
-
-def engine(df: pd.DataFrame,
-           inputs: PineInputs,
-           tf: str,
-           datr_series: Optional[pd.Series] = None,
-           ttype_override: Optional[int] = None,
-           upto: Optional[int] = None,
-           return_all: bool = False) -> List[dict]:
-    """Ek symbol × ek timeframe ke saare zones (Pine ke chart-zone block jaisa).
-
-    Parameters
-    ----------
-    df            : OHLCV DataFrame, index tz-aware IST datetime
-    inputs        : PineInputs
-    tf            : "3m" … "1M"  (sirf metadata + maturity ke liye)
-    datr_series   : daily_atr_prev() ka output (buffer ke liye)
-    ttype_override: manual "Trader type" (None = Auto → f_type(tf))
-    upto          : kis bar tak simulate karna hai (default = last bar)
-    """
-    I = inputs.sanitized()
-    if df is None or len(df) < 30:
-        return []
-    df = df[~df.index.duplicated(keep="last")].sort_index()
     S = _S(df)
-    if S.n < 30:
-        return []
     S.prepare(I)
+    n = S.n
+    if n < 20:
+        return []
+    atr_p = max(I.atrPeriod, I.maxBaseCount + 3, 11)
+    start = max(0, n - max(I.scanBars, 50))
 
-    tf_sec = TF_SECONDS.get(tf, 900)
-    ttype = ttype_override if ttype_override is not None else pine_type(tf_sec)
-    last = S.n - 1 if upto is None else min(upto, S.n - 1)
-    datr_arr = _map_datr(S.index, datr_series) if datr_series is not None \
-        else np.full(S.n, np.nan)
+    zones: List[dict] = []          # chart zones (dict)
+    mtf: List[dict] = []            # MTF zones (separate list, Pine जैसा)
+    tf_sec = TF_SECONDS.get(tf, 0)
+    snap_prev = {"demand": None, "supply": None, "demand_time": 0, "supply_time": 0}
 
-    start = max(I.atrPeriod, I.maxBaseCount + I.maxLegOut + 3, 11)
-    if I.scanBars and I.scanBars > 0:
-        start = max(start, last - I.scanBars)
-
-    zones: List[dict] = []
-    alive: List[int] = []
-
-    # ---------- swing pivots (ta.pivothigh / ta.pivotlow) --------------
-    L, R = I.swingLeft, I.swingRight
-    last_swing_high = last_swing_low = None
-    lsh_bar = lsl_bar = None
-    high_conf = low_conf = None
-    high_break = low_break = None
-    pivot_high = np.full(S.n, np.nan)
-    pivot_low = np.full(S.n, np.nan)
-    for i in range(L + R, S.n):
-        # pivot confirmed at bar i, pivot bar = i - R
-        pb = i - R
-        hi, lo = S.h[pb], S.l[pb]
-        is_hi = True
-        is_lo = True
-        for j in range(pb - L, pb + R + 1):
-            if j == pb:
-                continue
-            if S.h[j] >= hi:
-                is_hi = False
-            if S.l[j] <= lo:
-                is_lo = False
-        if is_hi:
-            pivot_high[i] = hi
-        if is_lo:
-            pivot_low[i] = lo
-
-    for p in range(start, last + 1):
-        # ---- swing state update (bar p) ------------------------------
-        if np.isfinite(pivot_high[p]):
-            last_swing_high = pivot_high[p]
-            lsh_bar = p - R
-            high_conf = p
-            high_break = None
-        if np.isfinite(pivot_low[p]):
-            last_swing_low = pivot_low[p]
-            lsl_bar = p - R
-            low_conf = p
-            low_break = None
-        if last_swing_high is not None and high_break is None and p >= (high_conf or 0) \
-                and S.c[p] > last_swing_high:
-            high_break = p
-        if last_swing_low is not None and low_break is None and p >= (low_conf or 0) \
-                and S.c[p] < last_swing_low:
-            low_break = p
-
-        # ---- candidate search ---------------------------------------
-        found = False
-        for n_out in range(1, I.maxLegOut + 1):
-            if found:
-                break
+    for p in range(start, n):
+        # ---------- नया ज़ोन ----------
+        if p >= atr_p and np.isfinite(S.atr[p]):
             for bc in range(I.minBaseCount, I.maxBaseCount + 1):
-                li_ = p - (n_out + bc)
-                if li_ < 0 or not S.filled[li_]:
+                li = p - (bc + 1)
+                if li < 0 or not S.filled[li]:
                     continue
-                b0_ = p - n_out
-                bl_ = p - (n_out + bc - 1)
-                if S.nb_cum[b0_ + 1] - S.nb_cum[bl_] != 0:      # base में कोई भी बेकार candle
+                bl = p - bc + 1                     # सबसे पहला base bar? (p-bc … p-1)
+                if S.nb_cum[p] - S.nb_cum[bl - 1 if bl - 1 >= 0 else 0] != 0:
                     continue
-                cand = _candidate(p, bc, n_out, S, I)
+                cand = _candidate(p, bc, S, I)
                 if cand is None:
                     continue
-                found = True
-
-                # ---- duplicate check (Pine: 11 alive zones) --------
-                duplicate = False
+                # duplicate: same side & |old.prox - prox| < atr*0.25
+                dup = False
                 checked = 0
-                for j in range(len(zones) - 1, -1, -1):
-                    z = zones[j]
-                    if z["state"] not in ("Fresh", "Triggered"):
+                for old in reversed(zones):
+                    if old["state"] == STATE_BROKEN:
                         continue
-                    if z["demand"] == cand["demand"] and \
-                            abs(z["prox"] - cand["prox"]) < S.atr[p] * 0.25:
-                        duplicate = True
+                    if old["demand"] == cand["demand"] and abs(old["prox"] - cand["prox"]) < S.atr[p] * 0.25:
+                        dup = True
                         break
                     checked += 1
                     if checked >= 11:
                         break
-                if duplicate:
-                    break
+                if not dup:
+                    sl = (cand["dist"] - I.slBufferAtr * S.atr[p]) if cand["demand"] \
+                        else (cand["dist"] + I.slBufferAtr * S.atr[p])
+                    risk = abs(cand["prox"] - sl)
+                    tp = (cand["prox"] + risk * I.targetRR) if cand["demand"] \
+                        else (cand["prox"] - risk * I.targetRR)
+                    qty = int(math.floor(I.accountCapital * I.riskPct / 100.0 / risk)) if risk > 0 else 0
+                    z = dict(
+                        demand=cand["demand"], side="Demand" if cand["demand"] else "Supply",
+                        prox=cand["prox"], dist=cand["dist"], mid=cand["mid"],
+                        sl=float(sl), tp=float(tp), risk=float(risk), qty=qty,
+                        score=cand["score"], hq=cand["score"] >= I.hqScoreThreshold,
+                        pattern=cand["pattern"], category=cand["category"],
+                        base_count=cand["bc"], grade=_grade(cand["bc"]),
+                        grade_hi=_GRADE_HI.get(cand["bc"], "ठीक-ठाक"),
+                        leg_in_tr=cand["leg_in_tr"], leg_out_tr=cand["leg_out_tr"],
+                        gap=cand["gap"], overnight=cand["overnight"],
+                        base_high=cand["base_high"], base_low=cand["base_low"],
+                        state=STATE_FRESH, touches=1 if False else 0,
+                        created_bar=p, created_day=int(S.day[p]), bar=p,
+                        left_bar=p - cand["bc"] - 1, time=int(S.t[p]),
+                        broken_at=None, tf=tf, tf_sec=tf_sec, symbol=None,
+                    )
+                    zones.append(z)
+                    if len(zones) > I.maxStored:
+                        zones.pop(0)          # Pine: array.shift()
+                    # MTF list (Pine का f_mtf_engine)
+                    mtf.append(dict(demand=cand["demand"], prox=cand["prox"], dist=cand["dist"],
+                                    state=STATE_FRESH, touches=0, created_time=int(S.t[p]),
+                                    created_idx=p))
+                break            # found → bc loop बंद
 
-                b0 = p - n_out
-                b_last = p - (n_out + bc - 1)
-                left_bar = p - b_last - 1
-
-                # ---- shadow logic ----------------------------------
-                behind = False
-                base_breaks_old = False
-                for z in zones:
-                    if z["bar"] < p - b_last:
-                        if z["state"] in ("Fresh", "Triggered"):
-                            behind = True
-                        if z["state"] == "Broken" and z.get("broken_at") is not None \
-                                and (p - b_last) <= z["broken_at"] <= b0:
-                            for b in range(b0, b_last + 1):
-                                if (z["demand"] and S.c[b] < z["dist"]) or \
-                                        ((not z["demand"]) and S.c[b] > z["dist"]):
-                                    base_breaks_old = True
-                                    break
-                    if behind and base_breaks_old:
-                        break
-
-                swing_ok_h = (last_swing_high is not None and lsh_bar is not None
-                              and lsh_bar < p - b_last and (high_conf or 0) < p - b_last
-                              and high_break is not None)
-                swing_ok_l = (last_swing_low is not None and lsl_bar is not None
-                              and lsl_bar < p - b_last and (low_conf or 0) < p - b_last
-                              and low_break is not None)
-                broke_high = swing_ok_h and high_break is not None and high_break >= p - b_last
-                broke_low = swing_ok_l and low_break is not None and low_break >= p - b_last
-                swing_break = bool(broke_high or broke_low)
-
-                # ---- risk / reward --------------------------------
-                sl_buf = _buffer(I, ttype, S.atr[p], datr_arr[p])
-                sl = cand["dist"] - sl_buf if cand["demand"] else cand["dist"] + sl_buf
-                risk = abs(cand["prox"] - sl)
-                tp = (cand["prox"] + risk * I.targetRR if cand["demand"]
-                      else cand["prox"] - risk * I.targetRR)
-                xrr = abs(cand["xrpt"] - cand["prox"]) / risk if risk > 0 else 0.0
-                qty = int(math.floor(I.accountCapital * I.riskPct / 100.0 / risk)) if risk > 0 else 0
-
-                z = dict(
-                    symbol=None, tf=tf, tf_sec=tf_sec,
-                    demand=cand["demand"],
-                    side="Demand" if cand["demand"] else "Supply",
-                    prox=cand["prox"], dist=cand["dist"], cover=cand["cover"],
-                    sl=sl, tp=tp, xrpt=cand["xrpt"], xrpt_rr=round(xrr, 2),
-                    qty=qty, risk=risk,
-                    score=cand["score"], hq=cand["score"] >= I.hqScoreThreshold,
-                    pattern=cand["pattern"], category=cand["category"],
-                    base_count=cand["bc"], grade=_grade(cand["bc"]),
-                    grade_hi=_GRADE_HI.get(cand["bc"], "ठीक-ठाक"),
-                    leg_in_tr=cand["leg_in_tr"], leg_out_tr=cand["leg_out_tr"],
-                    state="Fresh", touches=0, outside=True, target_hit=False,
-                    mtf=False,
-                    bar=p, left_bar=left_bar,
-                    time=int(S.t[p]), created_bar=p, created_day=int(S.day[p]),
-                    broken_at=None,
-                    behind=behind, base_break=base_breaks_old, swing_break=swing_break,
-                    shadow=bool(I.showShadow and (behind or base_breaks_old or swing_break)),
-                    gap=cand["gap"], overnight=cand["overnight"],
-                    base_high=cand["base_high"], base_low=cand["base_low"],
-                    age_bars=0,
-                )
-                zones.append(z)
-                alive.append(len(zones) - 1)
-                if len(zones) > I.maxStored:
-                    # Pine: array.shift() -> sabse purana zone (dead ho ya alive)
-                    zones.pop(0)
-                    alive = [a - 1 for a in alive if a != 0]
-                break
-
-        # ---- lifecycle update (Pine "Zone state update" block) ------
-        new_alive = []
-        for j in alive:
-            z = zones[j]
-            if z["created_bar"] >= p:
-                new_alive.append(j)
+        # ---------- state update (chart) ----------
+        for z in zones:
+            if z["state"] == STATE_BROKEN:
                 continue
-            if z["state"] not in ("Fresh", "Triggered"):
-                continue
-            hit_sl = (S.l[p] <= z["sl"]) if z["demand"] else (S.h[p] >= z["sl"])
-            in_z = (S.l[p] <= z["prox"]) if z["demand"] else (S.h[p] >= z["prox"])
-            if z["state"] == "Fresh":
-                if in_z:
-                    if I.useMaturity and not _matured(ttype, z["time"], z["created_day"],
-                                                      int(S.day[p]), int(S.t[p])):
-                        z["state"] = "Immature"
-                    elif hit_sl:
-                        z["state"] = "Broken"
-                        z["broken_at"] = p
-                    else:
-                        z["state"] = "Triggered"
-                        z["touches"] = 1
-                        z["outside"] = False
-                elif I.useCoveredLegOut and (
-                        (min(S.o[p], S.c[p]) < z["cover"]) if z["demand"]
-                        else (max(S.o[p], S.c[p]) > z["cover"])):
-                    z["state"] = "Covered"
-            else:
-                if hit_sl:
-                    z["state"] = "Broken"
-                    z["broken_at"] = p
-                else:
-                    if not z["target_hit"] and (
-                            (S.h[p] >= z["tp"]) if z["demand"] else (S.l[p] <= z["tp"])):
-                        z["target_hit"] = True
-                    if not in_z:
-                        z["outside"] = True
-                    elif z["outside"]:
-                        z["touches"] += 1
-                        z["outside"] = False
-                        if z["touches"] > I.maxTouches:
-                            z["state"] = "Exhausted"
-            if z["state"] in ("Fresh", "Triggered"):
-                new_alive.append(j)
-        alive = new_alive
+            crossed = (S.l[p] <= z["dist"]) if z["demand"] else (S.h[p] >= z["dist"])
+            touched = (p > z["created_bar"]) and ((S.l[p] <= z["prox"]) if z["demand"]
+                                                  else (S.h[p] >= z["prox"]))
+            if crossed:
+                z["state"] = STATE_BROKEN
+                z["broken_at"] = p
+            elif touched:
+                z["state"] = STATE_TESTED
+                z["touches"] += 1
 
-    # ---- post-processing ------------------------------------------------
-    ltp = float(S.c[last])
-    out = []
-    for j in (range(len(zones)) if return_all else alive):
-        if return_all:
-            z = zones[j]
-            z["age_bars"] = last - z["bar"]
-            z["ltp"] = ltp
-            z["dist_pct"] = abs(z["prox"] - ltp) / ltp * 100.0 if ltp else None
-            z["in_zone"] = bool((S.l[last] <= z["prox"]) if z["demand"]
-                                else (S.h[last] >= z["prox"]))
-            z["rr"] = I.targetRR
-            z["tf_seconds"] = tf_sec
-            out.append(z)
-            continue
-        z = zones[j]
-        z["age_bars"] = last - z["bar"]
-        z["ltp"] = ltp
-        z["dist_pct"] = abs(z["prox"] - ltp) / ltp * 100.0 if ltp else None
-        z["in_zone"] = bool(
-            (S.l[last] <= z["prox"]) if z["demand"] else (S.h[last] >= z["prox"]))
-        z["rr"] = I.targetRR
-        z["tf_seconds"] = tf_sec
-        out.append(z)
-    out.sort(key=lambda r: (r["bar"]), reverse=True)
+        # ---------- state update (MTF) ----------
+        for j in range(len(mtf) - 1, -1, -1):
+            z = mtf[j]
+            crossed = (S.l[p] <= z["dist"]) if z["demand"] else (S.h[p] >= z["dist"])
+            touched = (p > z["created_idx"]) and ((S.l[p] <= z["prox"]) if z["demand"]
+                                                  else (S.h[p] >= z["prox"]))
+            if crossed:
+                z["state"] = STATE_BROKEN
+            elif touched:
+                z["state"] = STATE_TESTED
+                z["touches"] += 1
+            if z["state"] == STATE_BROKEN:
+                mtf.pop(j)
+
+        # Pine f_mtf_confirmed() → previous bar का मान
+        if p == n - 2:
+            snap_prev = _snap_of(mtf)
+
+    # अंतिम snapshot (n-1 बार के बाद) भी रखें
+    snap_last = _snap_of(mtf)
+    out = zones if return_all else [z for z in zones if z["state"] != STATE_BROKEN]
+    for z in out:
+        z["ltp"] = float(S.c[-1])
+        z["dist_pct"] = abs(z["prox"] - z["ltp"]) / z["ltp"] * 100.0 if z["ltp"] else None
+        z["age_bars"] = (n - 1) - z["created_bar"]
+        z["in_zone"] = bool((S.l[-1] <= z["prox"]) if z["demand"] else (S.h[-1] >= z["prox"]))
+        z["atr_now"] = float(S.atr[-1]) if np.isfinite(S.atr[-1]) else float("nan")
+    snap = snap_prev if want_snapshot else snap_last
+    _LAST_SNAP["snap"] = snap
     return out
 
 
-# ---------------------------------------------------------------------------
-# 7. MTF SNAPSHOT + CONFIRMATION  (Pine f_mtf_engine / f_remote / f_mtf_ok)
-# ---------------------------------------------------------------------------
-def mtf_snapshot(zone_list: Sequence[dict], live: bool = True) -> dict:
-    """Har side ka latest zone proximal — Pine `[latestD, latestS, dTime, sTime]`.
+_LAST_SNAP: dict = {}
 
-    Pine ka MTF engine sirf alive zones rakhta hai (Immature/Covered → Dead),
-    isliye snapshot me bhi wahi filter hai.
-    """
-    keep = {"Fresh", "Triggered"} if live else {"Fresh", "Triggered", "Immature", "Covered"}
+
+def _snap_of(mtf: List[dict]) -> dict:
+    """Pine: latest active DEMAND और SUPPLY (array के अंत से पहला)।"""
     d = s = None
     dt = st = 0
-    best_d = best_s = -1
-    for z in zone_list:
-        if z["state"] not in keep:
-            continue
-        if z["demand"] and z["bar"] > best_d:
-            best_d, d, dt = z["bar"], z["prox"], z["time"]
-        if (not z["demand"]) and z["bar"] > best_s:
-            best_s, s, st = z["bar"], z["prox"], z["time"]
+    for z in reversed(mtf):
+        if z["demand"] and d is None:
+            d, dt = z["prox"], z["created_time"]
+        if (not z["demand"]) and s is None:
+            s, st = z["prox"], z["created_time"]
+        if d is not None and s is not None:
+            break
     return {"demand": d, "supply": s, "demand_time": dt, "supply_time": st}
 
 
+# ---------------------------------------------------------------------------
+# 6. MTF confirmation (सिर्फ़ दिखाने के लिए — Pine इसे rule नहीं बनाता)
+# ---------------------------------------------------------------------------
 def adjacent_tfs(chart_tf: str, peers: Sequence[str]) -> List[str]:
-    """Pine f_adj(): ratio != 1 and 0.2 <= tf/chart <= 5.0"""
-    base = TF_SECONDS[chart_tf]
+    """Pine f_remote(): chart TF छोड़कर बाकी सभी; अनुपात 0.2×–5× के भीतर।"""
+    base = TF_SECONDS.get(chart_tf, 0)
     out = []
     for p in peers:
-        r = TF_SECONDS[p] / base
-        if r != 1.0 and 0.2 <= r <= 5.0:
+        if p == chart_tf:
+            continue
+        r = TF_SECONDS.get(p, 0) / base if base else 0
+        if 0.2 <= r <= 5.0:
             out.append(p)
     return out
 
 
-def mtf_ok(demand: bool, prox: float, dist: float, atr_val: float,
-           chart_tf: str, snapshots: Dict[str, dict]) -> bool:
-    """Pine f_mtf_ok(): neighbour TF ka same-side proximal is zone ke andar ho."""
-    top = max(prox, dist) + 0.5 * (atr_val if np.isfinite(atr_val) else 0.0)
-    bot = min(prox, dist) - 0.5 * (atr_val if np.isfinite(atr_val) else 0.0)
-    for peer in adjacent_tfs(chart_tf, list(snapshots.keys())):
-        lvl = snapshots[peer]["demand"] if demand else snapshots[peer]["supply"]
-        if lvl is None:
-            continue
-        if bot <= lvl <= top:
-            return True
-    return False
+def mtf_hits(demand: bool, prox: float, dist: float, atr_val: float, chart_tf: str,
+             snapshots: Dict[str, dict], peers: Optional[Sequence[str]] = None):
+    """कितने पड़ोसी TF का level इस ज़ोन के भीतर है (±0.5×ATR)।"""
+    a = atr_val if np.isfinite(atr_val) else 0.0
+    top = max(prox, dist) + 0.5 * a
+    bot = min(prox, dist) - 0.5 * a
+    keys = [k for k in snapshots if (peers is None or k in peers)]
+    hits = []
+    for peer in adjacent_tfs(chart_tf, keys):
+        lvl = (snapshots.get(peer) or {}).get("demand" if demand else "supply")
+        if lvl is not None and bot <= lvl <= top:
+            hits.append(peer)
+    return len(hits), hits
 
 
-# ---------------------------------------------------------------------------
-# 8. PINE INFO LABEL  (f_info)
-# ---------------------------------------------------------------------------
 def info_text(z: dict, target_rr: float) -> str:
     s = (f"{z['pattern']} · {z['category']} · {z['base_count']} boring "
          f"({_grade(z['base_count'])})")
     s += f"\nScore {z['score']}" + (" HQ" if z["hq"] else "")
     s += f"\nE {z['prox']:.2f}  SL {z['sl']:.2f}"
     s += f"\nT1 1:{target_rr:g} {z['tp']:.2f}"
-    s += f"\nXRPT 1:{z['xrpt_rr']:.1f}  Qty {z['qty']}"
-    s += (f"\nMTF {'✓' if z['mtf'] else '–'} · {z['state']}"
-          + (f" ×{z['touches']}" if z["touches"] else "")
-          + (" · T1 hit" if z["target_hit"] else ""))
+    s += f"\nQty {z['qty']} · {z['state']}"
     return s
 
 
 # ---------------------------------------------------------------------------
-# 9. HIGH LEVEL SCANNER HELPERS
+# 7. EOD बैंड — High + ATR14(RMA) … Low − ATR14(RMA)
 # ---------------------------------------------------------------------------
 def _atr_last(df: pd.DataFrame, period: int = 14) -> float:
-    """सिर्फ़ आख़िरी ATR (पूरा _S बनाए बिना) — स्कैन तेज़ रखने के लिए।"""
     try:
         h = df["high"].to_numpy(dtype="float64")
         l = df["low"].to_numpy(dtype="float64")
@@ -1308,10 +1076,7 @@ def _atr_last(df: pd.DataFrame, period: int = 14) -> float:
 
 
 def eod_band(df: Optional[pd.DataFrame], tf: str, atr_period: int = 14) -> Optional[dict]:
-    """EOD candle का बैंड —  High + ATR14(RMA)  …  Low − ATR14(RMA)
-
-    पूरी हो चुकी candle इस्तेमाल होती है (आज की अधूरी daily/weekly/monthly नहीं)।
-    """
+    """पूरी हो चुकी EOD candle का बैंड: High+ATR14 … Low−ATR14 (RMA)।"""
     if df is None or len(df) < atr_period + 3:
         return None
     h = df["high"].to_numpy(dtype="float64")
@@ -1330,15 +1095,13 @@ def eod_band(df: Optional[pd.DataFrame], tf: str, atr_period: int = 14) -> Optio
 
     i = len(df) - 1
     try:
-        cur = pstart(datetime.now(IST))
-        last = pstart(idx[-1])
-        if last >= cur:                       # आज/इस हफ़्ते की candle अधूरी
+        if pstart(idx[-1]) >= pstart(datetime.now(IST)):
             now = datetime.now(IST)
-            closed_day = (not market_open_now()) and now.hour * 60 + now.minute >= 15 * 60 + 30
-            if not (closed_day and tf == "1d"):
-                i -= 1
+        closed = (not market_open_now()) and (now.hour * 60 + now.minute) >= 15 * 60 + 30
+        if pstart(idx[-1]) >= pstart(datetime.now(IST)) and not (closed and tf == "1d"):
+            i -= 1
     except Exception:                                          # noqa: BLE001
-        i = len(df) - 1
+        pass
     if i < 0:
         return None
     a = float(atr[i])
@@ -1349,6 +1112,9 @@ def eod_band(df: Optional[pd.DataFrame], tf: str, atr_period: int = 14) -> Optio
                 bar_time=int(idx[i].value // 1_000_000))
 
 
+# ---------------------------------------------------------------------------
+# 8. SCAN — एक symbol के सभी TF + MTF snapshot
+# ---------------------------------------------------------------------------
 def scan_symbol(symbol: str,
                 frames: Dict[str, pd.DataFrame],
                 daily: Optional[pd.DataFrame],
@@ -1356,36 +1122,32 @@ def scan_symbol(symbol: str,
                 range_pct: float,
                 tfs: Sequence[str] = ALL_TFS,
                 ltp: Optional[float] = None) -> dict:
-    """Ek symbol ke saare TF scan karo + MTF confirmation + range filter.
-
-    Returns {"rows": [...], "snapshots": {...}, "stats": {...}}
-    """
     I = inputs.sanitized()
-    ttype_override = _TYPE_FROM_LABEL.get(I.traderType) if I.traderType != "Auto" else None
-    datr = daily_atr_prev(daily, I.atrPeriod)
-
     per_tf: Dict[str, List[dict]] = {}
     atr_map: Dict[str, float] = {}
+    snaps: Dict[str, dict] = {}
     for tf in tfs:
         df = frames.get(tf)
-        if df is None or len(df) < 40:
+        if df is None or len(df) < 30:
             per_tf[tf] = []
             atr_map[tf] = float("nan")
+            snaps[tf] = {"demand": None, "supply": None, "demand_time": 0, "supply_time": 0}
             continue
-        zs = engine(df, I, tf, datr_series=datr, ttype_override=ttype_override)
+        zs = engine(df, I, tf, return_all=False)
         for z in zs:
             z["symbol"] = symbol
         per_tf[tf] = zs
+        snaps[tf] = _LAST_SNAP.get("snap") or {"demand": None, "supply": None,
+                                               "demand_time": 0, "supply_time": 0}
         atr_map[tf] = _atr_last(df, I.atrPeriod)
-
-    snaps = {tf: mtf_snapshot(per_tf[tf]) for tf in tfs}
 
     rows: List[dict] = []
     px = ltp if ltp else _last_close(frames, tfs)
     for tf in tfs:
         for z in per_tf[tf]:
-            z["mtf"] = mtf_ok(z["demand"], z["prox"], z["dist"], atr_map.get(tf, float("nan")),
-                              tf, snaps)
+            z["mtf_n"], z["mtf_tfs"] = mtf_hits(z["demand"], z["prox"], z["dist"],
+                                                z["atr_now"], tf, snaps)
+            z["mtf"] = z["mtf_n"] >= 1
             z["dist_pct"] = abs(z["prox"] - px) / px * 100.0 if px else None
             if range_pct and z["dist_pct"] is not None and z["dist_pct"] > range_pct:
                 continue
@@ -1397,73 +1159,60 @@ def scan_symbol(symbol: str,
 
 def _last_close(frames: Dict[str, pd.DataFrame], tfs: Sequence[str]) -> float:
     for tf in ("1d", "1h", "15m", "5m", "3m"):
-        if tf in tfs:
-            df = frames.get(tf)
-            if df is not None and len(df):
-                return float(df["close"].iloc[-1])
+        df = frames.get(tf)
+        if df is not None and len(df):
+            return float(df["close"].iloc[-1])
     for tf in tfs:
         df = frames.get(tf)
         if df is not None and len(df):
             return float(df["close"].iloc[-1])
     return 0.0
 
-# ═══════════════════════════════════════════════════════════════════════
 
 # ═══════════════════════════════════════════════════════════════════════
-#  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar) में सारे नियंत्रण,
-#           नीचे Google-Sheets जैसी टेबल (TradingView लिंक सहित)
+#  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-st.set_page_config(page_title="ज़ोन MTF स्कैनर · KTP नियम",
-                   page_icon="📐", layout="wide",
+st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
 
-STATE_HI = {
-    "Fresh": "ताज़ा (Fresh)",
-    "Triggered": "सक्रिय (Triggered)",
-    "Immature": "अपरिपक्व (Immature)",
-    "Covered": "ढका (Covered)",
-    "Exhausted": "समाप्त (Exhausted)",
-    "Broken": "टूटा (Broken)",
-}
-# टेबल में पुराने फ़ॉर्मैट जैसे नाम (Fresh / Tested / …)
-STATE_SHORT = {"Fresh": "Fresh", "Triggered": "Tested", "Immature": "Immature",
-               "Covered": "Covered", "Exhausted": "Exhausted", "Broken": "Broken"}
+STATE_HI = {"Fresh": "Fresh", "Tested": "Tested", "Broken": "Broken"}
+ALL_STATES = ["Fresh", "Tested", "Broken"]
 SIDE_HI = {"Demand": "मांग (Demand)", "Supply": "आपूर्ति (Supply)"}
 CAT_HI = {"Reversal": "पलटाव", "Continuation": "निरंतरता"}
-ALL_STATES = ["Fresh", "Triggered", "Immature", "Covered", "Exhausted"]
 
-# टेबल की पहली पंक्ति — सभी नियंत्रण एक जगह
-UNIVERSES = ["NSE All F&O", "NIFTY 50", "Global Instruments", "NSE All + Global", "अपनी सूची"]
+UNIVERSES = ["NSE All Futures", "NIFTY 50", "Global Instruments", "Futures + Global"]
 BANDS = ["Daily (EOD)", "Weekly (EOD)", "Monthly (EOD)"]
 BAND_TF = {"Daily (EOD)": "1d", "Weekly (EOD)": "1w", "Monthly (EOD)": "1M"}
 TV_TF = {"3m": "3", "5m": "5", "10m": "10", "15m": "15", "30m": "30", "75m": "75",
          "1h": "60", "2h": "120", "4h": "240", "6h": "360", "1d": "D", "1w": "W",
          "1M": "M"}
-_STATE_CLS = {"Fresh": "gs-fresh", "Triggered": "gs-trig", "Immature": "gs-imm",
-              "Covered": "gs-cov", "Exhausted": "gs-exh", "Broken": "gs-no"}
-TRADER_OPTS = ["Auto", "Aggressive (1M)", "Hourly (3M/5M)", "Daily (10M/15M)",
-               "Weekly/Swing (1H/75M/2H)", "Monthly (D)"]
+_STATE_CLS = {"Fresh": "gs-fresh", "Tested": "gs-trig", "Broken": "gs-no"}
 
 
-def cols(spec, gap="small", center=True):
-    """st.columns — पुराने संस्करण में vertical_alignment नहीं होता।"""
+def cols(spec, gap="small"):
     try:
-        return st.columns(spec, gap=gap, vertical_alignment="center" if center else None)
+        return st.columns(spec, gap=gap, vertical_alignment="center")
     except TypeError:
         return st.columns(spec, gap=gap)
 
 
 def put(col, fn, *a, **k):
-    """कॉलम के अंदर विजेट — width="stretch" न चले तो use_container_width।"""
     try:
         return getattr(col, fn)(*a, width="stretch", **k)
     except TypeError:
         return getattr(col, fn)(*a, use_container_width=True, **k)
 
 
+def _html(src: str) -> None:
+    """कच्चा HTML/CSS — markdown पार्सर से नहीं गुज़रता।"""
+    try:
+        st.html(src)
+    except Exception:                                          # noqa: BLE001
+        st.markdown(src, unsafe_allow_html=True)
+
+
 def is_dark() -> bool:
-    """ऐप का थीम डार्क है या लाइट (जहाँ पता न चले वहाँ लाइट)।"""
     try:
         t = st.context.theme.type
         if t:
@@ -1477,87 +1226,67 @@ def is_dark() -> bool:
     return False
 
 
-def _html(src: str) -> None:
-    """कच्चा HTML/CSS डालो — markdown पार्सर की अड़चनों से बचने के लिए st.html।"""
-    try:
-        st.html(src)
-    except Exception:                                          # purana streamlit
-        st.markdown(src, unsafe_allow_html=True)
+SHEET_CSS = """
+.gs-wrap{border-radius:6px;overflow:hidden;}
+.gs-scroll{max-height:min(72vh,760px);overflow:auto;}
+table.gs{border-collapse:separate;border-spacing:0;width:100%;
+         font-family:Roboto,'Noto Sans Devanagari',Arial,sans-serif;font-size:12.5px;}
+table.gs th,table.gs td{padding:4px 9px;white-space:nowrap;vertical-align:middle;}
+table.gs thead th{position:sticky;top:0;font-weight:600;text-align:left;z-index:2;
+         padding-top:7px;padding-bottom:7px;}
+table.gs th.gs-rn,table.gs td.gs-rn{position:sticky;left:0;z-index:1;
+         text-align:center;font-size:10.5px;padding:4px 6px;min-width:32px;}
+table.gs thead th.gs-rn{z-index:4;}
+table.gs th.gs-rn{color:transparent;}
+table.gs td.num{text-align:right;font-variant-numeric:tabular-nums;}
+table.gs td.ctr{text-align:center;}
+table.gs a{text-decoration:none;}
+table.gs a:hover{text-decoration:underline;}
+table.gs a.fut{font-weight:700;}
+.gs-dot{font-size:13px;line-height:1;}
+.gs-track{display:inline-block;width:56px;height:6px;border-radius:4px;overflow:hidden;
+          vertical-align:middle;margin-right:6px;}
+.gs-fill{display:block;height:6px;border-radius:4px;}
+.gs-sm{font-size:11px;opacity:.85;}
+"""
+
+SHEET_CSS_DARK = """
+.gs-wrap{border:1px solid #2f3542;background:#0e1117;box-shadow:0 1px 3px rgba(0,0,0,.35);}
+table.gs{color:#e6e9ef;background:#0e1117;}
+table.gs th,table.gs td{border-right:1px solid #262b36;border-bottom:1px solid #262b36;}
+table.gs thead th{background:#161b25;color:#c3cad6;box-shadow:inset 0 -1px 0 #2f3542;}
+table.gs th.gs-rn,table.gs td.gs-rn{background:#12161f;color:#6b7482;border-right:1px solid #2f3542;}
+table.gs tbody tr:hover td{background:#141a24;}
+table.gs tbody tr:hover td.gs-rn{background:#161b25;}
+table.gs a{color:#58a6ff;} table.gs a.fut{color:#79b8ff;}
+.gs-dot-s{color:#ff4d4f;} .gs-dot-d{color:#3fb950;}
+.gs-fresh{color:#3fb950;} .gs-trig{color:#58a6ff;} .gs-no{color:#f85149;}
+.gs-ok{color:#3fb950;} .gs-star{color:#e3b341;} .gs-track{background:#21262d;}
+"""
+
+SHEET_CSS_LIGHT = """
+.gs-wrap{border:1px solid #dadce0;background:#fff;box-shadow:0 1px 3px rgba(60,64,67,.10);}
+table.gs{color:#202124;background:#fff;}
+table.gs th,table.gs td{border-right:1px solid #e8eaed;border-bottom:1px solid #e8eaed;}
+table.gs thead th{background:#f1f3f4;color:#3c4043;box-shadow:inset 0 -1px 0 #dadce0;}
+table.gs th.gs-rn,table.gs td.gs-rn{background:#f8f9fa;color:#80868b;border-right:1px solid #dadce0;}
+table.gs tbody tr:hover td{background:#f1f8ff;}
+table.gs tbody tr:hover td.gs-rn{background:#f1f3f4;}
+table.gs a{color:#1a73e8;} table.gs a.fut{color:#0b57d0;}
+.gs-dot-s{color:#e53935;} .gs-dot-d{color:#2e7d32;}
+.gs-fresh{color:#0b6b3a;} .gs-trig{color:#1a73e8;} .gs-no{color:#d93025;}
+.gs-ok{color:#0b6b3a;} .gs-star{color:#f9ab00;} .gs-track{background:#e8eaed;}
+"""
 
 
 def css():
-    dark = is_dark()
-    sheet = ("""
-      .gs-wrap{border:1px solid #2f3542;background:#0e1117;
-               box-shadow:0 1px 3px rgba(0,0,0,.35);}
-      table.gs{color:#e6e9ef;background:#0e1117;}
-      table.gs th,table.gs td{border-right:1px solid #262b36;border-bottom:1px solid #262b36;}
-      table.gs thead th{background:#161b25;color:#c3cad6;box-shadow:inset 0 -1px 0 #2f3542;}
-      table.gs th.gs-rn,table.gs td.gs-rn{background:#12161f;color:#6b7482;border-right:1px solid #2f3542;}
-      table.gs tbody tr:hover td{background:#141a24;}
-      table.gs tbody tr:hover td.gs-rn{background:#161b25;}
-      table.gs a{color:#58a6ff;}
-      table.gs a.fut{color:#79b8ff;font-weight:700;}
-      .gs-bar{color:#8b949e;} .gs-bar b{color:#c9d1d9;}
-      .gs-dot-s{color:#ff4d4f;} .gs-dot-d{color:#3fb950;}
-      .gs-fresh{color:#3fb950;} .gs-trig{color:#58a6ff;} .gs-imm{color:#d29922;}
-      .gs-cov{color:#a371f7;} .gs-exh{color:#8b949e;} .gs-no{color:#f85149;}
-      .gs-ok{color:#3fb950;} .gs-star{color:#e3b341;}
-      .gs-track{background:#21262d;}""") if dark else ("""
-      .gs-wrap{border:1px solid #dadce0;background:#fff;
-               box-shadow:0 1px 3px rgba(60,64,67,.10);}
-      table.gs{color:#202124;background:#fff;}
-      table.gs th,table.gs td{border-right:1px solid #e8eaed;border-bottom:1px solid #e8eaed;}
-      table.gs thead th{background:#f1f3f4;color:#3c4043;box-shadow:inset 0 -1px 0 #dadce0;}
-      table.gs th.gs-rn,table.gs td.gs-rn{background:#f8f9fa;color:#80868b;border-right:1px solid #dadce0;}
-      table.gs tbody tr:hover td{background:#f1f8ff;}
-      table.gs tbody tr:hover td.gs-rn{background:#f1f3f4;}
-      table.gs a{color:#1a73e8;}
-      table.gs a.fut{color:#0b57d0;font-weight:700;}
-      .gs-bar{color:#5f6368;} .gs-bar b{color:#202124;}
-      .gs-dot-s{color:#e53935;} .gs-dot-d{color:#2e7d32;}
-      .gs-fresh{color:#0b6b3a;} .gs-trig{color:#1a73e8;} .gs-imm{color:#b06000;}
-      .gs-cov{color:#7b61ff;} .gs-exh{color:#80868b;} .gs-no{color:#d93025;}
-      .gs-ok{color:#0b6b3a;} .gs-star{color:#f9ab00;}
-      .gs-track{background:#e8eaed;}""")
-
-    _CSS = """
-    <style>
-      .block-container{padding-top:.55rem;padding-bottom:1rem;max-width:100%;}
-      h1,h2,h3{letter-spacing:.2px;}
-      div[data-testid="stMetricValue"]{font-size:1.25rem;}
-      div[data-testid="stHorizontalBlock"]{gap:.45rem;}
-      .hero{background:linear-gradient(100deg,#0b132b 0%,#1c2541 45%,#3a506b 100%);
-            padding:10px 18px;border-radius:12px;color:#fff;margin-bottom:8px;}
-      .hero h1{margin:0;font-size:1.12rem;color:#fff;font-weight:700;}
-      .hero span{color:#c9d6e8;font-size:.76rem;}
-
-      /* ───── Google Sheets जैसी टेबल ───── */
-      .gs-bar{display:flex;align-items:center;gap:8px;font-size:11.5px;margin:.15rem 0 .35rem;}
-      .gs-bar b{font-weight:700;}
-      .gs-wrap{border-radius:6px;overflow:hidden;}
-      .gs-scroll{max-height:min(70vh,720px);overflow:auto;}
-      table.gs{border-collapse:separate;border-spacing:0;width:100%;
-               font-family:Roboto,'Noto Sans Devanagari',Arial,sans-serif;
-               font-size:12.5px;}
-      table.gs th,table.gs td{padding:4px 9px;white-space:nowrap;vertical-align:middle;}
-      table.gs thead th{position:sticky;top:0;font-weight:600;text-align:left;z-index:2;
-               padding-top:7px;padding-bottom:7px;}
-      table.gs th.gs-rn,table.gs td.gs-rn{position:sticky;left:0;z-index:1;
-               text-align:center;font-size:10.5px;padding:4px 6px;min-width:32px;}
-      table.gs thead th.gs-rn{z-index:4;}
-      table.gs th.gs-rn{color:transparent;}
-      table.gs td.num{text-align:right;font-variant-numeric:tabular-nums;}
-      table.gs td.ctr{text-align:center;}
-      table.gs a{text-decoration:none;}
-      table.gs a:hover{text-decoration:underline;}
-      .gs-dot{font-size:13px;line-height:1;}
-      .gs-track{display:inline-block;width:56px;height:6px;border-radius:4px;overflow:hidden;
-                vertical-align:middle;margin-right:6px;}
-      .gs-fill{display:block;height:6px;border-radius:4px;}
-      .gs-sm{font-size:11px;opacity:.85;}
-    </style>""" + sheet
-    _html(_CSS)
+    base = """
+.block-container{padding-top:.55rem;padding-bottom:1rem;max-width:100%;}
+div[data-testid="stHorizontalBlock"]{gap:.45rem;}
+h1,h2,h3{letter-spacing:.2px;}
+"""
+    extra = SHEET_CSS_DARK if is_dark() else SHEET_CSS_LIGHT
+    _html("<style>" + base + SHEET_CSS + extra + "</style>")
 
 
 def reset_inputs():
@@ -1567,241 +1296,141 @@ def reset_inputs():
 
 
 def preset_loose():
-    """Pine default से थोड़ा ढीला — सिर्फ़ खोज के लिए।"""
-    for k, v in {"in_losize": 3.0, "in_lisize": 1.5, "in_minscorep": 30,
-                 "in_baseatr": 1.2, "in_libody": 0.40, "in_liwick": 0.30}.items():
+    """Pine default से थोड़ा ढीला (सिर्फ़ खोज के लिए)।"""
+    for k, v in {"in_minvalid": 30, "in_leginbody": 0.50, "in_minclv": 0.50}.items():
         st.session_state[k] = v
 
 
 # ---------------------------------------------------------------------------
-# 1 · ऊपर की पंक्ति — सारे स्कैन नियंत्रण इनबिल्ट
+# 1 · ऊपर की एक पंक्ति
 # ---------------------------------------------------------------------------
 def top_bar():
-    """स्क्रीनशॉट जैसी एक row: यूनिवर्स · TF · ट्रेडर · पक्ष · स्थिति · रेंज · स्क्रिप्ट · Scan"""
-    c = cols([1.4, 2.0, 1.0, .72, .72, 1.0, 1.12, .95])
-
+    c = cols([1.5, 2.0, .8, .85, 1.05, 1.15, .95])
     uni = c[0].selectbox("यूनिवर्स", UNIVERSES, key="in_uni", label_visibility="collapsed")
     tfs = c[1].multiselect("TF", list(ALL_TFS), default=list(ALL_TFS),
-                           format_func=lambda t: t, key="in_tfs",
-                           label_visibility="collapsed")
-    ttype = c[2].selectbox("ट्रेडर", TRADER_OPTS, key="in_ttype", label_visibility="collapsed")
-    side = c[3].selectbox("पक्ष", ["All", "Demand", "Supply"], key="in_side",
+                           key="in_tfs", label_visibility="collapsed")
+    side = c[2].selectbox("पक्ष", ["All", "Demand", "Supply"], key="in_side",
                           label_visibility="collapsed")
-    status = c[4].selectbox("स्थिति", ["All"] + ALL_STATES, key="in_status",
+    status = c[3].selectbox("स्थिति", ["All"] + ALL_STATES, key="in_status",
                             label_visibility="collapsed")
-    band = c[5].selectbox("रेंज", BANDS, index=1, key="in_band",
+    band = c[4].selectbox("रेंज", BANDS, index=1, key="in_band",
                           label_visibility="collapsed")
-    sym_txt = c[6].text_input("स्क्रिप्ट", key="in_symtxt", label_visibility="collapsed",
+    sym_txt = c[5].text_input("स्क्रिप्ट", key="in_symtxt", label_visibility="collapsed",
                               placeholder="RELIANCE, SBIN…")
-    go = put(c[7], "button", "⚡ Scan", type="primary", key="btn_scan", help=None)
-
-    return dict(universe=uni, tfs=tuple(tfs), trader=ttype, side=side, status=status,
-                band=band, symbols_txt=sym_txt.strip(), go=go)
+    go = put(c[6], "button", "⚡ Scan", type="primary", key="btn_scan")
+    return dict(universe=uni, tfs=tuple(tfs), side=side, status=status, band=band,
+                symbols_txt=sym_txt.strip(), go=go)
 
 
 # ---------------------------------------------------------------------------
-# 2 · Pine v6 के सारे इनपुट — एक expander में (sidebar हटा दिया)
+# 2 · Pine v6 इनपुट
 # ---------------------------------------------------------------------------
-def pine_panel(slot=None) -> "PineInputs":
-    """Pine के सारे input — किसी भी कॉलम/स्लॉट के अंदर, बंद expander में।"""
+def pine_panel(slot=None):
     host = slot if slot is not None else st
     with host.expander("⚙️ इनपुट", expanded=False):
         b1, b2, _ = st.columns([1, 1, 4])
-        put(b1, "button", "↺ Pine default", on_click=reset_inputs,
-            help="सारे input वापस Pine v6 के मूल default पर")
-        put(b2, "button", "🔓 ढीला", on_click=preset_loose,
-            help="कुछ ज़्यादा ज़ोन दिखेंगे (Pine default नहीं — प्रयोग के लिए)")
+        put(b1, "button", "↺ Pine default", on_click=reset_inputs)
+        put(b2, "button", "🔓 ढीला", on_click=preset_loose)
 
         c1, c2, c3, c4 = st.columns(4)
-
         with c1:
-            st.markdown("**0 · पूँजी, जोखिम, बफ़र**")
-            cap = st.number_input("खाता पूँजी ₹ (accountCapital)", 1000.0, 1e9, 25000.0, 1000.0, key="in_cap")
-            risk = st.number_input("जोखिम % (riskPct)", 0.05, 10.0, 0.5, 0.05, key="in_risk")
-            rr = st.number_input("टारगेट RR (targetRR)", 0.5, 20.0, 5.0, 0.5, key="in_rr")
-            bmode = st.selectbox("बफ़र विधि (bufferMode)", ["DATR % (course)", "Chart ATR ×"], key="in_bmode")
-            b_aggr = st.number_input("Aggressive बफ़र % (bufAggrPct)", 0.0, 100.0, 2.0, 0.5, key="in_baggr")
-            b_day = st.number_input("Daily बफ़र % (bufDailyPct)", 0.0, 100.0, 5.0, 0.5, key="in_bday")
-            b_swing = st.number_input("Swing बफ़र % (bufSwingPct)", 0.0, 100.0, 10.0, 0.5, key="in_bswing")
-            sl_buf = st.number_input("SL बफ़र ATR × (slBufferAtr)", 0.0, 5.0, 0.1, 0.05, key="in_slbuf")
-
+            st.markdown("**मूल (Pine)**")
+            cap = st.number_input("Account Capital", 1000.0, 1e9, 25000.0, 1000.0, key="in_cap")
+            risk = st.number_input("Risk %", 0.05, 10.0, 0.5, 0.05, key="in_risk")
+            rr = st.number_input("Target RR", 0.5, 20.0, 5.0, 0.5, key="in_rr")
+            slb = st.number_input("SL Buffer ATR", 0.0, 5.0, 0.1, 0.05, key="in_slb")
+            atrp = st.number_input("ATR Period", 2, 200, 14, 1, key="in_atr")
+            volsma = st.number_input("Volume SMA Period", 2, 200, 20, 1, key="in_volsma")
+            lotr = st.number_input("Leg-Out TR Multiplier", 0.0, 5.0, 1.2, 0.1, key="in_lotr")
+            lomintr = st.number_input("Leg-Out Min TR Ratio vs Leg-In", 0.0, 5.0, 1.0, 0.1, key="in_lomintr")
         with c2:
-            st.markdown("**1 · Leg-in / Boring / Leg-out**")
-            atr_p = st.number_input("ATR पीरियड (atrPeriod)", 2, 200, 14, 1, key="in_atr")
-            min_bc = st.number_input("न्यूनतम boring (minBaseCount)", 1, 4, 1, 1, key="in_minbc")
-            max_bc = st.number_input("अधिकतम boring (maxBaseCount)", 1, 4, 3, 1, key="in_maxbc")
-            base_atr = st.number_input("boring ≤ ATR × (maxBaseAtrMult)", 0.1, 5.0, 1.0, 0.1, key="in_baseatr")
-            li_atr = st.number_input("leg-in ≥ ATR × (legInMinAtrMult)", 0.0, 5.0, 1.0, 0.1, key="in_liatr")
-            li_body = st.number_input("leg-in body ≥ (legInMinBodyPct)", 0.0, 1.0, 0.50, 0.05, key="in_libody")
-            li_wick = st.number_input("leg-in wick ≤ (legInMaxClosingWickPct)", 0.0, 1.0, 0.20, 0.05, key="in_liwick")
-            li_size = st.number_input("leg-in ≥ base × (legInToBaseSizeMult)", 0.0, 10.0, 2.0, 0.1, key="in_lisize")
-
+            st.markdown("**1-2-4 (Pine)**")
+            hqlotr = st.number_input("HQ Leg-Out TR Multiplier", 0.0, 10.0, 2.0, 0.1, key="in_hqlotr")
+            hqli = st.number_input("HQ Leg-In ATR Multiplier", 0.0, 10.0, 1.5, 0.1, key="in_hqli")
+            baseatr = st.number_input("Max Base TR ATR Multiplier", 0.1, 5.0, 1.0, 0.1, key="in_baseatr")
+            maxwick = st.number_input("Max Wick %", 0.0, 1.0, 0.30, 0.05, key="in_maxwick")
+            minbc = st.number_input("Min Base Count", 1, 4, 1, 1, key="in_minbc")
+            maxbc = st.number_input("Max Base Count (≤3)", 1, 4, 3, 1, key="in_maxbc")
+            li_atr = st.number_input("Leg-In Min ATR Multiplier", 0.0, 5.0, 1.0, 0.1, key="in_liatr")
+            clv = st.number_input("Min CLV %", 0.0, 1.0, 0.60, 0.05, key="in_minclv")
         with c3:
-            st.markdown("**1 · (आगे) + 2 · सत्यापन**")
-            lo_size = st.number_input("leg-out ≥ base × (legOutToBaseSizeMult)", 0.0, 20.0, 4.0, 0.1, key="in_losize")
-            max_lo = st.number_input("leg-out candles (maxLegOut)", 1, 3, 3, 1, key="in_maxlo")
-            join_tol = st.number_input("join सहनशीलता ATR × (legOutJoinTolAtr)", 0.0, 2.0, 0.25, 0.05, key="in_jointol")
-            lo_tr = st.number_input("leg-out TR ≥ ATR × (legOutTrMult)", 0.0, 5.0, 1.2, 0.1, key="in_lotr")
-            max_wick = st.number_input("leg-out wick ≤ (maxWickPct)", 0.0, 1.0, 0.30, 0.05, key="in_maxwick")
-            c_cbli = st.checkbox("CBLI जाँच (useCBLI)", True, key="in_cbli")
-            cbli_p = st.number_input("CBLI सीमा (cbliMaxPct)", 0.0, 1.0, 0.50, 0.05, key="in_cblip")
-            c_form = st.checkbox("Formation DBR/RBD (useFormation)", True, key="in_form")
-            form_tol = st.number_input("Formation सहनशीलता ATR × (formationTolAtr)", 0.0, 2.0, 0.10, 0.05, key="in_formtol")
-
+            st.markdown("**सत्यापन (Pine)**")
+            libase = st.number_input("Leg-In to Base Size Multiplier", 0.0, 10.0, 2.0, 0.1, key="in_libase")
+            libody = st.number_input("Leg-In Min Body %", 0.0, 1.0, 0.60, 0.05, key="in_leginbody")
+            useimb = st.checkbox("Use Imbalance", True, key="in_useimb")
+            maximb = st.number_input("Max Imbalance vs Leg-In Mult", 0.0, 5.0, 1.0, 0.1, key="in_maximb")
+            relaxgap = st.checkbox("Relax Gap Cap on Overnight", True, key="in_relaxgap")
+            gapb = st.number_input("Genuine Gap Score Bonus", 0, 50, 10, 1, key="in_gapb")
+            onb = st.number_input("Overnight Gap Score Bonus", 0, 50, 15, 1, key="in_onb")
+            rej = st.number_input("Reject Opposite Cover %", 0.0, 1.0, 0.50, 0.05, key="in_rej")
         with c4:
-            st.markdown("**2 · (आगे) + 3 · Score + MTF**")
-            c_white = st.checkbox("White area (useWhiteArea)", True, key="in_white")
-            c_cov = st.checkbox("Covered leg-out (useCoveredLegOut)", True, key="in_cov")
-            c_mat = st.checkbox("Maturity (useMaturity)", True, key="in_mat")
-            max_touch = st.number_input("अधिकतम touches (maxTouches)", 1, 20, 3, 1, key="in_maxtouch")
-            distal = st.selectbox("Distal विधि (distalMode)",
-                                  ["Pattern lowest/highest (course)", "Boring only"], key="in_distal")
-            c_vol = st.checkbox("Volume अनिवार्य (requireVolume)", False, key="in_vol")
-            vol_sma = st.number_input("Volume SMA (volSmaPeriod)", 2, 200, 20, 1, key="in_volsma")
-            hq_lo = st.number_input("HQ leg-out TR × (hqLegOutTrMult)", 0.0, 10.0, 2.0, 0.1, key="in_hqlo")
+            st.markdown("**Score / Tested**")
+            minval = st.number_input("Min Valid Score", 0, 200, 40, 1, key="in_minvalid")
+            hqthr = st.number_input("HQ Score Threshold", 0, 300, 90, 1, key="in_hqthr")
+            heavy = st.number_input("Leg-Out Body Heavy Pressure %", 0.0, 1.0, 0.60, 0.05, key="in_heavy")
+            retr = st.number_input("Tested Leg-Out Retrace %", 0.0, 3.0, 1.00, 0.05, key="in_retr")
+            maxtest = st.number_input("Max Tested Count", 0, 20, 1, 1, key="in_maxtest")
+            scanbars = st.number_input("कितने बार पीछे (scanBars)", 200, 5000, 500, 100, key="in_scanbars")
+            maxsyms = st.number_input("अधिकतम स्क्रिप्ट (0 = सभी)", 0, 3000, 0, 50, key="in_maxsyms")
+            showmtf = st.checkbox("MTF गणना (Show other-TF proximal)", True, key="in_showmtf")
 
-        c5, c6, c7, c8 = st.columns(4)
-        with c5:
-            hq_li = st.number_input("HQ leg-in ATR × (hqLegInAtrMult)", 0.0, 10.0, 1.5, 0.1, key="in_hqli")
-            heavy = st.number_input("भारी body (legOutBodyHeavyPct)", 0.0, 1.0, 0.60, 0.05, key="in_heavy")
-            gap_b = st.number_input("Genuine gap बोनस", 0, 50, 10, 1, key="in_gapb")
-            on_b = st.number_input("Overnight gap बोनस", 0, 50, 15, 1, key="in_onb")
-        with c6:
-            min_score_p = st.number_input("न्यूनतम मान्य स्कोर (minValidScore)", 0, 200, 40, 1, key="in_minscorep")
-            hq_thr = st.number_input("HQ सीमा (hqScoreThreshold)", 0, 300, 90, 1, key="in_hqthr")
-            min_score_ui = st.slider("स्कोर फ़िल्टर", 0, 150, 0, 5, key="in_minscore")
-            only_hq = st.checkbox("सिर्फ़ HQ ज़ोन (★)", value=False, key="in_onlyhq")
-        with c7:
-            s_mcap = st.checkbox("मार्केट कैप दिखाएँ (showMcap)", True, key="in_mcap")
-            min_mcap = st.number_input("न्यूनतम मार्केट कैप ₹Cr (minMcapCr)", 0.0, 1e6, 50000.0, 1000.0, key="in_minmcap")
-            s_info = st.checkbox("Info लेबल (showInfo)", True, key="in_info")
-            only_mtf = st.checkbox("सिर्फ़ MTF-confirmed", value=False, key="in_onlymtf")
-        with c8:
-            s_mtf = st.checkbox("MTF गणना (showMTF)", True, key="in_showmtf")
-            peers = st.multiselect("MTF समय-सीमाएँ (tf1…tf9)", list(ALL_TFS),
-                                   default=["3m", "5m", "10m", "15m", "30m", "1h", "75m", "2h", "1d"],
-                                   key="in_peers")
-            scan_bars = st.number_input("कितने बार पीछे (scanBars)", 200, 5000, 500, 100, key="in_scanbars")
-            max_syms = st.number_input("अधिकतम स्क्रिप्ट (0 = सभी)", 0, 3000, 0, 50, key="in_maxsyms")
-
-        st.markdown("**4 · प्रदर्शन / Shadow / Swing**")
-        if True:
-            d1, d2, d3 = st.columns(3)
-            shadow_atr = d1.number_input("Shadow दूरी ATR × (shadowAtr)", 0.0, 1.0, 0.08, 0.01, key="in_shadowatr")
-            s_shadow = d2.checkbox("Shadow ज़ोन (showShadow)", True, key="in_shadow")
-            s_flags = d3.checkbox("BASE BREAK / SWING फ़्लैग (showFlags)", True, key="in_flags")
-            sw_l = d1.number_input("Swing बाएँ (swingLeft)", 1, 20, 3, 1, key="in_swl")
-            sw_r = d2.number_input("Swing दाएँ (swingRight)", 1, 20, 3, 1, key="in_swr")
-            max_store = d3.number_input("ज़ोन भंडार (maxStored)", 10, 400, 220, 10, key="in_maxstore")
+        st.markdown("**MTF / Shadows — Pine के parity inputs (zone validation में निष्क्रिय)**")
+        d1, d2, d3, d4 = st.columns(4)
+        near = d1.number_input("Show lines within % (mtfNearPct)", 0.1, 100.0, 8.0, 0.5, key="in_near")
+        fdist = d2.checkbox("Hide distant MTF lines", True, key="in_fdist")
+        shadow = d3.checkbox("Shadow", True, key="in_shadow")
+        flags = d4.checkbox("BASE BREAK / SWING", True, key="in_flags")
+        e1, e2, e3, e4 = st.columns(4)
+        shatr = e1.number_input("Shadow padding × ATR", 0.0, 1.0, 0.08, 0.01, key="in_shatr")
+        swl = e2.number_input("Swing left", 1, 20, 3, 1, key="in_swl")
+        swr = e3.number_input("Swing right", 1, 20, 3, 1, key="in_swr")
+        maxst = e4.number_input("Max chart zones", 10, 240, 220, 10, key="in_maxst")
+        p1, p2, p3, p4 = st.columns(4)
+        p1.checkbox("Leg-Out to Leg-In Body Mult", True, key="in_parity1", disabled=True)
+        p2.checkbox("Use Closing-Side Wick Guard", True, key="in_parity2", disabled=True)
+        p3.checkbox("Use Leg-Out Coverage Guard", True, key="in_parity3", disabled=True)
+        p4.checkbox("Use White Area Check", True, key="in_parity4", disabled=True)
+        st.caption("ऊपर के चार parity inputs Pine में हैं पर zone validation में निष्क्रिय हैं — "
+                   "इसलिए यहाँ भी सिर्फ़ दिखाने के लिए (बदले नहीं जा सकते)।")
 
     inp = PineInputs(
         accountCapital=float(cap), riskPct=float(risk), targetRR=float(rr),
-        traderType=str(st.session_state.get("in_ttype", "Auto")),
-        bufferMode=bmode,
-        bufAggrPct=float(b_aggr), bufDailyPct=float(b_day), bufSwingPct=float(b_swing),
-        slBufferAtr=float(sl_buf),
-        atrPeriod=int(atr_p), minBaseCount=int(min_bc), maxBaseCount=int(max_bc),
-        maxBaseAtrMult=float(base_atr), legInMinAtrMult=float(li_atr),
-        legInMinBodyPct=float(li_body), legInMaxClosingWickPct=float(li_wick),
-        legInToBaseSizeMult=float(li_size), legOutToBaseSizeMult=float(lo_size),
-        maxLegOut=int(max_lo), legOutJoinTolAtr=float(join_tol), legOutTrMult=float(lo_tr),
-        maxWickPct=float(max_wick),
-        useCBLI=bool(c_cbli), cbliMaxPct=float(cbli_p), useFormation=bool(c_form),
-        formationTolAtr=float(form_tol), useWhiteArea=bool(c_white),
-        useCoveredLegOut=bool(c_cov), useMaturity=bool(c_mat), maxTouches=int(max_touch),
-        distalMode=distal, requireVolume=bool(c_vol), useImbalance=False,
-        volSmaPeriod=int(vol_sma), hqLegOutTrMult=float(hq_lo), hqLegInAtrMult=float(hq_li),
-        legOutBodyHeavyPct=float(heavy), genuineGapBonus=int(gap_b),
-        overnightGapBonus=int(on_b), minValidScore=int(min_score_p),
-        hqScoreThreshold=int(hq_thr),
-        showInfo=bool(s_info), showMcap=bool(s_mcap), minMcapCr=float(min_mcap),
-        showMTF=bool(s_mtf), filterDistantMTF=True, mtfNearPct=8.0,
-        showShadow=bool(s_shadow), showFlags=bool(s_flags), shadowAtr=float(shadow_atr),
-        swingLeft=int(sw_l), swingRight=int(sw_r), maxStored=int(max_store),
-        scanRangePct=float(st.session_state.get("in_range", 10.0)),
-        scanBars=int(scan_bars),
+        slBufferAtr=float(slb), atrPeriod=int(atrp), volSmaPeriod=int(volsma),
+        legOutTrMult=float(lotr), legOutMinTrRatio=float(lomintr),
+        hqLegOutTrMult=float(hqlotr), hqLegInAtrMult=float(hqli),
+        maxBaseAtrMult=float(baseatr), maxWickPct=float(maxwick),
+        minBaseCountInput=int(minbc), maxBaseCountInput=int(maxbc),
+        legInMinAtrMult=float(li_atr), minClvPct=float(clv),
+        legInToBaseSizeMult=float(libase), legInMinBodyPct=float(libody),
+        useImbalance=bool(useimb), maxImbalanceMult=float(maximb),
+        relaxGapCapOvernight=bool(relaxgap), genuineGapBonus=int(gapb),
+        overnightGapBonus=int(onb), rejectOppositeCoverPct=float(rej),
+        minValidScore=int(minval), hqScoreThreshold=int(hqthr),
+        legOutBodyHeavyPct=float(heavy), testedLegOutRetracePct=float(retr),
+        maxTestedCount=int(maxtest),
+        showMTF=bool(showmtf), filterDistantMTF=bool(fdist), mtfNearPct=float(near),
+        showShadow=bool(shadow), showFlags=bool(flags), shadowAtr=float(shatr),
+        swingLeft=int(swl), swingRight=int(swr), maxStored=int(maxst),
+        scanBars=int(scanbars),
     ).sanitized()
-
-    ui_opts = dict(min_score=int(min_score_ui), only_mtf=bool(only_mtf),
-                   only_hq=bool(only_hq), peers=tuple(peers),
-                   min_mcap=float(min_mcap), show_mcap=bool(s_mcap),
-                   max_syms=int(max_syms))
-    return inp, ui_opts
+    uo = dict(max_syms=int(maxsyms), peers=tuple(ALL_TFS), show_mcap=True, min_mcap=50000.0)
+    return inp, uo
 
 
-def stretch(fn, *a, **k):
-    """streamlit नए/पुराने दोनों में width चले।"""
-    try:
-        return fn(*a, width="stretch", **k)
-    except TypeError:
-        return fn(*a, use_container_width=True, **k)
-
-
-def fmt_t(ms: int) -> str:
-    if not ms:
-        return "—"
-    return datetime.fromtimestamp(ms / 1000, IST).strftime("%d-%b %H:%M")
-
-
-def tv_url(symbol: str, tf: str) -> str:
-    """https://www.tradingview.com/chart/?symbol=NSE:SBIN&interval=15"""
-    from urllib.parse import quote
-    return (f"https://www.tradingview.com/chart/?symbol={quote('NSE:' + str(symbol))}"
-            f"&interval={TV_TF.get(str(tf), '15')}")
-
-
-def _col_letter(i: int) -> str:
-    """0 → A, 25 → Z, 26 → AA"""
-    out, i = "", i + 1
-    while i:
-        i, r = divmod(i - 1, 26)
-        out = chr(65 + r) + out
-    return out
-
-
-def _lerp(c1, c2, t):
-    return tuple(int(round(a + (b - a) * t)) for a, b in zip(c1, c2))
-
-
-def _score_bg(sc: float) -> str:
-    """Google Sheets जैसा conditional रंग: लाल → पीला → हरा"""
-    low, mid, high = (252, 232, 230), (254, 247, 224), (206, 234, 214)
-    t = max(0.0, min(1.0, (float(sc) - 30.0) / 90.0))
-    c = _lerp(low, mid, t / 0.5) if t <= 0.5 else _lerp(mid, high, (t - 0.5) / 0.5)
-    return f"rgb({c[0]},{c[1]},{c[2]})"
-
-
-def resolve_universe(uni: str, custom: str):
-    if uni == "NIFTY 50":
-        return list(dict.fromkeys(NIFTY50))
-    if uni == "F&O (NSE लाइव)":
-        try:
-            u = live_fno_universe()
-            return list(dict.fromkeys(u)) if u else list(dict.fromkeys(FALLBACK_FNO))
-        except Exception:
-            return list(dict.fromkeys(FALLBACK_FNO))
-    if uni == "NIFTY 50 + F&O":
-        try:
-            u = list(live_fno_universe())
-        except Exception:
-            u = []
-        return list(dict.fromkeys(list(NIFTY50) + (u or list(FALLBACK_FNO))))
-    return [s.strip().upper() for s in custom.replace("\n", ",").split(",") if s.strip()]
-
-
+# ---------------------------------------------------------------------------
+# 3 · कैश + स्कैन
+# ---------------------------------------------------------------------------
 @st.cache_data(ttl=21600, show_spinner=False)
 def cached_fno():
-    """NSE F&O सूची 6 घंटे तक कैश।"""
     try:
         u = live_fno_universe()
         return list(u) if u else list(FALLBACK_FNO)
-    except Exception:                                            # noqa: BLE001
+    except Exception:                                          # noqa: BLE001
         return list(FALLBACK_FNO)
 
 
 @st.cache_resource(ttl=1800, max_entries=4, show_spinner=False)
 def cached_frames(symbols: tuple, tfs: tuple):
-    """एक ही यूनिवर्स के candles दोबारा नहीं माँगे जाते।"""
     return load_frames(list(symbols), list(tfs))
 
 
@@ -1809,70 +1438,48 @@ def cached_frames(symbols: tuple, tfs: tuple):
 def cached_caps(symbols: tuple):
     try:
         return market_caps(list(symbols))
-    except Exception:                                            # noqa: BLE001
+    except Exception:                                          # noqa: BLE001
         return {}
 
 
-@st.cache_data(ttl=300, show_spinner=False)
-def cached_scan(symbols: tuple, inp_key: str, opts_key: str):
-    """पूरा स्कैन कैश — उसी सेटिंग पर दोबारा Scan दबाने पर तुरंत।"""
-    inp = PineInputs(**json.loads(inp_key)).sanitized()
-    opts = json.loads(opts_key)
-    return _scan_all(list(symbols), inp, opts)
-
-
 def run_scan(symbols, inp, opts):
-    """कैश के ज़रिए स्कैन — दूसरी बार तुरंत।"""
     return cached_scan(tuple(symbols),
                        json.dumps(inp.__dict__, default=str, sort_keys=True),
                        json.dumps({k: (list(v) if isinstance(v, tuple) else v)
                                    for k, v in opts.items()}, default=str, sort_keys=True))
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def cached_scan(symbols: tuple, inp_key: str, opts_key: str):
+    inp = PineInputs(**json.loads(inp_key)).sanitized()
+    return _scan_all(list(symbols), inp, json.loads(opts_key))
+
+
 def _scan_all(symbols, inp, opts):
     tfs = list(opts["tfs"]) or list(ALL_TFS)
-
-    # बैंड के लिए daily/weekly/monthly हमेशा चाहिए
     need = list(dict.fromkeys(list(tfs) + ["1d", "1w", "1M"]))
     frames = cached_frames(tuple(symbols), tuple(need))
     rows, snaps, atrs, ltps, errs = [], {}, {}, {}, {}
     jobs = [(s, frames[s]) for s in symbols if s in frames]
-    missing = [s for s in symbols if s not in frames]
-    for s in missing:
-        errs[s] = "डेटा नहीं मिला"
+    for s in symbols:
+        if s not in frames:
+            errs[s] = "डेटा नहीं मिला"
+    if jobs:
+        with ThreadPoolExecutor(max_workers=min(8, len(jobs))) as ex:
+            futs = {ex.submit(scan_symbol, s, f, f.get("1d"), inp, 1e9, tfs): s
+                    for s, f in jobs}
+            for fu in as_completed(futs):
+                s = futs[fu]
+                try:
+                    r = fu.result()
+                except Exception as e:                          # noqa: BLE001
+                    errs[s] = f"{type(e).__name__}: {e}"
+                    continue
+                snaps[s] = r["snapshots"]
+                atrs[s] = r["atr"]
+                ltps[s] = r["ltp"]
+                rows.extend(r["rows"])
 
-    if not jobs:
-        return dict(rows=pd.DataFrame(), snaps={}, atr={}, ltp={}, errs=errs, bands={},
-                    band_tf="1w", band_mode="Weekly (EOD)",
-                    at=datetime.now(IST), scanned=0)
-
-    done = 0
-    with ThreadPoolExecutor(max_workers=min(8, len(jobs))) as ex:
-        futs = {ex.submit(scan_symbol, s, f, f.get("1d"), inp, 1e9, tfs): s
-                for s, f in jobs}
-        for fu in as_completed(futs):
-            s = futs[fu]
-            done += 1
-            try:
-                r = fu.result()
-            except Exception as e:                            # noqa: BLE001
-                errs[s] = f"{type(e).__name__}: {e}"
-                continue
-            snaps[s] = r["snapshots"]
-            atrs[s] = r["atr"]
-            ltps[s] = r["ltp"]
-            rows.extend(r["rows"])
-
-    # MTF peers — Pine tf1…tf9
-    peers = set(opts["peers"])
-    if peers and peers != set(tfs):
-        for z in rows:
-            sn = {k: v for k, v in snaps.get(z["symbol"], {}).items() if k in peers}
-            z["mtf"] = mtf_ok(z["demand"], z["prox"], z["dist"],
-                                atrs.get(z["symbol"], {}).get(z["tf"], float("nan")),
-                                z["tf"], sn)
-
-    # ── स्कैन रेंज बैंड: High+ATR14 … Low−ATR14 (EOD candle) ──
     btf = BAND_TF.get(opts.get("band", "Weekly (EOD)"), "1w")
     bands = {}
     for s in symbols:
@@ -1882,251 +1489,44 @@ def _scan_all(symbols, inp, opts):
 
     df = pd.DataFrame(rows)
     if not df.empty:
-        df.insert(0, "symbol", df.pop("symbol"))
-        df["dist_abs"] = (df["prox"] - df["ltp"]).abs()
         df["side_hi"] = df["side"].map(SIDE_HI)
-        df["state_hi"] = df["state"].map(STATE_HI).fillna(df["state"])
         df["cat_hi"] = df["category"].map(CAT_HI).fillna(df["category"])
-        df["tf_hi"] = df["tf"].map(TF_LABEL_HI).fillna(df["tf"])
-        df["created_ist"] = df["time"].map(fmt_t)
+        df["created_ist"] = df["time"].map(
+            lambda ms: datetime.fromtimestamp(ms / 1000, IST).strftime("%d-%b %H:%M") if ms else "—")
         df = df.sort_values(["dist_pct", "score"], ascending=[True, False]).reset_index(drop=True)
     return dict(rows=df, snaps=snaps, atr=atrs, ltp=ltps, errs=errs, bands=bands,
-                band_tf=btf, band_mode=opts.get("band", "Weekly (EOD)"),
-                at=datetime.now(IST), scanned=len(jobs))
-
-
-def zone_table(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0):
-    d = pd.DataFrame({
-        "स्क्रिप्ट": df["symbol"],
-        "TF": df["tf"],
-        "पक्ष": df["side_hi"],
-        "पैटर्न": df["pattern"],
-        "बेस": df["base_count"].map(lambda b: f"{int(b)} · {_GRADE_HI.get(int(b), '')}"),
-        "एंट्री (proximal)": df["prox"].round(2),
-        "डिस्टल": df["dist"].round(2),
-        "SL": df["sl"].round(2),
-        "T1": df["tp"].round(2),
-        "दूरी %": df["dist_pct"].round(2),
-        "स्कोर": df["score"].astype(int),
-        "HQ": df["hq"].map(lambda v: "★" if v else ""),
-        "MTF": df["mtf"].map(lambda v: "✓" if v else "–"),
-        "स्थिति": df["state_hi"],
-        "XRPT RR": df["xrpt_rr"],
-        "मात्रा": df["qty"].astype(int),
-    })
-    if show_mcap:
-        mc = df["mcap_cr"] if "mcap_cr" in df.columns else None
-        if mc is not None:
-            d["मार्केट कैप ₹Cr"] = mc.map(
-                lambda v: "—" if pd.isna(v) else (f"{v:,.0f}" + (" ✓" if v >= min_mcap else " ✗")))
-    d["बना (IST)"] = df["created_ist"]
-    return d
-
-
-def zone_chart(df: pd.DataFrame, zones: pd.DataFrame, sym: str, tf: str,
-               inputs: PineInputs, sl: float | None = None, tp: float | None = None):
-    """Plotly हो तो Plotly; वरना Altair (streamlit के साथ bundled)।"""
-    if HAS_PLOTLY:
-        fig = _zone_chart_plotly(df, zones, sym, tf, inputs)
-        if sl is not None:
-            fig.add_hline(y=float(sl), line=dict(color="#d62728", width=1, dash="dash"),
-                          annotation_text=f"SL {float(sl):.2f}", annotation_position="right")
-        if tp is not None:
-            fig.add_hline(y=float(tp), line=dict(color="#2ca02c", width=1, dash="dash"),
-                          annotation_text=f"T1 {float(tp):.2f}", annotation_position="right")
-        return fig
-    return _zone_chart_altair(df, zones, sym, tf, sl, tp)
-
-
-def _zone_chart_plotly(df: pd.DataFrame, zones: pd.DataFrame, sym: str, tf: str,
-                       inputs: PineInputs):
-    d = df.tail(400)
-    x = d.index
-    step = (x[-1] - x[-2]) if len(x) > 1 else pd.Timedelta(minutes=15)
-    last_x = x[-1]
-    fig = go.Figure()
-    fig.add_trace(go.Candlestick(
-        x=x, open=d["open"], high=d["high"], low=d["low"], close=d["close"],
-        name=sym, increasing_line_color="#26a69a", decreasing_line_color="#ef5350",
-        increasing_fillcolor="#26a69a", decreasing_fillcolor="#ef5350", showlegend=False))
-    for _, z in zones.iterrows():
-        try:
-            x0 = df.index[int(z["left_bar"])]
-        except Exception:
-            continue
-        x1 = last_x + step * 12
-        col = "#26a69a" if z["demand"] else "#ef5350"
-        fill = "rgba(38,166,154,0.16)" if z["demand"] else "rgba(239,83,80,0.16)"
-        fig.add_shape(type="rect", xref="x", yref="y", x0=x0, x1=x1,
-                      y0=float(z["dist"]), y1=float(z["prox"]),
-                      line=dict(color=col, width=1), fillcolor=fill, layer="below")
-        fig.add_annotation(x=x1, y=float(z["prox"]), text=(
-            f"{'D' if z['demand'] else 'S'} {z['pattern']} · {z['score']}"),
-            showarrow=False, xanchor="left", font=dict(size=9, color=col), bgcolor="rgba(255,255,255,.65)")
-        if str(z["state"]) in ("Covered",):
-            fig.add_shape(type="line", xref="x", yref="y", x0=x0, x1=x1,
-                          y0=float(z["cover"]), y1=float(z["cover"]),
-                          line=dict(color="#7b61ff", width=1, dash="dot"))
-    fig.update_layout(height=520, margin=dict(l=8, r=8, t=30, b=8),
-                      xaxis_rangeslider_visible=False,
-                      title=f"{sym} · {tf}",
-                      hovermode="x unified", dragmode="pan")
-    if TF_SECONDS.get(tf, 0) < 86400:
-        fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"]),
-                                      dict(bounds=[15.5, 9.25], pattern="hour")])
-    return fig
-
-
-def _zone_chart_altair(df: pd.DataFrame, zones: pd.DataFrame, sym: str, tf: str,
-                       sl: float | None, tp: float | None):
-    """fallback — वही candle + ज़ोन, बिना plotly।"""
-    d = df.tail(400).copy()
-    d = d.reset_index()
-    tcol = d.columns[0]
-    try:
-        d[tcol] = (pd.to_datetime(d[tcol]).dt.tz_convert(IST).dt.tz_localize(None))
-    except Exception:                                          # noqa: BLE001
-        d[tcol] = pd.to_datetime(d[tcol]).dt.tz_localize(None)
-    tname = "t"
-    d = d.rename(columns={tcol: tname})
-    tmin, tmax = d[tname].min(), d[tname].max()
-    step = (tmax - tmin) / max(len(d), 1) if len(d) > 1 else pd.Timedelta(minutes=15)
-    t_end = tmax + step * 12
-
-    up = "#26a69a"
-    dn = "#ef5350"
-    color = alt.condition(alt.datum["close"] >= alt.datum["open"],
-                          alt.value(up), alt.value(dn))
-    wick = (alt.Chart(d).mark_rule(strokeWidth=1)
-            .encode(x=alt.X(f"{tname}:T", title=None),
-                    y=alt.Y("low:Q", title="मूल्य", scale=alt.Scale(zero=False)),
-                    y2="high:Q", color=color))
-    body = (alt.Chart(d).mark_bar(size=5)
-            .encode(x=f"{tname}:T", y="open:Q", y2="close:Q", color=color,
-                    tooltip=[alt.Tooltip(f"{tname}:T", title="समय"),
-                             alt.Tooltip("open:Q", format=".2f"),
-                             alt.Tooltip("high:Q", format=".2f"),
-                             alt.Tooltip("low:Q", format=".2f"),
-                             alt.Tooltip("close:Q", format=".2f")]))
-    layers = [wick, body]
-
-    zr = []
-    for _, z in zones.iterrows():
-        try:
-            t0 = pd.to_datetime(df.index[int(z["left_bar"])])
-            t0 = t0.tz_convert(IST).tz_localize(None)
-        except Exception:                                      # noqa: BLE001
-            t0 = tmin
-        zr.append({tname: t0, "t1": t_end, "y1": float(z["prox"]), "y0": float(z["dist"]),
-                   "col": up if z["demand"] else dn,
-                   "lbl": f"{'D' if z['demand'] else 'S'} {z['pattern']} · {int(z['score'])}"})
-    if zr:
-        zdf = pd.DataFrame(zr)
-        zinc = (alt.Chart(zdf).mark_rect(opacity=0.16, strokeWidth=1)
-                .encode(x=alt.X(f"{tname}:T"), x2=alt.X2("t1:T"),
-                        y=alt.Y("y1:Q"), y2=alt.Y2("y0:Q"),
-                        color=alt.Color("col:N", scale=None, legend=None),
-                        stroke=alt.Color("col:N", scale=None, legend=None)))
-        ztxt = (alt.Chart(zdf).mark_text(align="left", dx=3, fontSize=9)
-                .encode(x=alt.X(f"{tname}:T"), x2=alt.X2("t1:T"),
-                        y=alt.Y("y1:Q"), text="lbl:N",
-                        color=alt.Color("col:N", scale=None, legend=None)))
-        layers += [zinc, ztxt]
-
-    for lvl, cl, nm in ((sl, "#d62728", "SL"), (tp, "#2ca02c", "T1")):
-        if lvl is None:
-            continue
-        rdf = pd.DataFrame({tname: [tmin], "t1": [t_end], "y": [float(lvl)], "nm": [f"{nm} {float(lvl):.2f}"]})
-        rule = (alt.Chart(rdf).mark_rule(strokeDash=[5, 4], color=cl)
-                .encode(x=alt.X(f"{tname}:T"), x2=alt.X2("t1:T"), y=alt.Y("y:Q")))
-        txt = (alt.Chart(rdf).mark_text(align="left", dx=3, color=cl, fontSize=9)
-               .encode(x=alt.X(f"{tname}:T"), x2=alt.X2("t1:T"), y=alt.Y("y:Q"), text="nm:N"))
-        layers += [rule, txt]
-
-    return (alt.layer(*layers)
-            .properties(height=520,
-                        title=f"{sym} · {tf}")
-            .interactive())
-
-
-def mtf_panel(snap: dict, tfs, peers):
-    rows = []
-    for tf in tfs:
-        s = snap.get(tf) or {}
-        rows.append({
-            "TF": tf,
-            "नाम": TF_LABEL_HI.get(tf, tf),
-            "मांग proximal": s.get("demand"),
-            "मांग बना": fmt_t(s.get("demand_time", 0)) if s.get("demand") else "—",
-            "आपूर्ति proximal": s.get("supply"),
-            "आपूर्ति बना": fmt_t(s.get("supply_time", 0)) if s.get("supply") else "—",
-            "MTF में गिना": "✓" if tf in peers else "",
-        })
-    return pd.DataFrame(rows)
-
-
-def deps_guard() -> bool:
-    """ज़रूरी पैकेज हैं या नहीं — Streamlit Cloud पर साफ़ संदेश दिखाने के लिए।"""
-    missing = []
-    if yf is None:
-        missing.append("yfinance")
-    if not missing:
-        return True
-    st.error("### ⚠️ ज़रूरी पैकेज इंस्टॉल नहीं हैं: " + ", ".join(missing))
-    st.markdown(
-        "GitHub repo की जड़ (root) में **`requirements.txt`** खोलें और ये पंक्तियाँ रखें — "
-        "फिर Streamlit Cloud में **Manage app → Reboot app**:")
-    st.code(REQ_TXT, language="text")
-    st.caption("plotly वैकल्पिक है — न हो तो ज़ोन चार्ट Altair में बनते हैं।")
-    return False
+                band_tf=btf, at=datetime.now(IST), scanned=len(jobs))
 
 
 # ---------------------------------------------------------------------------
-# 3 · MTF गिनती + Google-Sheets शीट (स्क्रीनशॉट वाला फ़ॉर्मैट)
+# 4 · TradingView लिंक + शीट
 # ---------------------------------------------------------------------------
-def mtf_count(demand: bool, prox: float, dist: float, atr_val: float, chart_tf: str,
-              snapshots: dict, peers=None):
-    """कितने पड़ोसी TF इस ज़ोन की पुष्टि करते हैं (Pine का ±0.5×ATR बैंड)।"""
-    a = atr_val if np.isfinite(atr_val) else 0.0
-    top = max(prox, dist) + 0.5 * a
-    bot = min(prox, dist) - 0.5 * a
-    keys = [k for k in snapshots if (peers is None or k in peers)]
-    hits = []
-    for peer in adjacent_tfs(chart_tf, keys):
-        lvl = (snapshots.get(peer) or {}).get("demand" if demand else "supply")
-        if lvl is not None and bot <= lvl <= top:
-            hits.append(peer)
-    return len(hits), hits
-
-
-def annotate(res: dict, peers=None) -> pd.DataFrame:
-    """हर ज़ोन पर Multi-TF गिनती + current-month future symbol जोड़ो।"""
-    df = res["rows"]
-    if df is None or df.empty:
-        return df
-    n_list, tf_list = [], []
-    for _, z in df.iterrows():
-        n, hits = mtf_count(z["demand"], z["prox"], z["dist"],
-                            res["atr"].get(z["symbol"], {}).get(z["tf"], float("nan")),
-                            z["tf"], res["snaps"].get(z["symbol"], {}), peers)
-        n_list.append(n)
-        tf_list.append(",".join(hits))
-    df["mtf_n"] = n_list
-    df["mtf_tfs"] = tf_list
-    if "fut_symbol" not in df.columns:
-        df["fut_symbol"] = df["symbol"].astype(str) + "1!"
-    return df
+def tv_url(symbol: str, tf: str) -> str:
+    from urllib.parse import quote
+    sym = sym_meta(symbol)["cash"] or f"NSE:{symbol}"
+    return f"https://www.tradingview.com/chart/?symbol={quote(str(sym))}&interval={TV_TF.get(str(tf), '15')}"
 
 
 def fut_url(symbol: str, tf: str) -> str:
-    """Current-month (front) future — TradingView का NSE:SBIN1! continuous contract."""
     from urllib.parse import quote
-    return (f"https://www.tradingview.com/chart/?symbol={quote('NSE:' + str(symbol) + '1!')}"
-            f"&interval={TV_TF.get(str(tf), '15')}")
+    sym = sym_meta(symbol)["fut"]
+    if not sym:
+        return tv_url(symbol, tf)
+    return f"https://www.tradingview.com/chart/?symbol={quote(str(sym))}&interval={TV_TF.get(str(tf), '15')}"
+
+
+def _lerp(c1, c2, t):
+    return tuple(int(round(a + (b - a) * t)) for a, b in zip(c1, c2))
+
+
+def _score_bg(sc: float) -> str:
+    low, mid, high = (252, 232, 230), (254, 247, 224), (206, 234, 214)
+    t = max(0.0, min(1.0, (float(sc) - 30.0) / 90.0))
+    c = _lerp(low, mid, t / 0.5) if t <= 0.5 else _lerp(mid, high, (t - 0.5) / 0.5)
+    return f"rgb({c[0]},{c[1]},{c[2]})"
 
 
 def _dist_bar(pct: float, rng: float) -> str:
-    """Distance का mini bar + % (स्क्रीनशॉट जैसा)।"""
     r = max(0.01, float(rng))
     w = max(3.0, min(100.0, float(pct) / r * 100.0))
     col = "#3fb950" if pct <= r * 0.2 else ("#d29922" if pct <= r * 0.5 else "#f85149")
@@ -2134,48 +1534,45 @@ def _dist_bar(pct: float, rng: float) -> str:
             f'background:{col}"></span></span><span class="gs-sm">{pct:.2f}%</span>')
 
 
-def sheet_html(df: pd.DataFrame, dark: bool = False, show_mcap=True, min_mcap=50000.0,
-               extra: bool = False, range_pct: float = 10.0, max_rows: int = 600) -> str:
-    """स्क्रीनशॉट वाली Google-Sheets टेबल — row numbers 0 से, नीले लिंक,
-    🔴/🟢 Zone Side, ⭐ Multi-TF, ₹ मूल्य, Distance bar."""
+def sheet_html(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0, extra=False,
+               range_pct: float = 3.0, max_rows: int = 600) -> str:
     if df is None or df.empty:
         return ""
     d = df.head(max_rows)
-    cols = ["Equity (Cash)", "Current-Month Future", "TF", "Zone Side", "Pattern", "Status",
-            "Multi-TF Highlight", "Proximal (₹)", "Distal (₹)", "Current LTP", "Distance"]
+    cols_ = ["Equity (Cash)", "Current-Month Future", "TF", "Zone Side", "Pattern", "Status",
+             "Multi-TF Highlight", "Proximal (₹)", "Distal (₹)", "Current LTP", "Distance"]
     if extra:
-        cols += ["Score", "SL", "T1", "XRPT", "Qty", "Range Low", "Range High"]
+        cols_ += ["Score", "SL", "T1", "Qty", "Range Low", "Range High"]
         if show_mcap:
-            cols += ["Mkt Cap (₹Cr)"]
-
-    head = "".join(f"<th>{c}</th>" for c in cols)
+            cols_ += ["Mkt Cap (₹Cr)"]
+    head = "".join(f"<th>{c}</th>" for c in cols_)
     body = []
     for n, (_, r) in enumerate(d.iterrows(), start=0):
+        meta = sym_meta(r["symbol"])
         u_cash = tv_url(r["symbol"], r["tf"])
         u_fut = fut_url(r["symbol"], r["tf"])
+        fut_lbl = str(meta.get("fut") or "—").split(":")[-1] if meta.get("fut") else "—"
         dem = bool(r["demand"])
         dot = ('<span class="gs-dot gs-dot-d">●</span>' if dem
                else '<span class="gs-dot gs-dot-s">●</span>')
         side = f'{dot} <span class="{"gs-dot-d" if dem else "gs-dot-s"}">{"Demand" if dem else "Supply"}</span>'
         state = str(r["state"])
-        st_txt = STATE_SHORT.get(state, state)
         mtf_n = int(r.get("mtf_n", 0) or 0)
-        if mtf_n >= 1:
-            mtf_cell = (f'<span title="पुष्टि करने वाले TF: {r.get("mtf_tfs", "")}">'
-                        f'<span class="gs-star">★</span> Multi-TF ({mtf_n}×)</span>')
-        else:
-            mtf_cell = '<span class="gs-sm">—</span>'
+        mtf_cell = (f'<span title="पुष्टि करने वाले TF: {r.get("mtf_tfs", "")}">'
+                    f'<span class="gs-star">★</span> Multi-TF ({mtf_n}×)</span>'
+                    if mtf_n >= 1 else '<span class="gs-sm">—</span>')
         ltp = float(r["ltp"]) if pd.notna(r.get("ltp")) else float("nan")
         ltp_txt = f"₹{ltp:,.2f}" if np.isfinite(ltp) else "—"
         cells = [
             f'<td><a href="{u_cash}" target="_blank" rel="noopener" '
-            f'title="TradingView · NSE:{r["symbol"]} · {r["tf"]}">{r["symbol"]}</a></td>',
-            f'<td><a class="fut" href="{u_fut}" target="_blank" rel="noopener" '
-            f'title="TradingView · NSE:{r["symbol"]}1! · {r["tf"]}">{r["fut_symbol"]}</a></td>',
-            f'<td title="{TF_LABEL_HI.get(str(r["tf"]), "")}">{r["tf"]}</td>',
+            f'title="TradingView · {meta.get("cash")} · {r["tf"]}">{r["symbol"]}</a></td>',
+            (f'<td><a class="fut" href="{u_fut}" target="_blank" rel="noopener" '
+             f'title="TradingView · {meta.get("fut")} · {r["tf"]}">{fut_lbl}</a></td>'
+             if meta.get("fut") else '<td class="gs-sm">—</td>'),
+            f'<td>{r["tf"]}</td>',
             f'<td>{side}</td>',
             f'<td class="ctr">{r["pattern"]}</td>',
-            f'<td><span class="{_STATE_CLS.get(state, "")}">{st_txt}</span></td>',
+            f'<td><span class="{_STATE_CLS.get(state, "")}">{state}</span></td>',
             f'<td>{mtf_cell}</td>',
             f'<td class="num">{float(r["prox"]):,.2f}</td>',
             f'<td class="num">{float(r["dist"]):,.2f}</td>',
@@ -2189,12 +1586,11 @@ def sheet_html(df: pd.DataFrame, dark: bool = False, show_mcap=True, min_mcap=50
                 f'{int(sc)}{" ★" if r["hq"] else ""}</td>',
                 f'<td class="num">{float(r["sl"]):,.2f}</td>',
                 f'<td class="num">{float(r["tp"]):,.2f}</td>',
-                f'<td class="num">1:{float(r["xrpt_rr"]):.2f}</td>',
                 f'<td class="num">{int(r["qty"])}</td>',
-                f'<td class="num gs-sm">{float(r.get("band_low") or float("nan")):,.2f}</td>'
-                if pd.notna(r.get("band_low")) else '<td class="num gs-sm">—</td>',
-                f'<td class="num gs-sm">{float(r.get("band_high") or float("nan")):,.2f}</td>'
-                if pd.notna(r.get("band_high")) else '<td class="num gs-sm">—</td>',
+                (f'<td class="num gs-sm">{float(r["band_low"]):,.2f}</td>'
+                 if pd.notna(r.get("band_low")) else '<td class="num gs-sm">—</td>'),
+                (f'<td class="num gs-sm">{float(r["band_high"]):,.2f}</td>'
+                 if pd.notna(r.get("band_high")) else '<td class="num gs-sm">—</td>'),
             ]
             if show_mcap:
                 mv = r.get("mcap_cr", float("nan"))
@@ -2206,24 +1602,49 @@ def sheet_html(df: pd.DataFrame, dark: bool = False, show_mcap=True, min_mcap=50
                                  f'<span class="{"gs-ok" if ok else "gs-no"}">'
                                  f'{"✓" if ok else "✗"}</span></td>')
         body.append(f'<tr><td class="gs-rn">{n}</td>' + "".join(cells) + "</tr>")
-
     return ('<div class="gs-wrap"><div class="gs-scroll"><table class="gs">'
             f'<thead><tr><th class="gs-rn"></th>{head}</tr></thead>'
             f'<tbody>{"".join(body)}</tbody></table></div></div>')
 
 
-# ---------------------------------------------------------------------------
-# 4 · स्कैन के लिए यूनिवर्स
-# ---------------------------------------------------------------------------
-def all_fno() -> List[str]:
-    """NSE की पूरी F&O सूची (कैश के साथ) — न मिले तो fallback।"""
-    try:
-        u = cached_fno()
-    except Exception:                                            # noqa: BLE001
-        u = None
-    return list(dict.fromkeys(u)) if u else list(dict.fromkeys(FALLBACK_FNO))
+def zone_table(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0) -> pd.DataFrame:
+    d = pd.DataFrame({
+        "स्क्रिप्ट": df["symbol"],
+        "TF": df["tf"],
+        "पक्ष": df["side_hi"],
+        "पैटर्न": df["pattern"],
+        "बेस": df["base_count"].map(lambda b: f"{int(b)} · {_GRADE_HI.get(int(b), '')}"),
+        "एंट्री (proximal)": df["prox"].round(2),
+        "डिस्टल": df["dist"].round(2),
+        "SL": df["sl"].round(2),
+        "T1": df["tp"].round(2),
+        "दूरी %": df["dist_pct"].round(2),
+        "स्कोर": df["score"].astype(int),
+        "HQ": df["hq"].map(lambda v: "★" if v else ""),
+        "MTF": df["mtf_n"].map(lambda n: f"★{int(n)}" if n else "–"),
+        "स्थिति": df["state"],
+        "मात्रा": df["qty"].astype(int),
+        "बना (IST)": df["created_ist"],
+    })
+    return d
 
 
+def mtf_panel(snap: dict, tfs, peers):
+    rows = []
+    for tf in tfs:
+        s = snap.get(tf) or {}
+        rows.append({
+            "TF": tf,
+            "मांग proximal": s.get("demand"),
+            "आपूर्ति proximal": s.get("supply"),
+            "MTF में गिना": "✓" if tf in peers else "",
+        })
+    return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# 5 · यूनिवर्स
+# ---------------------------------------------------------------------------
 def pick_symbols(tb: dict):
     txt = (tb.get("symbols_txt") or "").strip().replace("/", ",")
     if txt:
@@ -2233,22 +1654,32 @@ def pick_symbols(tb: dict):
         return list(dict.fromkeys(NIFTY50))
     if uni == "Global Instruments":
         return list(dict.fromkeys(GLOBAL_SYMBOLS))
-    if uni == "NSE All + Global":
-        return list(dict.fromkeys(all_fno() + GLOBAL_SYMBOLS))
-    if uni == "अपनी सूची":
-        return []
-    return all_fno()                                              # "NSE All F&O"
+    if uni == "Futures + Global":
+        return list(dict.fromkeys(cached_fno() + GLOBAL_SYMBOLS))
+    return list(dict.fromkeys(cached_fno()))
 
 
 # ---------------------------------------------------------------------------
-# 5 · MAIN
+# 6 · MAIN
 # ---------------------------------------------------------------------------
 REQ_TXT = """streamlit
 yfinance
 pandas
 numpy
-plotly      # वैकल्पिक — न हो तो Altair चार्ट चलेंगे
+plotly
 requests"""
+
+
+def deps_guard() -> bool:
+    missing = []
+    if yf is None:
+        missing.append("yfinance")
+    if not missing:
+        return True
+    st.error("### ⚠️ ज़रूरी पैकेज इंस्टॉल नहीं हैं: " + ", ".join(missing))
+    st.markdown("GitHub repo में `requirements.txt` ठीक करके **Manage app → Reboot app**:")
+    st.code(REQ_TXT, language="text")
+    return False
 
 
 def main():
@@ -2259,7 +1690,6 @@ def main():
     tb = top_bar()
     ctrl = cols([1.55, .85, .7, .7, 3.4])
     inp, uo = pine_panel(ctrl[0])
-    dark = is_dark()
 
     # ── स्कैन ────────────────────────────────────────────────────────────
     if tb["go"]:
@@ -2268,14 +1698,12 @@ def main():
         if lim and len(syms) > lim:
             syms = syms[:lim]
         if not syms:
-            st.error("कोई स्क्रिप्ट नहीं चुनी — ऊपर यूनिवर्स चुनें या स्क्रिप्ट बॉक्स में नाम लिखें।")
+            st.error("कोई स्क्रिप्ट नहीं चुनी — यूनिवर्स चुनें या स्क्रिप्ट बॉक्स में नाम लिखें।")
         else:
-            opts = dict(tfs=tb["tfs"], peers=uo["peers"], band=tb["band"],
-                        universe=tb["universe"], custom=tb["symbols_txt"])
+            opts = dict(tfs=tb["tfs"], peers=tuple(ALL_TFS), band=tb["band"])
             with st.spinner(f"{len(syms)} स्क्रिप्ट · {len(tb['tfs'])} TF स्कैन हो रहा है…"):
                 res = run_scan(syms, inp, opts)
             res.update(inputs=inp, opts=opts, ui=uo, symbols=syms)
-            annotate(res, uo["peers"])
             st.session_state["scan"] = res
 
     res = st.session_state.get("scan")
@@ -2284,15 +1712,11 @@ def main():
 
     df_all: pd.DataFrame = res["rows"]
     uo = res.get("ui", uo)
-    inp_s: PineInputs = res["inputs"]
-
     if df_all is None or df_all.empty:
-        st.warning("इस रन में कोई ज़ोन नहीं बना। रेंज बढ़ाएँ या नियम ढीले करें "
-                   "(minBaseCount / legOutToBaseSizeMult / minValidScore)।")
+        st.warning("इस रन में कोई ज़ोन नहीं बना — नियम ढीले करें (Min Valid Score / Leg-In Body %)।")
         return
 
-
-    # ── स्कैन रेंज: चुनी हुई EOD candle का High+ATR14 … Low−ATR14 बैंड ──
+    # ── स्कैन रेंज: EOD candle का High+ATR14 … Low−ATR14 बैंड ──
     bands = res.get("bands") or {}
     if bands:
         lo = df_all["symbol"].map(lambda x: (bands.get(x) or {}).get("low", -np.inf))
@@ -2301,39 +1725,23 @@ def main():
         df_all["band_low"] = df_all["symbol"].map(lambda x: (bands.get(x) or {}).get("low"))
         df_all["band_high"] = df_all["symbol"].map(lambda x: (bands.get(x) or {}).get("high"))
 
-    # ── टूलबार के फ़िल्टर (बिना दोबारा स्कैन) ───────────────────────────
     f = df_all.copy()
     if tb["side"] != "All":
         f = f[f["side"] == tb["side"]]
     if tb["status"] != "All":
         f = f[f["state"] == tb["status"]]
-    if uo.get("min_score", 0):
-        f = f[f["score"] >= uo["min_score"]]
-    if uo.get("only_mtf"):
-        f = f[f["mtf"]]
-    if uo.get("only_hq"):
-        f = f[f["hq"]]
 
-    if res.get("errs"):
-        with st.expander(f"⚠️ {len(res['errs'])} स्क्रिप्ट में समस्या"):
-            st.write(pd.DataFrame({"स्क्रिप्ट": list(res["errs"]),
-                                   "कारण": list(res["errs"].values())}))
-
-    # ── कॉलम-टॉगल + डाउनलोड (उसी ऊपरी row में) ──
     with ctrl[1]:
         extra_cols = st.toggle("➕ कॉलम", value=False, key="in_extra")
-    if extra_cols and uo.get("show_mcap") and not f.empty:
-        syms_vis = tuple(sorted(f["symbol"].unique())[:120])
+    if extra_cols and not f.empty:
         try:
-            caps = cached_caps(syms_vis)
-            f["mcap_cr"] = f["symbol"].map(caps)
+            f["mcap_cr"] = f["symbol"].map(cached_caps(tuple(sorted(f["symbol"].unique())[:120])))
         except Exception:                                        # noqa: BLE001
             f["mcap_cr"] = np.nan
-    tbl = zone_table(f, uo.get("show_mcap", True), uo.get("min_mcap", 50000.0))
+    tbl = zone_table(f)
     put(ctrl[2], "download_button", "⬇️ CSV",
         tbl.to_csv(index=False).encode("utf-8-sig"),
-        file_name=f"zone_mtf_{datetime.now(IST):%Y%m%d_%H%M}.csv",
-        mime="text/csv")
+        file_name=f"zone_mtf_{datetime.now(IST):%Y%m%d_%H%M}.csv", mime="text/csv")
     put(ctrl[3], "download_button", "⬇️ TSV",
         tbl.to_csv(index=False, sep="\t").encode("utf-8-sig"),
         file_name=f"zone_mtf_{datetime.now(IST):%Y%m%d_%H%M}.tsv",
@@ -2343,95 +1751,20 @@ def main():
         try:
             scale = float(max(1.0, f["dist_pct"].quantile(0.90)))
         except Exception:                                        # noqa: BLE001
-            scale = 5.0
-        _html(sheet_html(f, dark, uo.get("show_mcap", True),
-                         uo.get("min_mcap", 50000.0), extra=extra_cols,
+            scale = 3.0
+        _html(sheet_html(f, uo.get("show_mcap", True), 50000.0, extra=extra_cols,
                          range_pct=scale))
 
-    # ── नीचे: दो बंद (collapsed) खंड — डैशबोर्ड साफ़ रहे ────────────────
-    x_chart = st.expander("🕯️ चार्ट", expanded=False)
-    x_mtf = st.expander("🔗 MTF", expanded=False)
-
-    # ---------- ज़ोन डिटेल (ज़रूरत पड़ने पर) ----------
-    with x_chart:
-        if not f.empty:
-            cc1, cc2, cc3 = st.columns([1, 1, 2])
-            sym_opts = sorted(f["symbol"].unique())
-            if st.session_state.get("d_sym") not in sym_opts:
-                st.session_state.pop("d_sym", None)
-            sym_pick = cc1.selectbox("स्क्रिप्ट", sym_opts, key="d_sym")
-            sub = f[f["symbol"] == sym_pick]
-            tf_opts = list(sub["tf"].unique())
-            if st.session_state.get("d_tf") not in tf_opts:
-                st.session_state.pop("d_tf", None)
-            tf_pick = cc2.selectbox("टाइम फ़्रेम", tf_opts, key="d_tf",
-                                    format_func=lambda t: f"{t} · {TF_LABEL_HI.get(t, t)}")
-            zsub = sub[sub["tf"] == tf_pick].reset_index(drop=True)
-            pk = st.session_state.get("_pick") or {}
-            zi = 0
-            if pk.get("symbol") == sym_pick and pk.get("tf") == tf_pick and "bar" in zsub:
-                hits = zsub.index[zsub["bar"] == pk["bar"]].tolist()
-                zi = hits[0] if hits else 0
-            if "d_zone" in st.session_state and int(st.session_state["d_zone"]) >= len(zsub):
-                st.session_state.pop("d_zone", None)
-            idx = cc3.selectbox(
-                "ज़ोन", range(len(zsub)), index=zi, key="d_zone",
-                format_func=lambda i: (
-                    f"{'मांग' if zsub.loc[i,'demand'] else 'आपूर्ति'} · {zsub.loc[i,'pattern']} · "
-                    f"एंट्री {zsub.loc[i,'prox']:.2f} · स्कोर {int(zsub.loc[i,'score'])} · "
-                    f"{STATE_SHORT.get(zsub.loc[i,'state'], zsub.loc[i,'state'])}"))
-            zrow = zsub.loc[idx]
-
-            kk = st.columns(6)
-            kk[0].metric("एंट्री (proximal)", f"{zrow['prox']:.2f}")
-            kk[1].metric("SL", f"{zrow['sl']:.2f}")
-            kk[2].metric(f"T1 (1:{inp_s.targetRR:g})", f"{zrow['tp']:.2f}")
-            kk[3].metric("XRPT 1:R", f"{zrow['xrpt_rr']:.2f}")
-            kk[4].metric("मात्रा", f"{int(zrow['qty'])}")
-            kk[5].metric("स्कोर", f"{int(zrow['score'])}" + (" ★HQ" if zrow["hq"] else ""))
-
-            b1, b2 = st.columns([1.2, 3])
-            put(b1, "link_button", f"📈 NSE:{zrow['symbol']} · {zrow['tf']}",
-                tv_url(zrow["symbol"], zrow["tf"]))
-            put(b2, "link_button", f"📈 Future NSE:{zrow['fut_symbol']} · {zrow['tf']}",
-                fut_url(zrow["symbol"], zrow["tf"]))
-
-            try:
-                frames = cached_frames((sym_pick,), (tf_pick, "1d", "1w", "1M"))
-                df_tf = frames.get(sym_pick, {}).get(tf_pick)
-            except Exception as e:                                # noqa: BLE001
-                df_tf = None
-                st.error(f"चार्ट डेटा नहीं मिला: {e}")
-            if df_tf is not None and len(df_tf):
-                zc = zsub[zsub["state"].isin(["Fresh", "Triggered", "Covered", "Immature"])]
-                fig = zone_chart(df_tf, zc, sym_pick, tf_pick, inp_s,
-                                 sl=float(zrow["sl"]), tp=float(zrow["tp"]))
-                if HAS_PLOTLY:
-                    stretch(st.plotly_chart, fig, config={"displayModeBar": False})
-                else:
-                    stretch(st.altair_chart, fig)
-            if inp_s.showInfo:
-                st.code(info_text(zrow.to_dict(), inp_s.targetRR), language="text")
-
-    # ---------- MTF ----------
-    with x_mtf:
-        sym2 = st.selectbox("स्क्रिप्ट", sorted(res["snaps"].keys()), key="m_sym") \
-            if res["snaps"] else None
-        if sym2:
+    # ── MTF (बंद खंड) ───────────────────────────────────────────────────
+    with st.expander("🔗 MTF", expanded=False):
+        if res["snaps"]:
+            sym2 = st.selectbox("स्क्रिप्ट", sorted(res["snaps"].keys()), key="m_sym")
             mdf = mtf_panel(res["snaps"].get(sym2, {}), list(res["opts"]["tfs"]), set(uo["peers"]))
-            ltp = res["ltp"].get(sym2)
-            if ltp:
-                mdf["LTP से %"] = mdf["मांग proximal"].map(
-                    lambda v: None if pd.isna(v) else round(abs(v - ltp) / ltp * 100, 2))
-            stretch(st.dataframe, mdf, hide_index=True, height=520,
+            stretch(st.dataframe, mdf, hide_index=True, height=460,
                     column_config={
                         "मांग proximal": st.column_config.NumberColumn(format="%.2f"),
                         "आपूर्ति proximal": st.column_config.NumberColumn(format="%.2f"),
-                        "LTP से %": st.column_config.NumberColumn(format="%.2f%%"),
                     })
-
-
-
 
 
 main()

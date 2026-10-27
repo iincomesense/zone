@@ -1764,11 +1764,246 @@ def _last_close(frames: Dict[str, pd.DataFrame], tfs: Sequence[str]) -> float:
     return 0.0
 
 
+
+# ═══════════════════════════════════════════════════════════════════════
+#  भाग 3b · BACKTEST — वास्तविक नियमों के साथ
+#   • Entry: Proximal पर LIMIT (gap में open पर भरेगा — बेहतर भाव)
+#   • SL: Distal (SL-M — gap में open पर, यानी बदतर भाव)
+#   • Target: 1:3 या 1:5 LIMIT — SL के साथ OCO
+#   • Demand = Long CNC (delivery) · Supply = Short MIS (उसी दिन square-off)
+#   • एक ही candle में SL और Target दोनों → SL (सावधान/कंज़र्वेटिव मान्यता)
+#   • Entry वाली candle पर Target तभी गिना जब open ही entry के पार खुला हो
+#   • सिर्फ़ पहला टच (Fresh → Tested) · maturity से पहले टच = trap, कोई ट्रेड नहीं
+#   • Covered leg-out पहले हो गया तो ज़ोन ख़त्म
+#   • चार्ज: Zerodha जैसा discount broker + सरकारी (STT, exchange, SEBI, stamp, GST, DP)
+# ═══════════════════════════════════════════════════════════════════════
+BT_DEFAULT_START = "2024-01-01"
+BT_DEFAULT_END = "2026-10-01"
+MIS_MARGIN = 0.20          # SEBI: intraday पर कम से कम 20% margin (5×)
+DP_CHARGE = 15.34          # CDSL ₹13.5 + 18% GST — हर scrip, हर बिक्री वाले दिन
+
+
+def india_charges(kind: str, buy_val: float, sell_val: float, when: pd.Timestamp) -> Dict[str, float]:
+    """kind = 'CNC' या 'MIS'। रुपयों में पूरा ब्रेकअप।"""
+    turnover = buy_val + sell_val
+    exch_rate = 0.0000322 if when < pd.Timestamp("2024-10-01", tz=IST) else 0.0000297
+    if kind == "CNC":
+        brokerage = 0.0
+        stt = 0.001 * turnover
+        stamp = 0.00015 * buy_val
+        dp = DP_CHARGE
+    else:
+        brokerage = min(20.0, 0.0003 * buy_val) + min(20.0, 0.0003 * sell_val)
+        stt = 0.00025 * sell_val
+        stamp = 0.00003 * buy_val
+        dp = 0.0
+    exch = exch_rate * turnover
+    sebi = turnover * 10.0 / 1e7
+    gst = 0.18 * (brokerage + exch + sebi)
+    total = brokerage + stt + stamp + exch + sebi + gst + dp
+    return dict(brokerage=brokerage, stt=stt, stamp=stamp, exchange=exch, sebi=sebi, gst=gst,
+                dp=dp, total=total)
+
+
+def _bt_zone_trades(df: pd.DataFrame, zones: List[dict], tf: str, symbol: str, I: PineInputs,
+                    rr: float, use_buffer: bool, start: pd.Timestamp, end: pd.Timestamp) -> List[dict]:
+    """हर ज़ोन का (qty के बिना) एक संभावित ट्रेड — प्रति शेयर भाव के साथ।"""
+    idx = pd.DatetimeIndex(df.index)
+    if idx.tz is None:
+        idx = idx.tz_localize(IST)
+    else:
+        idx = idx.tz_convert(IST)
+    o = df["open"].to_numpy(dtype="float64")
+    h = df["high"].to_numpy(dtype="float64")
+    l = df["low"].to_numpy(dtype="float64")
+    c = df["close"].to_numpy(dtype="float64")
+    n = len(df)
+    day = idx.normalize()
+    intraday = TF_SECONDS.get(tf, 0) < 86400
+    last_of_day = np.ones(n, dtype=bool)
+    if intraday and n > 1:
+        last_of_day[:-1] = day[1:] != day[:-1]
+    out: List[dict] = []
+    for z in zones:
+        dem = bool(z["demand"])
+        if I.coreOpposite and z.get("room_tf") is not None and z["room_tf"] < I.oppositeRR:
+            continue
+        prox = float(z["prox"])
+        sl = float(z["sl"]) if use_buffer else float(z["dist"])
+        risk_ps = abs(prox - sl)
+        if risk_ps <= 0:
+            continue
+        tgt = prox + rr * risk_ps if dem else prox - rr * risk_ps
+        cb = int(z["created_bar"])
+        j = cb + 1
+        ej = None
+        while j < n:
+            touch = (l[j] <= prox) if dem else (h[j] >= prox)
+            if not touch:
+                covered = (min(o[j], c[j]) < z["cover"]) if dem else (max(o[j], c[j]) > z["cover"])
+                if covered:
+                    break
+                j += 1
+                continue
+            if j - cb < I.maturityBars:            # जल्दी लौटा = trap
+                break
+            if idx[j] < start or idx[j] > end:
+                break
+            ej = j
+            break
+        if ej is None:
+            continue
+        fill = min(prox, o[ej]) if dem else max(prox, o[ej])
+        open_first = (o[ej] <= prox) if dem else (o[ej] >= prox)
+        exit_px = exit_j = None
+        reason = ""
+        for k in range(ej, n):
+            if idx[k] > end:                         # अवधि ख़त्म — पिछली candle के close पर बंद
+                kk = max(ej, k - 1)
+                exit_px, exit_j, reason = c[kk], kk, "Period end"
+                break
+            first = k == ej
+            if dem:
+                if l[k] <= sl:
+                    exit_px = fill if (first and fill <= sl) else (min(o[k], sl) if not first else sl)
+                    exit_j, reason = k, "SL"
+                    break
+                if h[k] >= tgt and (not first or open_first):
+                    exit_px = max(o[k], tgt) if not first else tgt
+                    exit_j, reason = k, "Target"
+                    break
+            else:
+                if h[k] >= sl:
+                    exit_px = fill if (first and fill >= sl) else (max(o[k], sl) if not first else sl)
+                    exit_j, reason = k, "SL"
+                    break
+                if l[k] <= tgt and (not first or open_first):
+                    exit_px = min(o[k], tgt) if not first else tgt
+                    exit_j, reason = k, "Target"
+                    break
+                if (not intraday) or last_of_day[k]:   # MIS: उसी दिन square-off
+                    exit_px, exit_j, reason = c[k], k, "MIS square-off"
+                    break
+        if exit_px is None:
+            exit_px, exit_j, reason = c[n - 1], n - 1, "Open (last price)"
+        out.append(dict(
+            symbol=symbol, tf=tf, side="Long CNC" if dem else "Short MIS", kind="CNC" if dem else "MIS",
+            pattern=z["pattern"], score=int(z.get("score_base", 0)), tags=z.get("tags", ""),
+            entry_time=idx[ej], exit_time=idx[exit_j], entry=float(fill), sl=float(sl), target=float(tgt),
+            exit=float(exit_px), risk_ps=float(abs(fill - sl)) or risk_ps, reason=reason, long=dem,
+        ))
+    return out
+
+
+def bt_portfolio(trades: List[dict], capital: float, risk_pct: float) -> Tuple[pd.DataFrame, pd.DataFrame, dict]:
+    """पूँजी की सीमा में qty लगाकर, समय के क्रम में सारे ट्रेड चलाओ।"""
+    import heapq
+    trades = sorted(trades, key=lambda t: (t["entry_time"], t["exit_time"]))
+    cash = float(capital)
+    equity = float(capital)
+    open_heap: list = []
+    rows, skipped = [], 0
+    seq = 0
+
+    def release(upto):
+        nonlocal cash, equity
+        while open_heap and open_heap[0][0] <= upto:
+            _, _, blocked, net = heapq.heappop(open_heap)
+            cash += blocked + net
+            equity += net
+
+    for t in trades:
+        release(t["entry_time"])
+        risk_amt = equity * risk_pct / 100.0
+        rps = max(t["risk_ps"], 1e-9)
+        qty = int(math.floor(risk_amt / rps))
+        per = t["entry"] * (1.0 if t["kind"] == "CNC" else MIS_MARGIN)
+        qty = min(qty, int(math.floor(cash / per)) if per > 0 else 0)
+        if qty < 1:
+            skipped += 1
+            continue
+        if t["long"]:
+            buy_val, sell_val = qty * t["entry"], qty * t["exit"]
+        else:
+            sell_val, buy_val = qty * t["entry"], qty * t["exit"]
+        gross = sell_val - buy_val
+        ch = india_charges(t["kind"], buy_val, sell_val, t["exit_time"])
+        net = gross - ch["total"]
+        blocked = qty * per
+        cash -= blocked
+        seq += 1
+        heapq.heappush(open_heap, (t["exit_time"], seq, blocked, net))
+        rows.append(dict(t, qty=qty, gross=gross, charges=ch["total"], net=net,
+                         stt=ch["stt"], brokerage=ch["brokerage"], gst=ch["gst"],
+                         stamp=ch["stamp"], exchange=ch["exchange"], dp=ch["dp"],
+                         equity_at_entry=equity))
+    release(pd.Timestamp.max.tz_localize(IST))
+    tdf = pd.DataFrame(rows)
+    if tdf.empty:
+        return tdf, pd.DataFrame(), dict(trades=0, skipped=skipped, final=capital)
+    curve = tdf.sort_values("exit_time")[["exit_time", "net"]].copy()
+    curve["equity"] = capital + curve["net"].cumsum()
+    peak = curve["equity"].cummax().clip(lower=capital)      # शुरुआती पूँजी भी peak
+    dd = ((curve["equity"] - peak) / peak * 100.0).min()
+    wins = (tdf["net"] > 0).sum()
+    gross_win = tdf.loc[tdf["net"] > 0, "net"].sum()
+    gross_loss = -tdf.loc[tdf["net"] <= 0, "net"].sum()
+    summ = dict(trades=len(tdf), skipped=skipped, wins=int(wins),
+                win_pct=wins / len(tdf) * 100.0,
+                gross=tdf["gross"].sum(), charges=tdf["charges"].sum(), net=tdf["net"].sum(),
+                final=capital + tdf["net"].sum(), max_dd=float(dd),
+                profit_factor=(gross_win / gross_loss) if gross_loss > 0 else float("inf"),
+                targets=int((tdf["reason"] == "Target").sum()), sls=int((tdf["reason"] == "SL").sum()),
+                squareoff=int((tdf["reason"] == "MIS square-off").sum()))
+    return tdf, curve, summ
+
+
+def bt_collect(symbols: Sequence[str], frames_all: Dict[str, Dict[str, pd.DataFrame]],
+               tfs: Sequence[str], I: PineInputs, rrs: Sequence[float], use_buffer: bool,
+               start: pd.Timestamp, end: pd.Timestamp, progress=None) -> Tuple[Dict[float, List[dict]], pd.DataFrame]:
+    """हर symbol × TF पर इंजन चलाकर संभावित ट्रेड।  लौटाता है ({rr: trades}, TF-अवधि तालिका)"""
+    Ib = replace(I.sanitized(), scanBars=10 ** 7, maxStored=10 ** 7)
+    out: Dict[float, List[dict]] = {rr: [] for rr in rrs}
+    cover: Dict[str, list] = {}
+    syms = [s for s in symbols if s in frames_all]
+    for i, sym in enumerate(syms):
+        fr = frames_all[sym]
+        Is = replace(Ib, commodityMode=bool(Ib.commodityMode and sym.upper() in COMMODITY_SYMBOLS))
+        for tf in tfs:
+            df = fr.get(tf)
+            if df is None or len(df) < 40:
+                continue
+            try:
+                zs = engine(df, Is, tf, htf_daily=fr.get("1d"), return_all=True)
+            except Exception:                              # noqa: BLE001
+                continue
+            first, last = pd.Timestamp(df.index[0]), pd.Timestamp(df.index[-1])
+            cover.setdefault(tf, []).append((first, last))
+            for rr in rrs:
+                out[rr].extend(_bt_zone_trades(df, zs, tf, sym, Is, rr, use_buffer, start, end))
+        if progress:
+            progress((i + 1) / max(1, len(syms)), sym)
+    def _ist(ts):
+        ts = pd.Timestamp(ts)
+        return ts.tz_localize(IST) if ts.tzinfo is None else ts.tz_convert(IST)
+
+    rows = []
+    for tf in tfs:
+        spans = cover.get(tf) or []
+        if not spans:
+            rows.append({"TF": tf, "बैकटेस्ट शुरू": "—", "बैकटेस्ट अंत": "—", "स्क्रिप्ट": 0})
+            continue
+        f0 = max(min(_ist(a) for a, _ in spans), start)
+        f1 = min(max(_ist(b) for _, b in spans), end)
+        rows.append({"TF": tf, "बैकटेस्ट शुरू": f"{f0:%d-%b-%Y}", "बैकटेस्ट अंत": f"{f1:%d-%b-%Y}",
+                     "स्क्रिप्ट": len(spans)})
+    return out, pd.DataFrame(rows)
+
 # ═══════════════════════════════════════════════════════════════════════
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v10 · KTP rules · C+F (Dhan) · WS · 6C · 2026-10-27"
+APP_BUILD = "v11 · KTP rules · Backtest · 2026-10-27"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -2488,6 +2723,110 @@ def mtf_panel(snap: dict, tfs, peers):
     return pd.DataFrame(rows)
 
 
+def _bt_summary_table(summ: Dict[float, dict], capital: float) -> pd.DataFrame:
+    rows = []
+    for rr, s in summ.items():
+        if not s.get("trades"):
+            rows.append({"Target": f"1:{rr:g}", "ट्रेड": 0})
+            continue
+        rows.append({
+            "Target": f"1:{rr:g}", "ट्रेड": s["trades"], "जीते": s["wins"], "जीत %": round(s["win_pct"], 1),
+            "Target लगे": s["targets"], "SL लगे": s["sls"], "MIS square-off": s["squareoff"],
+            "Gross ₹": round(s["gross"], 0), "चार्ज ₹": round(s["charges"], 0), "Net ₹": round(s["net"], 0),
+            "अंतिम पूँजी ₹": round(s["final"], 0), "रिटर्न %": round((s["final"] / capital - 1) * 100, 1),
+            "Max drawdown %": round(s["max_dd"], 1),
+            "Profit factor": round(s["profit_factor"], 2) if np.isfinite(s["profit_factor"]) else "∞",
+            "पैसे की कमी से छूटे": s["skipped"],
+        })
+    return pd.DataFrame(rows)
+
+
+def _bt_group(tdf: pd.DataFrame, by: str) -> pd.DataFrame:
+    if tdf.empty:
+        return pd.DataFrame()
+    g = tdf.groupby(by)
+    out = pd.DataFrame({
+        "ट्रेड": g.size(), "जीत %": g["net"].apply(lambda x: round((x > 0).mean() * 100, 1)),
+        "Net ₹": g["net"].sum().round(0), "चार्ज ₹": g["charges"].sum().round(0),
+    }).reset_index()
+    if by == "tf":
+        out["_k"] = out["tf"].map(lambda t: TF_SECONDS.get(str(t), 0))
+        out = out.sort_values("_k").drop(columns="_k")
+    return out
+
+
+def backtest_panel(inp: PineInputs, tb: dict) -> None:
+    st.caption("Entry = Proximal (limit) · SL = Distal · Target 1:3 और 1:5 (OCO) · Demand = Long CNC, "
+               "Supply = Short MIS (उसी दिन बंद) · Zerodha जैसे चार्ज + STT, exchange, SEBI, stamp, GST, DP · "
+               "एक candle में SL और target दोनों = SL माना।")
+    c1, c2, c3, c4, c5 = cols([1, 1, 1, 1, 1.2])
+    d0 = c1.date_input("शुरू", pd.Timestamp(BT_DEFAULT_START).date(), key="bt_start")
+    d1 = c2.date_input("अंत", pd.Timestamp(BT_DEFAULT_END).date(), key="bt_end")
+    cap = c3.number_input("पूँजी ₹", 1000.0, 1e9, 25000.0, 1000.0, key="bt_cap")
+    rp = c4.number_input("जोखिम % / ट्रेड", 0.05, 10.0, float(inp.riskPct), 0.05, key="bt_risk")
+    buf = c5.checkbox("SL पर DATR buffer भी", False, key="bt_buf")
+    tfs = st.multiselect("Time frames", list(ALL_TFS), default=list(ALL_TFS), key="bt_tfs")
+    st.caption("Yahoo सीमा: Daily/Weekly/Monthly पूरा · 1h–6h ~730 दिन · 3m–75m ~60 दिन — हर TF की असली अवधि नीचे दिखेगी।")
+    go = put(st, "button", "▶️ Backtest चलाएँ", type="primary", key="bt_go")
+    if go:
+        syms = pick_symbols(tb)
+        if not syms:
+            st.error("कोई स्क्रिप्ट नहीं।")
+            return
+        start = pd.Timestamp(d0).tz_localize(IST)
+        end = pd.Timestamp(d1).tz_localize(IST) + pd.Timedelta(hours=23, minutes=59)
+        need = list(dict.fromkeys(list(tfs) + ["1d"]))
+        with st.spinner(f"{len(syms)} स्क्रिप्ट का डेटा ला रहे हैं…"):
+            frames_all = cached_frames(tuple(syms), tuple(need))
+        bar = st.progress(0.0, text="इंजन चल रहा है…")
+        trades, cov = bt_collect(syms, frames_all, tfs, inp, (3.0, 5.0), bool(buf), start, end,
+                                 progress=lambda f, s: bar.progress(min(1.0, f), text=f"{s} …"))
+        bar.empty()
+        res = {}
+        for rr, tl in trades.items():
+            tdf, curve, summ = bt_portfolio(tl, float(cap), float(rp))
+            res[rr] = (tdf, curve, summ)
+        st.session_state["bt"] = dict(res=res, cov=cov, cap=float(cap), n=len(syms))
+    bt = st.session_state.get("bt")
+    if not bt:
+        return
+    res, cap = bt["res"], bt["cap"]
+    st.markdown(f"**नतीजा — {bt['n']} स्क्रिप्ट · शुरुआती पूँजी ₹{cap:,.0f}**")
+    stretch(st.dataframe, _bt_summary_table({rr: v[2] for rr, v in res.items()}, cap), hide_index=True)
+    st.markdown("**हर TF की असली अवधि (Yahoo डेटा)**")
+    stretch(st.dataframe, bt["cov"], hide_index=True)
+    for rr, (tdf, curve, summ) in res.items():
+        with st.expander(f"Target 1:{rr:g} — विवरण", expanded=False):
+            if tdf.empty:
+                st.info("कोई ट्रेड नहीं।")
+                continue
+            st.markdown("**पूँजी का ग्राफ़ (net, चार्ज के बाद)**")
+            st.line_chart(curve.set_index("exit_time")["equity"])
+            a, b = st.columns(2)
+            a.markdown("**TF के हिसाब से**")
+            stretch(a.dataframe, _bt_group(tdf, "tf"), hide_index=True)
+            b.markdown("**Demand (CNC) / Supply (MIS)**")
+            stretch(b.dataframe, _bt_group(tdf, "side"), hide_index=True)
+            tdf2 = tdf.copy()
+            tdf2["साल"] = tdf2["entry_time"].dt.year
+            a2, b2 = st.columns(2)
+            a2.markdown("**साल के हिसाब से**")
+            stretch(a2.dataframe, _bt_group(tdf2, "साल"), hide_index=True)
+            b2.markdown("**Score के हिसाब से**")
+            stretch(b2.dataframe, _bt_group(tdf2, "score"), hide_index=True)
+            ch = tdf[["brokerage", "stt", "exchange", "stamp", "gst", "dp"]].sum()
+            st.markdown("**चार्ज का ब्रेकअप (₹)** — " + " · ".join(f"{k}: {v:,.0f}" for k, v in ch.items()))
+            show = tdf[["symbol", "tf", "side", "pattern", "score", "entry_time", "entry", "sl", "target",
+                        "exit_time", "exit", "reason", "qty", "gross", "charges", "net"]].copy()
+            show["entry_time"] = show["entry_time"].dt.strftime("%d-%b-%Y %H:%M")
+            show["exit_time"] = show["exit_time"].dt.strftime("%d-%b-%Y %H:%M")
+            put(st, "download_button", f"⬇️ सारे ट्रेड CSV (1:{rr:g})",
+                show.to_csv(index=False).encode("utf-8-sig"),
+                file_name=f"backtest_1to{rr:g}_{datetime.now(IST):%Y%m%d}.csv", mime="text/csv",
+                key=f"bt_dl_{rr}")
+            stretch(st.dataframe, show.round(2), hide_index=True, height=360)
+
+
 # ---------------------------------------------------------------------------
 # 5 · यूनिवर्स
 # ---------------------------------------------------------------------------
@@ -2569,6 +2908,10 @@ def _main():
                 res = run_scan(syms, inp, opts)
             res.update(inputs=inp, opts=opts, ui=uo, symbols=syms)
             st.session_state["scan"] = res
+
+    # ── Backtest ────────────────────────────────────────────────────────
+    with st.expander("🧪 Backtest", expanded=False):
+        backtest_panel(inp, tb)
 
     res = st.session_state.get("scan")
     if not res:

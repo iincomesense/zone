@@ -27,6 +27,7 @@ import math
 import os
 import pickle
 import time
+import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
@@ -1173,6 +1174,8 @@ def _last_close(frames: Dict[str, pd.DataFrame], tfs: Sequence[str]) -> float:
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
+APP_BUILD = "v4 · 2026-10-27"
+
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
 
@@ -1683,6 +1686,16 @@ def deps_guard() -> bool:
 
 
 def main():
+    """कुछ भी गड़बड़ हो तो स्क्रीन खाली न दिखे — पूरा विवरण दिखाएँ।"""
+    try:
+        _main()
+    except Exception:                                          # noqa: BLE001
+        st.error("⚠️ ऐप में त्रुटि — नीचे पूरा विवरण (यह पंक्ति स्क्रीनशॉट के साथ भेजें)")
+        st.code(traceback.format_exc(), language="text")
+
+
+def _main():
+    st.caption(f"build {APP_BUILD} · streamlit {st.__version__}")
     css()
     if not deps_guard():
         return
@@ -1708,6 +1721,8 @@ def main():
 
     res = st.session_state.get("scan")
     if not res:
+        st.info("यूनिवर्स चुनें और **⚡ Scan** दबाएँ — या स्क्रिप्ट बॉक्स में नाम लिखें "
+                "(जैसे `JSWSTEEL, RELIANCE`)। पहला स्कैन धीमा होता है, फिर कैश से तेज़।")
         return
 
     df_all: pd.DataFrame = res["rows"]

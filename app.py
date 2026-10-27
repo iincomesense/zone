@@ -759,6 +759,8 @@ class PineInputs:
     playRR: float = 10.0
     oppUseMTF: bool = True
     coreMTF: str = "Off (score only)"
+    showSupply: bool = True
+    breakEvenRR: float = 0.0
     # ---- 2 · Note rules (grading; mandatory in Strict) ----
     legInMaxWick: float = 0.20
     legOutMinBody: float = 0.65
@@ -1130,6 +1132,9 @@ def _candidate(p: int, bc: int, nout: int, S: _S, I: PineInputs):
         plus=bool(plus_b), long_out=bool((h[fo] - l[fo]) > I.legOutTooLong * in_range),
         notes_pass=notes_pass, inst=int(disp) + int(rel_vol) + int(sweep) + int(imb),
         strong_gap=bool(gap_out and gap_size < in_range),
+        m_in_atr=float(S.tr[li] / atr[li]), m_out_atr=float(S.tr[fo] / atr[fo]),
+        m_li_body=float(S.bp[li]), m_fo_body=float(S.bp[fo]),
+        m_li_ratio=float(in_range / base_size), m_lo_ratio=float((ob_hi - ob_lo) / base_size),
         b0=b0, bl=bl, li=li,
     )
 
@@ -1342,6 +1347,9 @@ def engine(df: pd.DataFrame, I: PineInputs, tf: str, htf_daily: Optional[pd.Data
                         grade_hi=_GRADE_HI.get(bc, "ठीक-ठाक"),
                         white=cand["white"], fav_colour=cand["fav_colour"],
                         notes_pass=cand["notes_pass"], inst=cand["inst"],
+                        m_in_atr=cand["m_in_atr"], m_out_atr=cand["m_out_atr"],
+                        m_li_body=cand["m_li_body"], m_fo_body=cand["m_fo_body"],
+                        m_li_ratio=cand["m_li_ratio"], m_lo_ratio=cand["m_lo_ratio"],
                         long_out=cand["long_out"], follow=follow, base_break=base_brk,
                         swing_break=swing_brk, trader_type=TT_NAME.get(tt, ""), t1_rr=t1,
                         state=STATE_FRESH, touches=0, outside=True, target_hit=False,
@@ -1587,7 +1595,7 @@ def eod_band(df: Optional[pd.DataFrame], tf: str, atr_period: int = 14) -> Optio
 # ---------------------------------------------------------------------------
 _EMPTY_SNAP = {"demand": None, "supply": None, "demand_time": 0, "supply_time": 0}
 _ZCACHE: Dict[tuple, tuple] = {}
-_ZVER = "z10"           # इंजन बदले तो बढ़ाएँ — पुराना कैश अपने आप बेकार
+_ZVER = "z12"           # इंजन बदले तो बढ़ाएँ — पुराना कैश अपने आप बेकार
 
 
 def _inputs_hash(I: PineInputs) -> str:
@@ -1734,6 +1742,8 @@ def scan_symbol(symbol: str,
             z["verdict"] = verdict(z["score"], I)
             if I.hideNoTrade and z["score"] < I.minScore:
                 continue
+            if not I.showSupply and not dem:
+                continue
             if I.filterAction and not act_ok:
                 continue
             if I.filterWholesale and not ws_ok:
@@ -1805,93 +1815,106 @@ def india_charges(kind: str, buy_val: float, sell_val: float, when: pd.Timestamp
                 dp=dp, total=total)
 
 
-def _bt_zone_trades(df: pd.DataFrame, zones: List[dict], tf: str, symbol: str, I: PineInputs,
-                    rr: float, use_buffer: bool, start: pd.Timestamp, end: pd.Timestamp) -> List[dict]:
-    """हर ज़ोन का (qty के बिना) एक संभावित ट्रेड — प्रति शेयर भाव के साथ।"""
+def _bt_prep(df: pd.DataFrame, tf: str) -> dict:
     idx = pd.DatetimeIndex(df.index)
-    if idx.tz is None:
-        idx = idx.tz_localize(IST)
-    else:
-        idx = idx.tz_convert(IST)
-    o = df["open"].to_numpy(dtype="float64")
-    h = df["high"].to_numpy(dtype="float64")
-    l = df["low"].to_numpy(dtype="float64")
-    c = df["close"].to_numpy(dtype="float64")
+    idx = idx.tz_localize(IST) if idx.tz is None else idx.tz_convert(IST)
     n = len(df)
     day = idx.normalize()
     intraday = TF_SECONDS.get(tf, 0) < 86400
     last_of_day = np.ones(n, dtype=bool)
     if intraday and n > 1:
         last_of_day[:-1] = day[1:] != day[:-1]
+    return dict(idx=idx, o=df["open"].to_numpy(dtype="float64"), h=df["high"].to_numpy(dtype="float64"),
+                l=df["low"].to_numpy(dtype="float64"), c=df["close"].to_numpy(dtype="float64"),
+                n=n, intraday=intraday, lod=last_of_day)
+
+
+def _bt_sim_one(P: dict, z: dict, rr: float, maturity: int, be_rr: float, use_buffer: bool,
+                start: pd.Timestamp, end: pd.Timestamp) -> Optional[dict]:
+    """एक ज़ोन का एक ट्रेड (प्रति शेयर)। be_rr > 0 → price 1:be_rr पहुँचे तो SL = entry।"""
+    idx, o, h, l, c, n = P["idx"], P["o"], P["h"], P["l"], P["c"], P["n"]
+    dem = bool(z["demand"])
+    prox = float(z["prox"])
+    sl0 = float(z["sl"]) if use_buffer else float(z["dist"])
+    risk_ps = abs(prox - sl0)
+    if risk_ps <= 0:
+        return None
+    tgt = prox + rr * risk_ps if dem else prox - rr * risk_ps
+    cb = int(z["created_bar"])
+    ej = None
+    for j in range(cb + 1, n):
+        touch = (l[j] <= prox) if dem else (h[j] >= prox)
+        if not touch:
+            if (min(o[j], c[j]) < z["cover"]) if dem else (max(o[j], c[j]) > z["cover"]):
+                return None                                  # covered leg-out → ज़ोन ख़त्म
+            continue
+        if j - cb < maturity or idx[j] < start or idx[j] > end:
+            return None                                      # immature trap / अवधि के बाहर
+        ej = j
+        break
+    if ej is None:
+        return None
+    fill = min(prox, o[ej]) if dem else max(prox, o[ej])
+    open_first = (o[ej] <= prox) if dem else (o[ej] >= prox)
+    sl = sl0
+    be_lvl = (fill + be_rr * risk_ps if dem else fill - be_rr * risk_ps) if be_rr > 0 else None
+    exit_px = exit_j = None
+    reason = ""
+    for k in range(ej, n):
+        if idx[k] > end:
+            kk = max(ej, k - 1)
+            exit_px, exit_j, reason = c[kk], kk, "Period end"
+            break
+        first = k == ej
+        if dem:
+            if l[k] <= sl:
+                exit_px = fill if (first and fill <= sl) else (sl if first else min(o[k], sl))
+                exit_j, reason = k, ("BE" if sl != sl0 else "SL")
+                break
+            if h[k] >= tgt and (not first or open_first):
+                exit_px = tgt if first else max(o[k], tgt)
+                exit_j, reason = k, "Target"
+                break
+            if be_lvl is not None and sl == sl0 and h[k] >= be_lvl and (not first or open_first):
+                sl = fill
+        else:
+            if h[k] >= sl:
+                exit_px = fill if (first and fill >= sl) else (sl if first else max(o[k], sl))
+                exit_j, reason = k, ("BE" if sl != sl0 else "SL")
+                break
+            if l[k] <= tgt and (not first or open_first):
+                exit_px = tgt if first else min(o[k], tgt)
+                exit_j, reason = k, "Target"
+                break
+            if be_lvl is not None and sl == sl0 and l[k] <= be_lvl and (not first or open_first):
+                sl = fill
+            if (not P["intraday"]) or P["lod"][k]:
+                exit_px, exit_j, reason = c[k], k, "MIS square-off"
+                break
+    if exit_px is None:
+        exit_px, exit_j, reason = c[n - 1], n - 1, "Open (last price)"
+    return dict(entry_time=idx[ej], exit_time=idx[exit_j], entry=float(fill), sl=float(sl0),
+                target=float(tgt), exit=float(exit_px), risk_ps=float(abs(fill - sl0)) or risk_ps,
+                reason=reason, long=dem, kind="CNC" if dem else "MIS",
+                side="Long CNC" if dem else "Short MIS")
+
+
+def _bt_zone_trades(df: pd.DataFrame, zones: List[dict], tf: str, symbol: str, I: PineInputs,
+                    rr: float, use_buffer: bool, start: pd.Timestamp, end: pd.Timestamp,
+                    maturity: Optional[int] = None, be_rr: float = 0.0) -> List[dict]:
+    """हर ज़ोन का (qty के बिना) संभावित ट्रेड — प्रति शेयर भाव के साथ।"""
+    P = _bt_prep(df, tf)
+    mat = I.maturityBars if maturity is None else maturity
     out: List[dict] = []
     for z in zones:
-        dem = bool(z["demand"])
         if I.coreOpposite and z.get("room_tf") is not None and z["room_tf"] < I.oppositeRR:
             continue
-        prox = float(z["prox"])
-        sl = float(z["sl"]) if use_buffer else float(z["dist"])
-        risk_ps = abs(prox - sl)
-        if risk_ps <= 0:
+        t = _bt_sim_one(P, z, rr, mat, be_rr, use_buffer, start, end)
+        if t is None:
             continue
-        tgt = prox + rr * risk_ps if dem else prox - rr * risk_ps
-        cb = int(z["created_bar"])
-        j = cb + 1
-        ej = None
-        while j < n:
-            touch = (l[j] <= prox) if dem else (h[j] >= prox)
-            if not touch:
-                covered = (min(o[j], c[j]) < z["cover"]) if dem else (max(o[j], c[j]) > z["cover"])
-                if covered:
-                    break
-                j += 1
-                continue
-            if j - cb < I.maturityBars:            # जल्दी लौटा = trap
-                break
-            if idx[j] < start or idx[j] > end:
-                break
-            ej = j
-            break
-        if ej is None:
-            continue
-        fill = min(prox, o[ej]) if dem else max(prox, o[ej])
-        open_first = (o[ej] <= prox) if dem else (o[ej] >= prox)
-        exit_px = exit_j = None
-        reason = ""
-        for k in range(ej, n):
-            if idx[k] > end:                         # अवधि ख़त्म — पिछली candle के close पर बंद
-                kk = max(ej, k - 1)
-                exit_px, exit_j, reason = c[kk], kk, "Period end"
-                break
-            first = k == ej
-            if dem:
-                if l[k] <= sl:
-                    exit_px = fill if (first and fill <= sl) else (min(o[k], sl) if not first else sl)
-                    exit_j, reason = k, "SL"
-                    break
-                if h[k] >= tgt and (not first or open_first):
-                    exit_px = max(o[k], tgt) if not first else tgt
-                    exit_j, reason = k, "Target"
-                    break
-            else:
-                if h[k] >= sl:
-                    exit_px = fill if (first and fill >= sl) else (max(o[k], sl) if not first else sl)
-                    exit_j, reason = k, "SL"
-                    break
-                if l[k] <= tgt and (not first or open_first):
-                    exit_px = min(o[k], tgt) if not first else tgt
-                    exit_j, reason = k, "Target"
-                    break
-                if (not intraday) or last_of_day[k]:   # MIS: उसी दिन square-off
-                    exit_px, exit_j, reason = c[k], k, "MIS square-off"
-                    break
-        if exit_px is None:
-            exit_px, exit_j, reason = c[n - 1], n - 1, "Open (last price)"
-        out.append(dict(
-            symbol=symbol, tf=tf, side="Long CNC" if dem else "Short MIS", kind="CNC" if dem else "MIS",
-            pattern=z["pattern"], score=int(z.get("score_base", 0)), tags=z.get("tags", ""),
-            entry_time=idx[ej], exit_time=idx[exit_j], entry=float(fill), sl=float(sl), target=float(tgt),
-            exit=float(exit_px), risk_ps=float(abs(fill - sl)) or risk_ps, reason=reason, long=dem,
-        ))
+        t.update(symbol=symbol, tf=tf, pattern=z["pattern"], score=int(z.get("score_base", 0)),
+                 tags=z.get("tags", ""))
+        out.append(t)
     return out
 
 
@@ -1979,8 +2002,11 @@ def bt_collect(symbols: Sequence[str], frames_all: Dict[str, Dict[str, pd.DataFr
                 continue
             first, last = pd.Timestamp(df.index[0]), pd.Timestamp(df.index[-1])
             cover.setdefault(tf, []).append((first, last))
+            if not Is.showSupply:
+                zs = [z for z in zs if z["demand"]]
             for rr in rrs:
-                out[rr].extend(_bt_zone_trades(df, zs, tf, sym, Is, rr, use_buffer, start, end))
+                out[rr].extend(_bt_zone_trades(df, zs, tf, sym, Is, rr, use_buffer, start, end,
+                                               be_rr=Is.breakEvenRR))
         if progress:
             progress((i + 1) / max(1, len(syms)), sym)
     def _ist(ts):
@@ -1999,11 +2025,256 @@ def bt_collect(symbols: Sequence[str], frames_all: Dict[str, Dict[str, pd.DataFr
                      "स्क्रिप्ट": len(spans)})
     return out, pd.DataFrame(rows)
 
+
+# ═══════════════════════════════════════════════════════════════════════
+#  भाग 3c · OPTIMIZER — असली डेटा पर नियमों के हज़ारों संयोजन
+#   • एक बार ढीले नियमों से इंजन चलता है, हर ज़ोन के आँकड़े रखे जाते हैं
+#   • हर संयोजन = उन आँकड़ों पर फ़िल्टर + पूँजी-सीमा वाला portfolio (चार्ज सहित)
+#   • In-sample (शुरू → split) पर चुनो, Out-of-sample (split → अंत) पर परखो
+#   • ट्रेड की गिनती baseline (आपके अभी के नियम) से तय % से कम नहीं होने दी जाती
+# ═══════════════════════════════════════════════════════════════════════
+OPT_GRID = dict(
+    atr=[1.0, 1.2],                 # leg-in और leg-out: TR ≥ ATR ×
+    body=[0.5, 0.6],                # filled candle body ≥
+    li=[1.5, 2.0],                  # 1-2-4: leg-in ≥ boring ×
+    lo=[2.0, 2.5, 3.0],             # 1-2-4: leg-out (body) ≥ boring ×
+    power=[2.0, 3.0],               # power of leg-out ≥ 1:x
+    maturity=[0, 3],                # candles
+    score=[0, 7],                   # सिर्फ़ इतने score से ऊपर ट्रेड
+    trend=["off", "not_against", "in_favour"],
+    side=["both", "demand"],
+    be=[0.0, 2.0],                  # 1:2 पर SL entry पर
+    rr=[3.0, 5.0],
+)
+OPT_BASE = dict(atr=1.2, body=0.6, li=1.5, lo=2.5, power=3.0, maturity=3, score=0, trend="off",
+                side="both", be=0.0)
+TREND_TO_CORE = {"off": "Off (score only)", "not_against": "Higher-TF not against",
+                 "in_favour": "Higher-TF in favour (strict)"}
+
+
+def htf_action_series(frames: Dict[str, pd.DataFrame], tf: str, I: PineInputs) -> Optional[pd.DataFrame]:
+    """हर समय पर (बिना भविष्य देखे) ट्रेंड TF का Action — पिछली पूरी candle से।"""
+    tt = trader_type(tf, I)
+
+    def stats(df):
+        if df is None or len(df) < max(I.emaFast, I.atrPeriod) + 9:
+            return None
+        cl = df["close"].astype("float64")
+        e = cl.ewm(span=I.emaFast, adjust=False).mean()
+        atr = pd.Series(_rma(_true_range(df["high"].to_numpy(dtype="float64"),
+                                         df["low"].to_numpy(dtype="float64"), cl.to_numpy()), I.atrPeriod),
+                        index=df.index)
+        slope = (e - e.shift(6)) / atr
+        pp = (cl > df["open"]) & (cl > e)
+        pn = (cl < df["open"]) & (cl < e)
+        out = pd.DataFrame({"pp": pp, "pn": pn, "up": slope > I.trendThr, "dn": slope < -I.trendThr})
+        out = out.shift(1).fillna(False).astype(bool)        # सिर्फ़ पूरी हो चुकी candle
+        ix = pd.DatetimeIndex(out.index)
+        out.index = ix.tz_localize(IST) if ix.tz is None else ix.tz_convert(IST)
+        return out
+
+    t = stats(frames.get(trend_tf(tf)))
+    if t is None:
+        return None
+    res = pd.DataFrame({"long": t["pp"] & t["up"], "short": t["pn"] & t["dn"]}, index=t.index)
+    if tt == 2:
+        d = stats(frames.get("1d"))
+        if d is not None:
+            dd = d.reindex(res.index, method="ffill").fillna(False).astype(bool)
+            res["long"] &= dd["pp"]
+            res["short"] &= dd["pn"]
+    return res
+
+
+def _act_at(series: Optional[pd.DataFrame], ts: pd.Timestamp) -> Tuple[bool, bool]:
+    if series is None or series.empty:
+        return False, False
+    pos = series.index.searchsorted(ts, side="right") - 1
+    if pos < 0:
+        return False, False
+    row = series.iloc[pos]
+    return bool(row["long"]), bool(row["short"])
+
+
+def opt_collect(symbols: Sequence[str], frames_all: Dict[str, Dict[str, pd.DataFrame]], tfs: Sequence[str],
+                I: PineInputs, start: pd.Timestamp, end: pd.Timestamp, use_buffer: bool = False,
+                progress=None) -> pd.DataFrame:
+    """ढीले नियमों से सारे ज़ोन + हर (rr, maturity, BE) का ट्रेड — एक बड़ी तालिका।"""
+    loose = replace(I.sanitized(), scanBars=10 ** 7, maxStored=10 ** 7,
+                    legInAtrMult=min(OPT_GRID["atr"]), legOutAtrMult=min(OPT_GRID["atr"]),
+                    filledMinBody=min(OPT_GRID["body"]), legInToBaseSizeMult=min(OPT_GRID["li"]),
+                    legOutToBaseSizeMult=min(OPT_GRID["lo"]), powerMinRR=min(OPT_GRID["power"]))
+    rows = []
+    syms = [s for s in symbols if s in frames_all]
+    for i, sym in enumerate(syms):
+        fr = frames_all[sym]
+        Is = replace(loose, commodityMode=bool(loose.commodityMode and sym.upper() in COMMODITY_SYMBOLS))
+        for tf in tfs:
+            df = fr.get(tf)
+            if df is None or len(df) < 40:
+                continue
+            try:
+                zs = engine(df, Is, tf, htf_daily=fr.get("1d"), return_all=True)
+            except Exception:                                  # noqa: BLE001
+                continue
+            if not zs:
+                continue
+            P = _bt_prep(df, tf)
+            act = htf_action_series(fr, tf, Is)
+            for zid, z in enumerate(zs):
+                if z.get("room_tf") is not None and z["room_tf"] < Is.oppositeRR:
+                    continue                                   # आपका अनिवार्य opposite-zone नियम
+                base = dict(symbol=sym, tf=tf, zid=f"{sym}|{tf}|{zid}", long=bool(z["demand"]),
+                            m_in_atr=z["m_in_atr"], m_out_atr=z["m_out_atr"], m_li_body=z["m_li_body"],
+                            m_fo_body=z["m_fo_body"], m_li_ratio=z["m_li_ratio"], m_lo_ratio=z["m_lo_ratio"],
+                            pow_rr=z["pow_rr"], score_base=int(z["score_base"]),
+                            room_pt=int(z.get("room_tf") is None or z["room_tf"] >= 10 or z["xrr"] >= 10))
+                for rr in OPT_GRID["rr"]:
+                    for mat in OPT_GRID["maturity"]:
+                        for be in OPT_GRID["be"]:
+                            t = _bt_sim_one(P, z, rr, mat, be, use_buffer, start, end)
+                            if t is None:
+                                continue
+                            al, ash = _act_at(act, t["entry_time"])
+                            rows.append(dict(base, rr=rr, maturity=mat, be=be,
+                                             entry_time=t["entry_time"], exit_time=t["exit_time"],
+                                             entry=t["entry"], exit=t["exit"], risk_ps=t["risk_ps"],
+                                             reason=t["reason"], act_long=al, act_short=ash))
+        if progress:
+            progress((i + 1) / max(1, len(syms)), sym)
+    return pd.DataFrame(rows)
+
+
+def _fast_portfolio(et, xt, entry, exitp, rps, is_long, capital: float, risk_pct: float) -> dict:
+    """bt_portfolio जैसा ही, पर तेज़ (arrays)। et/xt = int64 ns, पहले से entry के क्रम में।"""
+    import heapq
+    cash = equity = peak = float(capital)
+    max_dd = 0.0
+    heap: list = []
+    n_tr = wins = skipped = 0
+    net_sum = gw = gl = 0.0
+    oct24 = pd.Timestamp("2024-10-01", tz=IST).value
+    for i in range(len(et)):
+        while heap and heap[0][0] <= et[i]:
+            _, _, blk, nt = heapq.heappop(heap)
+            cash += blk + nt
+            equity += nt
+            peak = max(peak, equity)
+            max_dd = min(max_dd, (equity - peak) / peak * 100.0)
+        qty = int(equity * risk_pct / 100.0 / max(rps[i], 1e-9))
+        per = entry[i] if is_long[i] else entry[i] * MIS_MARGIN
+        qty = min(qty, int(cash / per) if per > 0 else 0)
+        if qty < 1:
+            skipped += 1
+            continue
+        if is_long[i]:
+            buy, sell = qty * entry[i], qty * exitp[i]
+        else:
+            sell, buy = qty * entry[i], qty * exitp[i]
+        turn = buy + sell
+        ex = turn * (0.0000322 if xt[i] < oct24 else 0.0000297)
+        if is_long[i]:
+            brk, stt, stamp, dp = 0.0, 0.001 * turn, 0.00015 * buy, DP_CHARGE
+        else:
+            brk = min(20.0, 0.0003 * buy) + min(20.0, 0.0003 * sell)
+            stt, stamp, dp = 0.00025 * sell, 0.00003 * buy, 0.0
+        sebi = turn * 1e-6
+        ch = brk + stt + stamp + ex + sebi + 0.18 * (brk + ex + sebi) + dp
+        nt = sell - buy - ch
+        blk = qty * per
+        cash -= blk
+        heapq.heappush(heap, (xt[i], i, blk, nt))
+        n_tr += 1
+        net_sum += nt
+        if nt > 0:
+            wins += 1
+            gw += nt
+        else:
+            gl -= nt
+    while heap:
+        _, _, blk, nt = heapq.heappop(heap)
+        equity += nt
+        peak = max(peak, equity)
+        max_dd = min(max_dd, (equity - peak) / peak * 100.0)
+    return dict(trades=n_tr, wins=wins, skipped=skipped, net=net_sum,
+                ret=net_sum / capital * 100.0, win_pct=(wins / n_tr * 100.0) if n_tr else 0.0,
+                max_dd=max_dd, pf=(gw / gl) if gl > 0 else (99.0 if gw > 0 else 0.0))
+
+
+def opt_run(T: pd.DataFrame, capital: float, risk_pct: float, split: pd.Timestamp,
+            keep_pct: float = 80.0, progress=None) -> Tuple[pd.DataFrame, dict]:
+    """सारे संयोजन चलाओ। लौटाता है (नतीजे की तालिका, baseline)।"""
+    import itertools
+    if T is None or T.empty:
+        return pd.DataFrame(), {}
+    T = T.sort_values("entry_time").reset_index(drop=True)
+    et = T["entry_time"].map(lambda x: x.value).to_numpy()
+    xt = T["exit_time"].map(lambda x: x.value).to_numpy()
+    en, ex, rp = T["entry"].to_numpy(), T["exit"].to_numpy(), T["risk_ps"].to_numpy()
+    lg = T["long"].to_numpy()
+    is_mask = et < split.value
+    keys = ["atr", "body", "li", "lo", "power", "maturity", "score", "trend", "side", "be", "rr"]
+    combos = list(itertools.product(*[OPT_GRID[k] for k in keys]))
+    out = []
+    A = {k: T[k].to_numpy() for k in ("m_in_atr", "m_out_atr", "m_li_body", "m_fo_body", "m_li_ratio",
+                                      "m_lo_ratio", "pow_rr", "rr", "maturity", "be")}
+    act_with = np.where(lg, T["act_long"], T["act_short"]).astype(bool)
+    act_against = np.where(lg, T["act_short"], T["act_long"]).astype(bool)
+    score_act = T["score_base"].to_numpy() + T["room_pt"].to_numpy() + act_with.astype(int)
+    for ci, vals in enumerate(combos):
+        p = dict(zip(keys, vals))
+        m = ((A["m_in_atr"] >= p["atr"]) & (A["m_out_atr"] >= p["atr"])
+             & (A["m_li_body"] >= p["body"]) & (A["m_fo_body"] >= p["body"])
+             & (A["m_li_ratio"] >= p["li"]) & (A["m_lo_ratio"] >= p["lo"])
+             & (A["pow_rr"] >= p["power"]) & (score_act >= p["score"])
+             & (A["rr"] == p["rr"]) & (A["maturity"] == p["maturity"]) & (A["be"] == p["be"]))
+        if p["side"] == "demand":
+            m &= lg
+        if p["trend"] == "not_against":
+            m &= ~act_against
+        elif p["trend"] == "in_favour":
+            m &= act_with
+        r = {}
+        for tag, pm in (("IS", m & is_mask), ("OOS", m & ~is_mask)):
+            ii = np.flatnonzero(pm)
+            r[tag] = _fast_portfolio(et[ii], xt[ii], en[ii], ex[ii], rp[ii], lg[ii], capital, risk_pct)
+        row = dict(p)
+        for tag in ("IS", "OOS"):
+            for k in ("trades", "win_pct", "net", "ret", "max_dd", "pf"):
+                row[f"{tag}_{k}"] = r[tag][k]
+        out.append(row)
+        if progress and ci % 50 == 0:
+            progress(ci / len(combos))
+    R = pd.DataFrame(out)
+    base = {}
+    for rr in OPT_GRID["rr"]:
+        q = R
+        for k, v in OPT_BASE.items():
+            q = q[q[k] == v]
+        q = q[q["rr"] == rr]
+        if len(q):
+            base[rr] = q.iloc[0].to_dict()
+    min_tr = keep_pct / 100.0 * max([b["IS_trades"] for b in base.values()] or [0])
+    R["feasible"] = R["IS_trades"] >= min_tr
+    R = R.sort_values(["feasible", "IS_net"], ascending=[False, False]).reset_index(drop=True)
+    return R, dict(base=base, min_trades=min_tr)
+
+
+def opt_pick(R: pd.DataFrame, top: int = 15) -> Optional[dict]:
+    """In-sample के top में से वह जो Out-of-sample में भी सबसे अच्छा (दोनों में मुनाफ़ा)।"""
+    if R is None or R.empty:
+        return None
+    cand = R[R["feasible"]].head(top)
+    good = cand[(cand["IS_net"] > 0) & (cand["OOS_net"] > 0)]
+    pick = (good if len(good) else cand).sort_values("OOS_net", ascending=False)
+    return pick.iloc[0].to_dict() if len(pick) else None
+
+
 # ═══════════════════════════════════════════════════════════════════════
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v11 · KTP rules · Backtest · 2026-10-27"
+APP_BUILD = "v12 · KTP rules · Backtest · Optimizer · 2026-10-27"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -2263,6 +2534,9 @@ def pine_panel(slot=None):
             opp_mtf = f7.checkbox("दूसरे TF के ज़ोन भी गिनें", D.oppUseMTF, key="in_oppmtf")
             core_mtf = f8.selectbox("MTF analysis", MTF_CORE_MODES,
                                     index=MTF_CORE_MODES.index(D.coreMTF), key="in_coremtf")
+            f9, f10, _, _ = st.columns(4)
+            show_sup = f9.checkbox("Supply ज़ोन भी दिखाएँ/ट्रेड करें", D.showSupply, key="in_showsupply")
+            be_rr = f10.number_input("Break-even: 1: पर SL entry पर (0 = बंद)", 0.0, 10.0, D.breakEvenRR, 0.5, key="in_berr")
         with t2:
             c1, c2, c3, c4 = st.columns(4)
             minbc = c1.number_input("Min boring candles", 1, 4, D.minBaseCountInput, 1, key="in_minbc")
@@ -2345,6 +2619,7 @@ def pine_panel(slot=None):
     inp = PineInputs(
         accountCapital=float(cap), riskPct=float(risk), targetRR=float(rr), hourlyRR=float(hrr),
         target2RR=float(t2rr), legOutEachMinBody=float(lo_each), powerOnBody=bool(pow_body),
+        showSupply=bool(show_sup), breakEvenRR=float(be_rr),
         maturityBars=int(mat_bars),
         monthlyRR=float(mrr), halfQty3=bool(half), traderType=str(ttype), bufferMode=str(bmode),
         bufAggrPct=float(b_aggr), bufDailyPct=float(b_daily), bufSwingPct=float(b_swing),
@@ -2787,6 +3062,9 @@ def backtest_panel(inp: PineInputs, tb: dict) -> None:
             tdf, curve, summ = bt_portfolio(tl, float(cap), float(rp))
             res[rr] = (tdf, curve, summ)
         st.session_state["bt"] = dict(res=res, cov=cov, cap=float(cap), n=len(syms))
+    st.divider()
+    optimizer_panel(inp, tb, cap, rp, d0, d1)
+    st.divider()
     bt = st.session_state.get("bt")
     if not bt:
         return
@@ -2825,6 +3103,89 @@ def backtest_panel(inp: PineInputs, tb: dict) -> None:
                 file_name=f"backtest_1to{rr:g}_{datetime.now(IST):%Y%m%d}.csv", mime="text/csv",
                 key=f"bt_dl_{rr}")
             stretch(st.dataframe, show.round(2), hide_index=True, height=360)
+
+
+def _opt_apply(best: dict) -> None:
+    """Optimizer के सबसे अच्छे नियम ⚙️ इनपुट में डाल दो (on_click callback)।"""
+    ss = st.session_state
+    ss["in_liatr"] = float(best["atr"])
+    ss["in_loatr"] = float(best["atr"])
+    ss["in_filled"] = float(best["body"])
+    ss["in_libase"] = float(best["li"])
+    ss["in_lobase"] = float(best["lo"])
+    ss["in_powermin"] = float(best["power"])
+    ss["in_matbars"] = int(best["maturity"])
+    ss["in_minscore"] = int(best["score"]) if int(best["score"]) > 0 else PineInputs().minScore
+    ss["in_hident"] = bool(int(best["score"]) > 0)
+    ss["in_coremtf"] = TREND_TO_CORE.get(str(best["trend"]), MTF_CORE_MODES[0])
+    ss["in_showsupply"] = str(best["side"]) == "both"
+    ss["in_berr"] = float(best["be"])
+    ss.pop("scan", None)
+
+
+def _opt_pine_text(b: dict) -> str:
+    return "\n".join([
+        f"Leg-in: TR ≥ ATR ×                 = {b['atr']}",
+        f"First leg-out: TR ≥ ATR ×          = {b['atr']}",
+        f"Filled candle: min body %          = {b['body']}",
+        f"1-2-4: Leg-in ≥ boring ×           = {b['li']}",
+        f"1-2-4: Leg-out (body) ≥ boring ×   = {b['lo']}",
+        f"Power: minimum reward 1:           = {b['power']}",
+        f"Maturity: candles after zone       = {int(b['maturity'])}",
+        f"Min score to trade                 = {int(b['score'])}  (Hide NO-TRADE = {'ON' if int(b['score']) > 0 else 'OFF'})",
+        f"MTF analysis → mandatory           = {TREND_TO_CORE.get(str(b['trend']))}",
+        f"Show supply zones                  = {'ON' if b['side'] == 'both' else 'OFF'}",
+        f"Break-even at 1: (0 = off)         = {b['be']}",
+        f"सबसे अच्छा target                   = 1:{b['rr']:g}",
+    ])
+
+
+def optimizer_panel(inp: PineInputs, tb: dict, cap: float, rp: float, d0, d1) -> None:
+    st.markdown("**🔧 Optimizer — असली डेटा पर सबसे अच्छे नियम (zone कम न हों + मुनाफ़ा)**")
+    st.caption("ढीले नियमों से एक बार ज़ोन बनते हैं, फिर ~4,600 संयोजन चार्ज और पूँजी-सीमा के साथ चलते हैं। "
+               "In-sample पर चुने जाते हैं, बाद के अनदेखे (Out-of-sample) समय पर परखे जाते हैं। "
+               "अनिवार्य नियम (Filled-Unfilled-Filled, White area, Formation, CBLI, opposite zone) हमेशा लागू।")
+    o1, o2, o3 = cols([1, 1, 2])
+    split = o1.date_input("In-sample अंत / OOS शुरू", pd.Timestamp("2025-07-01").date(), key="opt_split")
+    keep = o2.slider("ट्रेड कम से कम (baseline का %)", 50, 150, 80, 10, key="opt_keep")
+    otfs = o3.multiselect("TF (लंबी अवधि वाले)", list(ALL_TFS), default=["1h", "2h", "4h", "1d", "1w"],
+                          key="opt_tfs")
+    if put(st, "button", "🔧 Optimizer चलाएँ", key="opt_go"):
+        syms = pick_symbols(tb)
+        start = pd.Timestamp(d0).tz_localize(IST)
+        end = pd.Timestamp(d1).tz_localize(IST) + pd.Timedelta(hours=23, minutes=59)
+        need = list(dict.fromkeys(list(otfs) + ["75m", "1d", "1w", "1M"]))
+        with st.spinner(f"{len(syms)} स्क्रिप्ट का डेटा…"):
+            frames_all = cached_frames(tuple(syms), tuple(need))
+        bar = st.progress(0.0, text="ज़ोन और ट्रेड बन रहे हैं…")
+        T = opt_collect(syms, frames_all, otfs, inp, start, end,
+                        progress=lambda f, s: bar.progress(min(1.0, f * 0.5), text=f"{s} …"))
+        R, meta = opt_run(T, float(cap), float(rp), pd.Timestamp(split).tz_localize(IST), float(keep),
+                          progress=lambda f: bar.progress(0.5 + 0.5 * min(1.0, f), text="संयोजन परखे जा रहे हैं…"))
+        bar.empty()
+        st.session_state["opt"] = dict(R=R, meta=meta, best=opt_pick(R), n=len(syms), zones=int(T["zid"].nunique()) if len(T) else 0)
+    O = st.session_state.get("opt")
+    if not O:
+        return
+    R, meta, best = O["R"], O["meta"], O["best"]
+    if R is None or R.empty or not best:
+        st.warning("कोई ट्रेड नहीं बना — ज़्यादा स्क्रिप्ट या TF चुनें।")
+        return
+    cols_show = ["atr", "body", "li", "lo", "power", "maturity", "score", "trend", "side", "be", "rr",
+                 "IS_trades", "IS_win_pct", "IS_net", "IS_max_dd", "IS_pf",
+                 "OOS_trades", "OOS_win_pct", "OOS_net", "OOS_max_dd", "OOS_pf"]
+    st.markdown(f"**{O['n']} स्क्रिप्ट · {O['zones']} ज़ोन · न्यूनतम ट्रेड (IS): {meta['min_trades']:.0f}**")
+    base_rows = [dict(v, नाम=f"आपके अभी के नियम · 1:{k:g}") for k, v in meta["base"].items()]
+    best_row = dict(best, नाम="★ सबसे अच्छा")
+    cmp = pd.DataFrame(base_rows + [best_row])[["नाम"] + cols_show]
+    stretch(st.dataframe, cmp.round(2), hide_index=True)
+    st.markdown("**Top 15 (In-sample net के क्रम में, ट्रेड-सीमा पूरी करने वाले)**")
+    stretch(st.dataframe, R[R["feasible"]].head(15)[cols_show].round(2), hide_index=True)
+    put(st, "button", "✅ सबसे अच्छे नियम ⚙️ इनपुट में लगाएँ", on_click=_opt_apply, args=(best,), key="opt_apply")
+    st.markdown("**TradingView Pine में यही सेटिंग डालें:**")
+    st.code(_opt_pine_text(best), language="text")
+    put(st, "download_button", "⬇️ सारे संयोजन CSV", R.to_csv(index=False).encode("utf-8-sig"),
+        file_name=f"optimizer_{datetime.now(IST):%Y%m%d}.csv", mime="text/csv", key="opt_dl")
 
 
 # ---------------------------------------------------------------------------

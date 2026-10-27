@@ -1,0 +1,1030 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © iincomesense — "Zone MTF (KTP rules v8)"
+// Demand/Supply zones per Dr. Ravi R. Kumar's KTP / Super Trader rules (user's Drive notes)
+// + institutional order-flow confluence (displacement, relative volume, liquidity sweep, imbalance).
+// v8: rules chosen step by step by the user —
+//     MANDATORY: Filled (body ≥60%) · 1-2-4 (leg-in ≥1.5× boring; leg-out 1–3 candles body-to-body ≥2.5× boring)
+//     · TR vs ATR (leg-in/out ≥ ATR×1.2, boring ≤ ATR) · White area · Formation · CBLI (covers >50%)
+//     · Power of leg-out to close ≥1:3 (★ 1:5) · No opposite zone before 1:5.
+//     States: 1st proximal touch = Tested, 2nd touch = Broken; maturity = 3 candles. SL buffer 2% DATR; T1 1:3, T2 1:5.
+//@version=6
+indicator("Zone MTF (KTP rules v8)", shorttitle="Zone MTF KTP", overlay=true, max_bars_back=5000, max_boxes_count=500, max_labels_count=500, max_lines_count=60)
+
+// ============================================================ INPUTS
+G0 = "0 · Capital, risk, buffer (SETS)"
+accountCapital = input.float(25000.0, "Account Capital (₹)", minval=1, group=G0)
+riskPct = input.float(0.5, "Risk % per trade", minval=0.01, step=0.05, group=G0, tooltip="कोर्स: हर ट्रेड में पूँजी का अधिकतम 0.5%")
+targetRR = input.float(3.0, "Target 1 RR (Daily / Weekly)", minval=1, step=0.5, group=G0, tooltip="कोर्स: 1:5 से कम ट्रेड नहीं")
+hourlyRR = input.float(3.0, "Hourly: first target RR", minval=1, step=0.5, group=G0, tooltip="आवरली ट्रेड: पहले 1:3, फिर 1:5")
+monthlyRR = input.float(3.0, "Monthly / Positional: first target RR", minval=1, step=0.5, group=G0)
+target2RR = input.float(5.0, "Target 2 RR (all)", minval=1, step=0.5, group=G0)
+halfQty3 = input.bool(true, "3+ boring candles → half quantity", group=G0)
+traderTypeIn = input.string("Auto (25×)", "Trader type", options=["Auto (25×)", "Aggressive (1M zone)", "Hourly (3M/5M zone)", "Daily (10M/15M zone)", "Weekly/Swing (1H/75M/2H zone)", "Monthly (Daily zone)"], group=G0, tooltip="Auto = चार्ट टाइमफ्रेम से (ट्रेंड TF ÷ 25 = ज़ोन TF)")
+bufferMode = input.string("DATR % (course)", "SL buffer method", options=["DATR % (course)", "Chart ATR ×"], group=G0)
+bufAggrPct = input.float(2.0, "Buffer % of DATR — Aggressive/Hourly", minval=0, group=G0)
+bufDailyPct = input.float(2.0, "Buffer % of DATR — Daily", minval=0, group=G0)
+bufSwingPct = input.float(2.0, "Buffer % of DATR — Weekly/Monthly", minval=0, group=G0)
+slBufferAtr = input.float(0.1, "SL Buffer × chart ATR (fallback)", minval=0, step=0.01, group=G0)
+entryBuffer = input.bool(false, "Entry buffer too (sideways market / index)", group=G0)
+
+G1 = "1 · Strictness & core candle rules"
+modeIn = input.string("Standard (core mandatory)", "Strictness", options=["Standard (core mandatory)", "Strict (core + all notes rules)"], group=G1, tooltip="Standard: नीचे के CORE नियम अनिवार्य, नोट्स के बाकी नियम सिर्फ़ ग्रेडिंग (Rules x/5)। Strict: सभी नियम अनिवार्य (ज़ोन बहुत कम)।")
+atrPeriod = input.int(14, "ATR Period (course: 14)", minval=1, group=G1)
+filledMinBody = input.float(0.60, "Filled candle: min body % (Body > Wick)", minval=0, maxval=1, step=0.05, group=G1)
+legInAtrMult = input.float(1.2, "Leg-in: TR ≥ ATR ×", minval=0, step=0.05, group=G1)
+legOutAtrMult = input.float(1.2, "First leg-out: TR ≥ ATR ×", minval=0, step=0.05, group=G1)
+boringAtrMult = input.float(1.0, "Boring: TR ≤ ATR ×", minval=0.1, step=0.05, group=G1)
+minBaseCountInput = input.int(1, "Min boring candles", minval=1, maxval=4, group=G1)
+maxBaseCountInput = input.int(3, "Max boring candles (>3 not good)", minval=1, maxval=4, group=G1)
+legInToBaseSizeMult = input.float(1.5, "1-2-4: Leg-in ≥ boring ×", minval=1, step=0.25, group=G1)
+legOutToBaseSizeMult = input.float(2.5, "1-2-4: Leg-out (body to body) ≥ boring ×", minval=1, step=0.25, group=G1)
+legOutEachMinBody = input.float(0.50, "Leg-out 2/3: each candle min body % (wick < 50%)", minval=0, maxval=1, step=0.05, group=G1)
+maxLegOut = input.int(3, "Max leg-out candles counted", minval=1, maxval=3, group=G1)
+allowTwoLegOut = input.bool(true, "Allow exactly 2 leg-out candles", group=G1)
+legOutJoinTolAtr = input.float(0.25, "Leg-out 2/3: |open − prev close| ≤ ATR ×", minval=0, step=0.05, group=G1)
+useCBLI = input.bool(true, "CBLI (candle behind leg-in)", group=G1)
+cbliMode = input.string("Covers >50% (notes)", "CBLI rule", options=["Covers >50% (notes)", "Body size >50% (lecture)", "Either (strict)"], group=G1)
+cbliMaxPct = input.float(0.50, "CBLI limit", minval=0, maxval=2, step=0.05, group=G1)
+useFormation = input.bool(true, "Formation of leg-out (DBR/RBD)", group=G1)
+formationTolAtr = input.float(0.10, "Formation tolerance × ATR", minval=0, step=0.05, group=G1)
+proxMode = input.string("Boring wick (wick-to-wick)", "Proximal (entry) line", options=["Boring wick (wick-to-wick)", "Boring body (precise)"], group=G1)
+distalMode = input.string("Pattern lowest/highest (course)", "Distal (SL) line", options=["Pattern lowest/highest (course)", "Boring only"], group=G1)
+
+GC = "1A · MANDATORY: Filled-Unfilled-Filled · 1-2-4 · TR vs ATR (always ON) + Power"
+corePower = input.bool(true, "MANDATORY: Power of leg-out", group=GC, tooltip="Entry = Proximal, SL = Distal। लेग-आउट कैंडल के अंदर ही कम से कम 1:3 रिवॉर्ड मिला हो; 1:5 मिले तो ★ Best")
+powerMode = input.string("All leg-outs (max 3)", "Power measured on", options=["First leg-out only", "All leg-outs (max 3)"], group=GC)
+powerMinRR = input.float(3.0, "Power: minimum reward 1:", minval=1, step=0.5, group=GC)
+powerBestRR = input.float(5.0, "Power: best (★) reward 1:", minval=1, step=0.5, group=GC)
+powerOnBody = input.bool(true, "Power measured to leg-out close (body)", group=GC)
+GF = "1B · Flexible rules (score) — tick to make mandatory"
+useWhiteArea = input.bool(true, "White area → mandatory", group=GF, tooltip="बंद = सिर्फ़ स्कोर/लेबल में; चालू = बिना white area ज़ोन नहीं बनेगा")
+coreFresh = input.bool(true, "Fresh zone only (covered leg-out kills zone, 1st touch)", group=GF)
+coreOpposite = input.bool(true, "No opposite zone before target → mandatory", group=GF)
+oppositeRR = input.float(5.0, "Opposite zone: not within 1:", minval=1, step=0.5, group=GF)
+corePlayground = input.bool(false, "Clear playground → mandatory", group=GF)
+playRR = input.float(10.0, "Playground: clear up to 1:", minval=1, step=0.5, group=GF)
+oppUseMTF = input.bool(true, "Opposite/playground: include other-TF zones", group=GF)
+coreMTF = input.string("Off (score only)", "MTF analysis → mandatory", options=["Off (score only)", "Higher-TF not against", "Higher-TF in favour (strict)"], group=GF)
+
+G2 = "2 · Note rules (grading; mandatory in Strict)"
+legInMaxWick = input.float(0.20, "Leg-in: max total wick %", minval=0, maxval=0.5, step=0.05, group=G2, tooltip="Rule 10: लेग-इन की wick मिलाकर 20% से ज़्यादा नहीं")
+legOutMinBody = input.float(0.65, "First leg-out: min body % (65:35)", minval=0, maxval=1, step=0.05, group=G2)
+gapTolAtr = input.float(0.10, "Leg-in ↔ boring gap tolerance × ATR", minval=0, step=0.05, group=G2)
+legOutTooLong = input.float(4.0, "Flag ⚠ if leg-out > leg-in ×", minval=1, step=0.5, group=G2)
+useCoveredLegOut = input.bool(true, "Covered leg-out = trap (live)", group=G2)
+coverPct = input.float(0.50, "Covered leg-out: max % of first leg-out body", minval=0.1, maxval=1, step=0.05, group=G2)
+useMaturity = input.bool(true, "Zone maturity (early arrival = trap)", group=G2)
+maturityBars = input.int(3, "Maturity: candles after zone", minval=0, maxval=50, group=G2)
+immatureWithTrend = input.bool(false, "Allow immature zone if Pulse/Trend in favour", group=G2)
+useTimeRule = input.bool(false, "Entry time rules (intraday)", group=G2, tooltip="Hourly: 1 बजे के बाद नहीं · Daily: 12:30 के बाद नहीं · Weekly: शुक्रवार 12:30 के बाद नहीं")
+maxTouches = input.int(3, "Max entries before zone is exhausted", minval=1, maxval=10, group=G2)
+meltingReversalOnly = input.bool(true, "Re-entry only on DBR/RBD (melting meter)", group=G2)
+reRunDays = input.int(30, "Re-test after this many days → ⚠", minval=1, group=G2)
+plusBuffer = input.bool(true, "Plus-shaped boring → buffer on entry too", group=G2)
+commodityMode = input.bool(false, "Commodity mode", group=G2, tooltip="2 लेग-आउट मान्य, white area/गैप नियम ढीले, ज़ोन बनते ही परिपक्व")
+
+G3 = "3 · Institutional confluence"
+dispMult = input.float(1.5, "Displacement: leg-out TR ≥ ATR ×", minval=1, step=0.1, group=G3, tooltip="संस्थागत ऑर्डर का निशान: लेग-आउट सामान्य रेंज से बहुत बड़ी")
+volLen = input.int(20, "Relative volume SMA length", minval=1, group=G3)
+relVolMult = input.float(1.5, "Relative volume: leg-out vol ≥ SMA ×", minval=1, step=0.1, group=G3)
+sweepLen = input.int(10, "Liquidity sweep lookback (bars)", minval=2, group=G3, tooltip="ज़ोन बनने से पहले पिछले Low/High के स्टॉप-लॉस साफ़ करना (stop hunt)")
+
+G4 = "4 · Score · Pulse · Trend"
+minScore = input.int(5, "Min score to trade (below = NO TRADE)", minval=0, maxval=10, group=G4)
+greatScore = input.int(7, "Great trade score", minval=0, maxval=10, group=G4)
+hideNoTrade = input.bool(false, "Hide NO-TRADE zones", group=G4)
+trendTfIn = input.string("Auto (25×)", "Pulse/Trend timeframe", options=["Auto (25×)", "15", "60", "75", "D", "W", "M"], group=G4)
+emaFast = input.int(20, "EMA (pulse & trend)", minval=1, group=G4)
+trendThr = input.float(0.5, "7-candle rule: sideways band (× ATR)", minval=0, step=0.1, group=G4)
+filterAction = input.bool(false, "Show only zones in Action direction", group=G4)
+filterWholesale = input.bool(false, "Show only wholesale zones (Close ∓ ATR)", group=G4)
+
+G5 = "5 · Display & alerts"
+labelMode = input.string("Compact", "Zone label", options=["Compact", "Detailed", "Off"], group=G5, tooltip="Compact: छोटा लेबल; पूरी जानकारी लेबल पर टैप/होवर करने पर")
+bool showInfo = labelMode != "Off"
+tableMode = input.string("Compact", "Status table", options=["Compact", "Full", "Off"], group=G5)
+bool showTable = tableMode != "Off"
+minMcapCr = input.float(50000, "Min market cap (₹ Cr)", minval=0, group=G5)
+minPrice = input.float(100, "Min price (₹)", minval=0, group=G5)
+maxPrice = input.float(4000, "Max price (₹)", minval=0, group=G5)
+enableAlerts = input.bool(true, "alert() on new zone and entry touch", group=G5)
+
+GM = "6 · MTF lines"
+showMTF = input.bool(true, "Show other-TF proximal lines", group=GM)
+filterDistantMTF = input.bool(true, "Hide distant MTF lines", group=GM)
+mtfNearPct = input.float(8.0, "Show lines within % of last price", minval=0.1, maxval=100.0, step=0.5, group=GM)
+tf1 = input.timeframe("3", "TF 1", group=GM)
+tf2 = input.timeframe("5", "TF 2", group=GM)
+tf3 = input.timeframe("10", "TF 3", group=GM)
+tf4 = input.timeframe("15", "TF 4", group=GM)
+tf5 = input.timeframe("30", "TF 5", group=GM)
+tf6 = input.timeframe("60", "TF 6", group=GM)
+tf7 = input.timeframe("75", "TF 7", group=GM)
+tf8 = input.timeframe("120", "TF 8", group=GM)
+tf9 = input.timeframe("D", "TF 9", group=GM)
+
+GS = "7 · Shadows & swings"
+showShadow = input.bool(true, "Shadow when prior zone behind / broken / swing broken", group=GS)
+showFlags = input.bool(true, "Show BASE BREAK / SWING labels", group=GS)
+shadowAtr = input.float(0.08, "Shadow padding × ATR", minval=0, maxval=1, step=0.01, group=GS)
+swingLeft = input.int(3, "Swing: bars on left", minval=1, maxval=20, group=GS)
+swingRight = input.int(3, "Swing: bars on right", minval=1, maxval=20, group=GS)
+maxStored = input.int(220, "Max chart zones", minval=10, maxval=240, group=GS)
+
+minBaseCount = math.max(1, math.min(minBaseCountInput, maxBaseCountInput))
+maxBaseCount = math.max(minBaseCount, maxBaseCountInput)
+bool isStrict = modeIn == "Strict (core + all notes rules)"
+bool effTwoLegOut = allowTwoLegOut or commodityMode
+bool hardWhite = useWhiteArea and not commodityMode
+bool hardFormation = useFormation
+bool effCovered = useCoveredLegOut or coreFresh
+bool effMaturity = useMaturity and not commodityMode
+
+// ============================================================ HELPERS
+true_range() =>
+    float r = high - low
+    if bar_index > 0
+        r := math.max(r, math.max(math.abs(high - close[1]), math.abs(low - close[1])))
+    r
+current_tr = true_range()
+atr_val = ta.rma(current_tr, atrPeriod)
+vol_sma = ta.sma(volume, volLen)
+lowestPrior = ta.lowest(low, sweepLen)
+highestPrior = ta.highest(high, sweepLen)
+tr(int idx) =>
+    float pc = close[idx + 1]
+    math.max(high[idx] - low[idx], math.max(math.abs(high[idx] - pc), math.abs(low[idx] - pc)))
+is_bull(int idx) => close[idx] > open[idx]
+is_bear(int idx) => open[idx] > close[idx]
+body_pct(int idx) =>
+    float r = high[idx] - low[idx]
+    r == 0 ? 0.0 : math.abs(close[idx] - open[idx]) / r
+f_day_id(int t) => year(t, "Asia/Kolkata") * 10000 + month(t, "Asia/Kolkata") * 100 + dayofmonth(t, "Asia/Kolkata")
+f_tod(int t) => hour(t, "Asia/Kolkata") * 60 + minute(t, "Asia/Kolkata")
+
+f_type(float tfSec) =>
+    tfSec <= 60 ? 1 : tfSec <= 300 ? 2 : tfSec <= 1800 ? 3 : tfSec < 86400 ? 4 : 5
+f_matured(int tt, int createdTime, int createdDay, int dc) =>
+    tt == 1 ? (time - createdTime >= 15 * 60000) : tt == 2 ? (time - createdTime >= 75 * 60000) : tt == 3 ? (dc > createdDay) : tt == 4 ? (dc - createdDay >= 7) : (time - createdTime >= 28 * 86400000)
+
+float chartSec = timeframe.in_seconds(timeframe.period)
+int ttype = traderTypeIn == "Auto (25×)" ? f_type(chartSec) : traderTypeIn == "Aggressive (1M zone)" ? 1 : traderTypeIn == "Hourly (3M/5M zone)" ? 2 : traderTypeIn == "Daily (10M/15M zone)" ? 3 : traderTypeIn == "Weekly/Swing (1H/75M/2H zone)" ? 4 : 5
+float bufPct = ttype <= 2 ? bufAggrPct : ttype == 3 ? bufDailyPct : bufSwingPct
+float t1RR = ttype == 2 ? hourlyRR : ttype == 5 ? monthlyRR : targetRR
+
+var int dayCount = 0
+int dayId = f_day_id(time)
+if bar_index > 0 and dayId != dayId[1]
+    dayCount += 1
+
+f_entry_allowed(int tt) =>
+    int m = f_tod(time)
+    bool fri = dayofweek(time, "Asia/Kolkata") == dayofweek.friday
+    bool ok = true
+    if timeframe.isintraday
+        ok := tt == 2 ? m < 13 * 60 : tt == 3 ? m < 12 * 60 + 30 : tt == 4 ? not (fri and m >= 12 * 60 + 30) : true
+    ok
+f_timed_out(int tt, int eTime, int eDay, int eTod, int dc) =>
+    tt == 1 ? time - eTime > 15 * 60000 : tt == 2 ? time - eTime > 75 * 60000 : tt == 3 ? (dc - eDay >= 2 or (dc - eDay == 1 and f_tod(time) >= eTod)) : tt == 4 ? dc - eDay >= 5 : time - eTime > 31 * 86400000
+
+float dAtr = request.security(syminfo.tickerid, "D", ta.rma(true_range(), atrPeriod)[1], lookahead=barmerge.lookahead_on)
+float slBuffer = bufferMode == "DATR % (course)" and not na(dAtr) ? dAtr * bufPct / 100.0 : slBufferAtr * atr_val
+
+// ============================================================ PULSE · TREND · ACTION · WHOLESALE
+f_trend_tf(float sec) =>
+    sec <= 60 ? "15" : sec <= 300 ? "75" : sec <= 1800 ? "D" : sec < 86400 ? "W" : "M"
+string trendTF = trendTfIn == "Auto (25×)" ? f_trend_tf(chartSec) : trendTfIn
+string wsTF = ttype == 2 ? "D" : trendTF
+[tC, tO, tE20, tE20p, tAtr] = request.security(syminfo.tickerid, trendTF, [close[1], open[1], ta.ema(close, emaFast)[1], ta.ema(close, emaFast)[7], ta.rma(true_range(), atrPeriod)[1]], lookahead=barmerge.lookahead_on)
+[wC, wO, wE20, wAtr] = request.security(syminfo.tickerid, wsTF, [close[1], open[1], ta.ema(close, emaFast)[1], ta.rma(true_range(), atrPeriod)[1]], lookahead=barmerge.lookahead_on)
+bool pulsePos = tC > tO and tC > tE20 and (ttype != 2 or (wC > wO and wC > wE20))
+bool pulseNeg = tC < tO and tC < tE20 and (ttype != 2 or (wC < wO and wC < wE20))
+float trendSlope = tAtr > 0 ? (tE20 - tE20p) / tAtr : 0.0
+bool trendUp = trendSlope > trendThr
+bool trendDown = trendSlope < -trendThr
+float wsBuy = wC - wAtr
+float wsSell = wC + wAtr
+
+// ============================================================ CANDIDATE
+type Candidate
+    bool valid = false
+    int stage = 0
+    string reason = ""
+    int baseCount = 0
+    int outCount = 1
+    float prox = na
+    float dist = na
+    float cover = na
+    float xrpt = na
+    float outFirstExt = na
+    float powFirst = na
+    float powAll = na
+    bool demand = false
+    string pattern = ""
+    string category = ""
+    bool whiteOK = false
+    bool favColour = false
+    bool gapOut = false
+    bool plusBoring = false
+    bool longOut = false
+    int notesPass = 0
+    int instScore = 0
+
+// Bar 0 = LAST leg-out. fo = first leg-out, b0..bLast = boring, li = leg-in, pi = candle behind leg-in.
+f_candidate(int bc, int nOut) =>
+    Candidate c = Candidate.new()
+    int fo = nOut - 1
+    int b0 = nOut
+    int bLast = nOut + bc - 1
+    int li = bLast + 1
+    int pi = li + 1
+    for once = 0 to 0
+        if na(atr_val[pi]) or na(atr_val[fo])
+            break
+        if nOut == 2 and not effTwoLegOut
+            c.reason := "2 leg-outs not allowed"
+            break
+        // ---- 1. Leg-in (core): Filled + TR ≥ ATR
+        c.stage := 1
+        float inHigh = high[li]
+        float inLow = low[li]
+        float inRange = inHigh - inLow
+        bool inBull = is_bull(li)
+        bool inBear = is_bear(li)
+        if inRange <= 0 or not (inBull or inBear)
+            c.reason := "Leg-in doji"
+            break
+        if body_pct(li) < filledMinBody
+            c.reason := "Leg-in not filled"
+            break
+        if tr(li) < legInAtrMult * atr_val[li]
+            c.reason := "Leg-in TR < ATR"
+            break
+        float inBodyHi = math.max(open[li], close[li])
+        float inBodyLo = math.min(open[li], close[li])
+        float inBody = inBodyHi - inBodyLo
+        // ---- 2. CBLI (core)
+        c.stage := 2
+        if useCBLI and inBody > 0
+            bool opp = (inBull and is_bear(pi)) or (inBear and is_bull(pi))
+            if opp
+                float piHi = math.max(open[pi], close[pi])
+                float piLo = math.min(open[pi], close[pi])
+                bool trapSize = (piHi - piLo) / inBody > cbliMaxPct
+                bool trapCover = math.max(0.0, math.min(piHi, inBodyHi) - math.max(piLo, inBodyLo)) / inBody > cbliMaxPct
+                bool trap = cbliMode == "Covers >50% (notes)" ? trapCover : cbliMode == "Body size >50% (lecture)" ? trapSize : (trapCover or trapSize)
+                if trap
+                    c.reason := "CBLI trap"
+                    break
+        // ---- 3. Boring (core): every candle TR ≤ ATR
+        c.stage := 3
+        bool baseOK = true
+        float baseHigh = -1.0e20
+        float baseLow = 1.0e20
+        float baseBodyHi = -1.0e20
+        float baseBodyLo = 1.0e20
+        bool anyBear = false
+        bool anyBull = false
+        bool plusB = bc == 1
+        for b = b0 to bLast
+            if na(atr_val[b]) or tr(b) > boringAtrMult * atr_val[b]
+                baseOK := false
+                break
+            baseHigh := math.max(baseHigh, high[b])
+            baseLow := math.min(baseLow, low[b])
+            baseBodyHi := math.max(baseBodyHi, math.max(open[b], close[b]))
+            baseBodyLo := math.min(baseBodyLo, math.min(open[b], close[b]))
+            anyBear := anyBear or is_bear(b)
+            anyBull := anyBull or is_bull(b)
+            plusB := plusB and body_pct(b) <= 0.15 and low[b] < math.min(open[b], close[b]) and high[b] > math.max(open[b], close[b])
+        if not baseOK
+            c.reason := "Boring TR > ATR"
+            break
+        float baseSize = baseHigh - baseLow
+        if baseSize <= 0
+            c.reason := "Boring size 0"
+            break
+        // ---- 4. 1-2-4 part 1 (core)
+        c.stage := 4
+        if inRange < legInToBaseSizeMult * baseSize
+            c.reason := "1-2-4: leg-in < " + str.tostring(legInToBaseSizeMult) + "× boring"
+            break
+        // ---- 5. Leg-out (core): Filled + TR ≥ ATR
+        c.stage := 5
+        bool demand = is_bull(fo)
+        bool supply = is_bear(fo)
+        if not (demand or supply)
+            c.reason := "Leg-out doji"
+            break
+        if tr(fo) < legOutAtrMult * atr_val[fo]
+            c.reason := "Leg-out TR < ATR"
+            break
+        if body_pct(fo) < filledMinBody
+            c.reason := "Leg-out not filled"
+            break
+        // ---- 6. Up to 3 leg-outs
+        c.stage := 6
+        float outHigh = high[fo]
+        float outLow = low[fo]
+        float obHi = math.max(open[fo], close[fo])
+        float obLo = math.min(open[fo], close[fo])
+        bool joinOK = true
+        bool eachOK = true
+        if nOut > 1
+            for k = fo - 1 to 0
+                bool sameCol = demand ? is_bull(k) : is_bear(k)
+                if not sameCol or math.abs(open[k] - close[k + 1]) > legOutJoinTolAtr * atr_val[k + 1]
+                    joinOK := false
+                    break
+                if body_pct(k) < legOutEachMinBody
+                    eachOK := false
+                    break
+                outHigh := math.max(outHigh, high[k])
+                outLow := math.min(outLow, low[k])
+                obHi := math.max(obHi, math.max(open[k], close[k]))
+                obLo := math.min(obLo, math.min(open[k], close[k]))
+        if not joinOK
+            c.reason := "Leg-outs not continuous"
+            break
+        if not eachOK
+            c.reason := "Leg-out wick ≥ 50%"
+            break
+        // ---- 7. 1-2-4 part 2 (core)
+        c.stage := 7
+        if (obHi - obLo) < legOutToBaseSizeMult * baseSize
+            c.reason := "1-2-4: leg-out < " + str.tostring(legOutToBaseSizeMult) + "× boring"
+            break
+        string pat = demand ? (inBull ? "RBR" : "DBR") : (inBear ? "DBD" : "RBD")
+        bool reversal = pat == "DBR" or pat == "RBD"
+        // ---- 8. Formation of leg-out (core in Standard/Strict)
+        c.stage := 8
+        bool formOK = true
+        if useFormation and reversal
+            float tol = formationTolAtr * atr_val[fo]
+            formOK := not (open[fo] > inBodyHi + tol or open[fo] < inBodyLo - tol)
+        if hardFormation and not formOK
+            c.reason := "Formation: leg-out open outside leg-in body"
+            break
+        // ---- 9. White area (core in Standard/Strict)
+        c.stage := 9
+        float outBodyNear = demand ? math.min(open[fo], close[fo]) : math.max(open[fo], close[fo])
+        bool whiteOK = demand ? outBodyNear > baseBodyLo : outBodyNear < baseBodyHi
+        if hardWhite and not whiteOK
+            c.reason := "No white area"
+            break
+        // ---- 10. Note rules (grading; mandatory in Strict)
+        c.stage := 10
+        float inWick = 1.0 - body_pct(li)
+        float closingWick = inBull ? inHigh - close[li] : close[li] - inLow
+        bool r1 = inWick <= legInMaxWick and closingWick > 0
+        bool r2 = body_pct(fo) >= legOutMinBody
+        float fbHi = math.max(open[bLast], close[bLast])
+        float fbLo = math.min(open[bLast], close[bLast])
+        float gTol = gapTolAtr * atr_val[li]
+        bool r3 = commodityMode or not (fbLo > inBodyHi + gTol or fbHi < inBodyLo - gTol)
+        bool r4 = demand ? outLow >= baseLow : outHigh <= baseHigh
+        bool gapOut = demand ? math.min(open[fo], close[fo]) > math.max(open[b0], close[b0]) : math.max(open[fo], close[fo]) < math.min(open[b0], close[b0])
+        float gapSize = gapOut ? (demand ? math.min(open[fo], close[fo]) - math.max(open[b0], close[b0]) : math.min(open[b0], close[b0]) - math.max(open[fo], close[fo])) : 0.0
+        bool r5 = gapSize <= inRange
+        int notesPass = (r1 ? 1 : 0) + (r2 ? 1 : 0) + (r3 ? 1 : 0) + (r4 ? 1 : 0) + (r5 ? 1 : 0)
+        if isStrict and notesPass < 5
+            c.reason := not r1 ? "Leg-in wick rule" : not r2 ? "Leg-out body < 65%" : not r3 ? "Gap leg-in ↔ boring" : not r4 ? "Leg-out breaks boring" : "Gap > leg-in"
+            break
+        // ---- Institutional confluence (score only)
+        bool disp = tr(fo) >= dispMult * atr_val[fo]
+        bool relVol = not na(vol_sma[fo]) and vol_sma[fo] > 0 and nz(volume[fo]) >= relVolMult * vol_sma[fo]
+        float zoneLow = reversal ? math.min(baseLow, inLow) : baseLow
+        float zoneHigh = reversal ? math.max(baseHigh, inHigh) : baseHigh
+        bool sweep = demand ? (not na(lowestPrior[pi]) and zoneLow < lowestPrior[pi]) : (not na(highestPrior[pi]) and zoneHigh > highestPrior[pi])
+        int f2 = math.max(fo - 1, 0)
+        bool fvg = nOut >= 2 and (demand ? low[f2] > high[b0] : high[f2] < low[b0])
+        bool imb = gapOut or fvg
+        // ---- Levels
+        bool coursePattern = distalMode == "Pattern lowest/highest (course)"
+        float dDist = coursePattern ? (reversal ? math.min(baseLow, inLow, outLow) : math.min(baseLow, outLow)) : baseLow
+        float sDist = coursePattern ? (reversal ? math.max(baseHigh, inHigh, outHigh) : math.max(baseHigh, outHigh)) : baseHigh
+        bool bodyProx = proxMode == "Boring body (precise)"
+        float foTop = math.max(open[fo], close[fo])
+        float foBot = math.min(open[fo], close[fo])
+        c.valid := true
+        c.stage := 11
+        c.baseCount := bc
+        c.outCount := nOut
+        c.prox := demand ? (bodyProx ? baseBodyHi : baseHigh) : (bodyProx ? baseBodyLo : baseLow)
+        c.dist := demand ? dDist : sDist
+        c.cover := demand ? foTop - coverPct * (foTop - foBot) : foBot + coverPct * (foTop - foBot)
+        c.xrpt := demand ? math.max(open[0], close[0]) : math.min(open[0], close[0])
+        c.outFirstExt := demand ? foTop : foBot
+        c.powFirst := powerOnBody ? close[fo] : (demand ? high[fo] : low[fo])
+        c.powAll := powerOnBody ? (demand ? obHi : obLo) : (demand ? outHigh : outLow)
+        c.demand := demand
+        c.pattern := pat
+        c.category := reversal ? "Reversal" : "Continuation"
+        c.whiteOK := whiteOK and formOK
+        c.favColour := demand ? anyBear : anyBull
+        c.gapOut := gapOut
+        c.plusBoring := plusB
+        c.longOut := (high[fo] - low[fo]) > legOutTooLong * inRange
+        c.notesPass := notesPass
+        c.instScore := (disp ? 1 : 0) + (relVol ? 1 : 0) + (sweep ? 1 : 0) + (imb ? 1 : 0)
+    c
+
+f_pow_rr(Candidate c) =>
+    float zr = math.abs(c.prox - c.dist)
+    float ext = powerMode == "First leg-out only" ? c.powFirst : c.powAll
+    zr > 0 ? (c.demand ? ext - c.prox : c.prox - ext) / zr : 0.0
+
+// ============================================================ MTF ENGINE (same candidate, same rules)
+type MtfZone
+    float prox
+    float dist
+    float cover
+    bool demand
+    string state
+    int touches
+    int startTime
+    int createdTime
+    int createdDay
+    int createdBar
+    bool outside
+
+f_mtf_engine() =>
+    var array<MtfZone> zones = array.new<MtfZone>()
+    var int dc = 0
+    int did = f_day_id(time)
+    if bar_index > 0 and did != did[1]
+        dc += 1
+    int tt = f_type(timeframe.in_seconds(timeframe.period))
+    if bar_index >= math.max(atrPeriod, maxBaseCount + maxLegOut + 3, 11) and not na(atr_val)
+        bool found = false
+        for n = 1 to maxLegOut
+            if found
+                break
+            for bc = minBaseCount to maxBaseCount
+                Candidate c = f_candidate(bc, n)
+                if not c.valid or (corePower and f_pow_rr(c) < powerMinRR)
+                    continue
+                found := true
+                bool duplicate = false
+                int checked = 0
+                if array.size(zones) > 0
+                    for j = array.size(zones) - 1 to 0
+                        MtfZone old = array.get(zones, j)
+                        if old.demand == c.demand and math.abs(old.prox - c.prox) < atr_val * 0.25
+                            duplicate := true
+                            break
+                        checked += 1
+                        if checked >= 11
+                            break
+                if not duplicate
+                    array.push(zones, MtfZone.new(c.prox, c.dist, c.cover, c.demand, "Fresh", 0, time[c.outCount - 1], time, dc, bar_index, true))
+                break
+    if array.size(zones) > 0
+        for j = array.size(zones) - 1 to 0
+            MtfZone z = array.get(zones, j)
+            if bar_index > z.createdBar
+                bool inZ = z.demand ? low <= z.prox : high >= z.prox
+                bool brk = z.demand ? low <= z.dist : high >= z.dist
+                if brk
+                    z.state := "Dead"
+                else if z.state == "Fresh"
+                    if inZ
+                        if effMaturity and bar_index - z.createdBar < maturityBars
+                            z.state := "Dead"
+                        else
+                            z.state := "Triggered"
+                            z.touches := 1
+                            z.outside := false
+                    else if effCovered and (z.demand ? math.min(open, close) < z.cover : math.max(open, close) > z.cover)
+                        z.state := "Dead"
+                else
+                    if not inZ
+                        z.outside := true
+                    else if z.outside
+                        z.touches += 1
+                        z.outside := false
+                        z.state := "Dead"
+            if z.state == "Dead"
+                array.remove(zones, j)
+    float latestD = na
+    float latestS = na
+    int dTime = na
+    int sTime = na
+    if array.size(zones) > 0
+        for j = array.size(zones) - 1 to 0
+            MtfZone z = array.get(zones, j)
+            if z.demand and na(latestD)
+                latestD := z.prox
+                dTime := z.startTime
+            if not z.demand and na(latestS)
+                latestS := z.prox
+                sTime := z.startTime
+            if not na(latestD) and not na(latestS)
+                break
+    [latestD, latestS, dTime, sTime]
+
+f_mtf_confirmed() =>
+    [d, s, dt, st] = f_mtf_engine()
+    [na(d[1]) ? 1e100 : d[1], na(s[1]) ? 1e100 : s[1], na(dt[1]) ? 0 : dt[1], na(st[1]) ? 0 : st[1]]
+
+f_lower(string tf) =>
+    [a, b, at, bt] = request.security_lower_tf(syminfo.tickerid, tf, f_mtf_confirmed(), calc_bars_count=5000)
+    int n = array.size(a)
+    float demand = n > 0 ? array.get(a, n - 1) : 1e100
+    float supply = n > 0 ? array.get(b, n - 1) : 1e100
+    int dTime = n > 0 ? array.get(at, n - 1) : 0
+    int sTime = n > 0 ? array.get(bt, n - 1) : 0
+    [demand, supply, dTime, sTime]
+
+f_higher(string tf) =>
+    request.security(syminfo.tickerid, tf, f_mtf_confirmed(), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on, calc_bars_count=5000)
+
+f_remote(string tf) =>
+    float demand = 1e100
+    float supply = 1e100
+    int dTime = 0
+    int sTime = 0
+    float targetSec = timeframe.in_seconds(tf)
+    if showMTF and not na(chartSec) and not na(targetSec)
+        if targetSec > chartSec
+            [a, b, at, bt] = f_higher(tf)
+            demand := a
+            supply := b
+            dTime := at
+            sTime := bt
+        else if targetSec < chartSec
+            [a, b, at, bt] = f_lower(tf)
+            demand := a
+            supply := b
+            dTime := at
+            sTime := bt
+    [demand == 1e100 ? na : demand, supply == 1e100 ? na : supply, dTime, sTime]
+
+[d1, s1, dt1, st1] = f_remote(tf1)
+[d2, s2, dt2, st2] = f_remote(tf2)
+[d3, s3, dt3, st3] = f_remote(tf3)
+[d4, s4, dt4, st4] = f_remote(tf4)
+[d5, s5, dt5, st5] = f_remote(tf5)
+[d6, s6, dt6, st6] = f_remote(tf6)
+[d7, s7, dt7, st7] = f_remote(tf7)
+[d8, s8, dt8, st8] = f_remote(tf8)
+[d9, s9, dt9, st9] = f_remote(tf9)
+
+f_adj(string tf) =>
+    float r = timeframe.in_seconds(tf) / chartSec
+    r != 1.0 and r >= 0.2 and r <= 5.0
+array<float> mtfD = array.from(f_adj(tf1) ? d1 : na, f_adj(tf2) ? d2 : na, f_adj(tf3) ? d3 : na, f_adj(tf4) ? d4 : na, f_adj(tf5) ? d5 : na, f_adj(tf6) ? d6 : na, f_adj(tf7) ? d7 : na, f_adj(tf8) ? d8 : na, f_adj(tf9) ? d9 : na)
+array<float> mtfS = array.from(f_adj(tf1) ? s1 : na, f_adj(tf2) ? s2 : na, f_adj(tf3) ? s3 : na, f_adj(tf4) ? s4 : na, f_adj(tf5) ? s5 : na, f_adj(tf6) ? s6 : na, f_adj(tf7) ? s7 : na, f_adj(tf8) ? s8 : na, f_adj(tf9) ? s9 : na)
+array<float> allD = array.from(d1, d2, d3, d4, d5, d6, d7, d8, d9)
+array<float> allS = array.from(s1, s2, s3, s4, s5, s6, s7, s8, s9)
+f_mtf_ok(bool demand, float prox, float dist) =>
+    bool ok = false
+    float top = math.max(prox, dist) + 0.5 * atr_val
+    float bot = math.min(prox, dist) - 0.5 * atr_val
+    array<float> lv = demand ? mtfD : mtfS
+    for k = 0 to array.size(lv) - 1
+        float v = array.get(lv, k)
+        if not na(v) and v <= top and v >= bot
+            ok := true
+            break
+    ok
+
+// ============================================================ CHART ZONES
+type Zone
+    float proxVal
+    float distVal
+    float entryVal
+    float slVal
+    float tpVal
+    float t5Val
+    float xrptRR
+    float roomRR
+    float powRR
+    bool best = false
+    float coverVal
+    int qty
+    bool isDemand
+    int score
+    int notesPass
+    int instScore
+    string patternType
+    string zoneCategory
+    string state = "Fresh"
+    int touchCount = 0
+    bool outside = true
+    bool targetHit = false
+    bool mtfOK = false
+    bool wsOK = false
+    bool actionOK = false
+    bool isReversal = false
+    bool longOut = false
+    bool oldRetest = false
+    int createdBarIndex
+    int createdTime
+    int createdDay
+    int baseCount
+    int entryBar
+    int entryTime
+    int entryDay
+    int entryTod
+    int sixState = 0
+    bool timeOut = false
+    int firstRunTime
+    box zoneBox
+    box shadowBox
+    label tagLabel
+    label infoLabel
+    int brokenAt
+
+var array<Zone> active_zones = array.new<Zone>()
+var int zonesCreated = 0
+var array<string> rejNames = array.new<string>()
+var array<int> rejCounts = array.new<int>()
+
+f_count_reject(string r) =>
+    int idx = array.indexof(rejNames, r)
+    if idx < 0
+        array.push(rejNames, r)
+        array.push(rejCounts, 1)
+    else
+        array.set(rejCounts, idx, array.get(rejCounts, idx) + 1)
+    true
+
+f_alive(Zone z) => z.state == "Fresh" or z.state == "Tested"
+f_grade(int bc) => bc == 1 ? "Great" : bc == 2 ? "Very good" : bc == 3 ? "Good (½ qty)" : "So-so (½ qty)"
+f_verdict(int s) => s >= greatScore ? "GREAT" : s >= minScore ? "GOOD" : "NO TRADE"
+f_fmt(float v) => str.tostring(v, format.mintick)
+f_info(Zone z) =>
+    string s = z.patternType + " · " + z.zoneCategory + " · " + str.tostring(z.baseCount) + " boring (" + f_grade(z.baseCount) + ")"
+    s += "\nScore " + str.tostring(z.score) + "/10 · " + f_verdict(z.score) + " · Rules " + str.tostring(z.notesPass) + "/5 · Inst " + str.tostring(z.instScore) + "/4"
+    s += "\nE " + f_fmt(z.entryVal) + "  SL " + f_fmt(z.slVal) + "  Qty " + str.tostring(z.qty)
+    s += "\nT1 1:" + str.tostring(t1RR) + " " + f_fmt(z.tpVal) + "  · T2 1:" + str.tostring(target2RR) + " " + f_fmt(z.t5Val)
+    s += "\nPower 1:" + str.tostring(z.powRR, "#.#") + (z.best ? " ★" : "") + " · XRPT 1:" + str.tostring(z.xrptRR, "#.#") + " · Room " + (na(z.roomRR) ? "open" : "1:" + str.tostring(z.roomRR, "#.#"))
+    s += "\n" + (z.actionOK ? "Pulse/Trend ✓" : "Pulse/Trend ✗") + " · " + (z.wsOK ? "WS ✓" : "WS ✗") + " · MTF " + (z.mtfOK ? "✓" : "–") + (z.longOut ? " · LO long ⚠" : "")
+    s += "\n" + z.state + (z.touchCount > 0 ? " ×" + str.tostring(z.touchCount) : "") + (z.targetHit ? " · T1 hit" : "") + (z.sixState == 1 ? " · 6C ✓" : z.sixState == -1 ? " · 6C ✗" : "") + (z.timeOut ? " · ⌛ exit" : "") + (z.oldRetest ? " · old re-test ⚠" : "")
+    s
+f_short(Zone z) =>
+    (z.best ? "★ " : "") + z.patternType + " " + str.tostring(z.score) + "/10 · 1:" + str.tostring(z.powRR, "#.#") + (z.state == "Tested" ? " ●" : "")
+f_label_text(Zone z) => labelMode == "Detailed" ? f_info(z) : f_short(z)
+f_paint(Zone z) =>
+    color base = z.isDemand ? color.green : color.red
+    bool weak = z.score < minScore
+    if z.state == "Fresh"
+        box.set_bgcolor(z.zoneBox, color.new(base, weak ? 90 : 80))
+        box.set_border_color(z.zoneBox, color.new(base, weak ? 50 : 0))
+        box.set_border_style(z.zoneBox, weak ? line.style_dashed : line.style_solid)
+        box.set_border_width(z.zoneBox, z.best or z.score >= greatScore ? 2 : 1)
+    else if z.state == "Tested"
+        box.set_bgcolor(z.zoneBox, color.new(base, 72))
+        box.set_border_color(z.zoneBox, base)
+        box.set_border_style(z.zoneBox, line.style_solid)
+        box.set_border_width(z.zoneBox, 2)
+    else
+        color dead = z.state == "Covered" ? color.purple : z.state == "Immature" ? color.orange : z.state == "Skipped" ? color.blue : color.gray
+        box.set_bgcolor(z.zoneBox, color.new(dead, 93))
+        box.set_border_color(z.zoneBox, color.new(dead, 75))
+        box.set_border_style(z.zoneBox, line.style_dotted)
+        box.set_border_width(z.zoneBox, 1)
+        if not na(z.shadowBox)
+            box.set_bgcolor(z.shadowBox, color.new(color.gray, 95))
+            box.set_border_color(z.shadowBox, color.new(color.gray, 85))
+    if not na(z.infoLabel)
+        if f_alive(z)
+            label.set_text(z.infoLabel, f_label_text(z))
+            label.set_tooltip(z.infoLabel, f_info(z))
+        else
+            label.delete(z.infoLabel)
+            z.infoLabel := na
+    true
+
+// Swing pivots (display + follow-up / break score)
+var float lastSwingHigh = na
+var float lastSwingLow = na
+var int lastSwingHighBar = na
+var int lastSwingLowBar = na
+var int highConfirmedAt = na
+var int lowConfirmedAt = na
+var int highBreakAt = na
+var int lowBreakAt = na
+float ph = ta.pivothigh(high, swingLeft, swingRight)
+float pl = ta.pivotlow(low, swingLeft, swingRight)
+if not na(ph)
+    lastSwingHigh := ph
+    lastSwingHighBar := bar_index - swingRight
+    highConfirmedAt := bar_index
+    highBreakAt := na
+if not na(pl)
+    lastSwingLow := pl
+    lastSwingLowBar := bar_index - swingRight
+    lowConfirmedAt := bar_index
+    lowBreakAt := na
+if not na(lastSwingHigh) and na(highBreakAt) and bar_index >= highConfirmedAt and close > lastSwingHigh
+    highBreakAt := bar_index
+if not na(lastSwingLow) and na(lowBreakAt) and bar_index >= lowConfirmedAt and close < lastSwingLow
+    lowBreakAt := bar_index
+
+// ---- Zone creation (bar 0 = last leg-out)
+if bar_index >= math.max(atrPeriod, maxBaseCount + maxLegOut + 3, sweepLen + 6, 11) and not na(atr_val) and barstate.isconfirmed
+    bool found = false
+    int bestStage = -1
+    string bestReason = ""
+    for n = 1 to maxLegOut
+        if found
+            break
+        for bc = minBaseCount to maxBaseCount
+            Candidate c = f_candidate(bc, n)
+            if not c.valid
+                if c.stage > bestStage
+                    bestStage := c.stage
+                    bestReason := c.reason
+                continue
+            found := true
+            bool duplicate = false
+            int checked = 0
+            if array.size(active_zones) > 0
+                for j = array.size(active_zones) - 1 to 0
+                    Zone old = array.get(active_zones, j)
+                    if not f_alive(old)
+                        continue
+                    if old.isDemand == c.demand and math.abs(old.proxVal - c.prox) < atr_val * 0.25
+                        duplicate := true
+                        break
+                    checked += 1
+                    if checked >= 11
+                        break
+            if duplicate
+                break
+            int b0 = c.outCount
+            int bLast = c.outCount + bc - 1
+            int leftBar = bar_index - bLast - 1
+            // ---- SETS
+            float sl = c.demand ? c.dist - slBuffer : c.dist + slBuffer
+            bool entryBuf = entryBuffer or (plusBuffer and c.plusBoring)
+            float entry = entryBuf ? (c.demand ? c.prox + slBuffer : c.prox - slBuffer) : c.prox
+            float risk = math.abs(entry - sl)
+            if risk <= 0
+                break
+            float tp = c.demand ? entry + risk * t1RR : entry - risk * t1RR
+            float t5 = c.demand ? entry + risk * target2RR : entry - risk * target2RR
+            float xrr = (c.demand ? c.xrpt - entry : entry - c.xrpt) / risk
+            float firstOutRR = (c.demand ? c.outFirstExt - entry : entry - c.outFirstExt) / risk
+            int qty = int(math.floor(accountCapital * riskPct / 100.0 / risk))
+            if halfQty3 and bc >= 3
+                qty := int(math.floor(qty / 2))
+            // ---- Prior zones: follow-up / break / playground room
+            bool behind = false
+            bool followUp = false
+            bool baseBreaksOld = false
+            float room = na
+            if array.size(active_zones) > 0
+                for j = array.size(active_zones) - 1 to 0
+                    Zone old = array.get(active_zones, j)
+                    if old.createdBarIndex < bar_index - bLast
+                        if f_alive(old)
+                            behind := true
+                            if old.isDemand == c.demand and (c.demand ? old.proxVal <= c.dist : old.proxVal >= c.dist)
+                                followUp := true
+                            if old.isDemand != c.demand
+                                if c.demand and old.proxVal > entry
+                                    float r = (old.proxVal - entry) / risk
+                                    room := na(room) ? r : math.min(room, r)
+                                else if not c.demand and old.proxVal < entry
+                                    float r = (entry - old.proxVal) / risk
+                                    room := na(room) ? r : math.min(room, r)
+                        if old.state == "Broken" and not na(old.brokenAt) and old.brokenAt >= bar_index - bLast and old.brokenAt <= bar_index - b0
+                            for b = b0 to bLast
+                                if (old.isDemand and close[b] < old.distVal) or (not old.isDemand and close[b] > old.distVal)
+                                    baseBreaksOld := true
+                                    break
+            bool swingOKH = not na(lastSwingHigh) and lastSwingHighBar < bar_index - bLast and highConfirmedAt < bar_index - bLast and not na(highBreakAt)
+            bool swingOKL = not na(lastSwingLow) and lastSwingLowBar < bar_index - bLast and lowConfirmedAt < bar_index - bLast and not na(lowBreakAt)
+            bool brokeHigh = swingOKH and highBreakAt >= bar_index - bLast
+            bool brokeLow = swingOKL and lowBreakAt >= bar_index - bLast
+            bool swingBreak = brokeHigh or brokeLow
+            if oppUseMTF
+                array<float> opp = c.demand ? allS : allD
+                for k = 0 to array.size(opp) - 1
+                    float v = array.get(opp, k)
+                    if not na(v) and (c.demand ? v > entry : v < entry)
+                        float r = (c.demand ? v - entry : entry - v) / risk
+                        room := na(room) ? r : math.min(room, r)
+            bool actionOK = c.demand ? (pulsePos and trendUp) : (pulseNeg and trendDown)
+            bool actionAgainst = c.demand ? (pulseNeg and trendDown) : (pulsePos and trendUp)
+            // ---- CORE checks that need Entry/SL
+            float powRR = f_pow_rr(c)
+            bool powerOK = powRR >= powerMinRR
+            bool powerBest = powRR >= powerBestRR
+            bool oppOK = na(room) or room >= oppositeRR
+            bool playOK = na(room) or room >= playRR or xrr >= playRR
+            bool mtfCoreOK = coreMTF == "Off (score only)" ? true : coreMTF == "Higher-TF not against" ? not actionAgainst : actionOK
+            string coreFail = corePower and not powerOK ? "Power < 1:" + str.tostring(powerMinRR) : coreOpposite and not oppOK ? "Opposite zone < 1:" + str.tostring(oppositeRR) : corePlayground and not playOK ? "Playground < 1:" + str.tostring(playRR) : not mtfCoreOK ? "Higher-TF against" : ""
+            if coreFail != ""
+                f_count_reject(coreFail)
+                break
+            bool wsOK = c.demand ? (not na(wsBuy) and entry <= wsBuy) : (not na(wsSell) and entry >= wsSell)
+            // ---- Score the Trade (Notes.pdf): 1 point each
+            int score = 2                                           // 1-2-4 + TR vs ATR (core, passed)
+            score += c.whiteOK ? 1 : 0                              // White area (+ formation)
+            score += 1                                              // Fresh (covered leg-out re-checked live)
+            score += powerBest ? 1 : 0                              // Powerful: leg-out covers 1:5 (prox→dist)
+            score += bc <= 2 ? 1 : 0                                // 1–2 boring
+            score += (na(room) or room >= 10 or xrr >= 10) ? 1 : 0  // No opposing zone within 1:10
+            score += c.favColour ? 1 : 0                            // Boring colour (red in DZ / green in SZ)
+            score += (followUp or baseBreaksOld or swingBreak) ? 1 : 0 // Follow-up / break zone
+            score += actionOK ? 1 : 0                               // Pulse & trend
+            bool skip = (hideNoTrade and score < minScore) or (filterAction and not actionOK) or (filterWholesale and not wsOK)
+            if skip
+                break
+            color zoneColor = c.demand ? color.green : color.red
+            box halo = na
+            if showShadow and (behind or baseBreaksOld or swingBreak)
+                color haloColor = baseBreaksOld ? color.orange : swingBreak ? color.yellow : color.gray
+                int haloOpacity = baseBreaksOld ? 72 : swingBreak ? 82 : 91
+                halo := box.new(left=leftBar, top=math.max(c.prox, sl) + shadowAtr * atr_val, right=bar_index + 15, bottom=math.min(c.prox, sl) - shadowAtr * atr_val, border_color=color.new(haloColor, baseBreaksOld ? 12 : 55), border_width=baseBreaksOld ? 3 : swingBreak ? 2 : 1, bgcolor=color.new(haloColor, haloOpacity), xloc=xloc.bar_index)
+            box zBox = box.new(left=leftBar, top=math.max(c.prox, c.dist), right=bar_index + 15, bottom=math.min(c.prox, c.dist), border_color=zoneColor, bgcolor=color.new(zoneColor, 80), xloc=xloc.bar_index)
+            label tag = na
+            if showFlags and (baseBreaksOld or swingBreak)
+                string msg = (baseBreaksOld ? "BB" : "") + (baseBreaksOld and swingBreak ? "+" : "") + (swingBreak ? (brokeHigh ? "SH" : "SL") : "")
+                tag := label.new(bar_index, c.demand ? c.prox : c.dist, msg, style=c.demand ? label.style_label_up : label.style_label_down, color=baseBreaksOld ? color.orange : color.yellow, textcolor=color.black, size=size.tiny, tooltip="BB = base breaks old zone · SH/SL = swing high/low broken")
+            Zone z = Zone.new(proxVal=c.prox, distVal=c.dist, entryVal=entry, slVal=sl, tpVal=tp, t5Val=t5, xrptRR=xrr, roomRR=room, powRR=powRR, best=powerBest, coverVal=c.cover, qty=qty, isDemand=c.demand, score=score, notesPass=c.notesPass, instScore=c.instScore, patternType=c.pattern, zoneCategory=c.category, mtfOK=f_mtf_ok(c.demand, c.prox, c.dist), wsOK=wsOK, actionOK=actionOK, isReversal=c.category == "Reversal", longOut=c.longOut, createdBarIndex=bar_index, createdTime=time, createdDay=dayCount, baseCount=bc, zoneBox=zBox, shadowBox=halo, tagLabel=tag)
+            f_paint(z)
+            if showInfo
+                bool compact = labelMode == "Compact"
+                z.infoLabel := label.new(bar_index + 2, c.prox, f_label_text(z), style=compact ? label.style_label_left : (c.demand ? label.style_label_up : label.style_label_down), color=compact ? color.new(color.black, 100) : color.new(zoneColor, 80), textcolor=zoneColor, size=size.tiny, textalign=text.align_left, tooltip=f_info(z))
+            array.push(active_zones, z)
+            zonesCreated += 1
+            if enableAlerts and score >= minScore
+                alert(syminfo.ticker + " · new " + c.pattern + " zone (score " + str.tostring(score) + "/10) · E " + f_fmt(entry) + " SL " + f_fmt(sl) + " T1 " + f_fmt(tp) + " Qty " + str.tostring(qty), alert.freq_once_per_bar_close)
+            if array.size(active_zones) > maxStored
+                Zone removed = array.shift(active_zones)
+                box.delete(removed.zoneBox)
+                if not na(removed.shadowBox)
+                    box.delete(removed.shadowBox)
+                if not na(removed.tagLabel)
+                    label.delete(removed.tagLabel)
+                if not na(removed.infoLabel)
+                    label.delete(removed.infoLabel)
+            break
+    // Diagnostics: only near-miss patterns (leg-in, boring and leg-out already found)
+    if not found and bestStage >= 6 and bestReason != ""
+        f_count_reject(bestReason)
+
+// Consecutive stop-losses in the current month (4 SL → stop for the month)
+var int consecSL = 0
+int monthId = year(time, "Asia/Kolkata") * 100 + month(time, "Asia/Kolkata")
+if bar_index > 0 and monthId != monthId[1]
+    consecSL := 0
+
+// ---- Zone state update
+if array.size(active_zones) > 0
+    for j = array.size(active_zones) - 1 to 0
+        Zone z = array.get(active_zones, j)
+        if not f_alive(z) or bar_index <= z.createdBarIndex
+            continue
+        string before = z.state
+        bool hitSL = z.isDemand ? low <= z.slVal : high >= z.slVal
+        bool inZ = z.isDemand ? low <= z.proxVal : high >= z.proxVal
+        if not z.mtfOK
+            z.mtfOK := f_mtf_ok(z.isDemand, z.proxVal, z.distVal)
+        if z.state == "Fresh"
+            if inZ
+                bool trendNow = z.isDemand ? (pulsePos and trendUp) : (pulseNeg and trendDown)
+                if effMaturity and bar_index - z.createdBarIndex < maturityBars and not (immatureWithTrend and trendNow)
+                    z.state := "Immature"
+                else if useTimeRule and not f_entry_allowed(ttype)
+                    z.state := "Skipped"
+                else if hitSL
+                    z.state := "Broken"
+                else
+                    z.state := "Tested"
+                    z.touchCount := 1
+                    z.outside := false
+                    z.entryBar := bar_index
+                    z.entryTime := time
+                    z.entryDay := dayCount
+                    z.entryTod := f_tod(time)
+                    if enableAlerts
+                        alert(syminfo.ticker + " · " + z.patternType + " entry touched " + f_fmt(z.entryVal) + " · SL " + f_fmt(z.slVal) + " · T1 " + f_fmt(z.tpVal), alert.freq_once_per_bar)
+            else if effCovered and (z.isDemand ? math.min(open, close) < z.coverVal : math.max(open, close) > z.coverVal)
+                z.state := "Covered"
+        else
+            if hitSL
+                z.state := "Broken"
+            else
+                if not z.targetHit and (z.isDemand ? high >= z.tpVal : low <= z.tpVal)
+                    z.targetHit := true
+                    z.firstRunTime := time
+                    consecSL := 0
+                    if z.sixState == 0
+                        z.sixState := bar_index - z.entryBar + 1 <= 6 ? 1 : -1
+                if not z.targetHit and z.sixState == 0 and bar_index - z.entryBar + 1 > 6
+                    z.sixState := -1
+                if not z.targetHit and not z.timeOut and f_timed_out(ttype, z.entryTime, z.entryDay, z.entryTod, dayCount)
+                    z.timeOut := true
+                if not inZ
+                    z.outside := true
+                else if z.outside
+                    z.touchCount += 1
+                    z.outside := false
+                    z.state := "Broken"
+        if z.state == "Broken" and na(z.brokenAt)
+            z.brokenAt := bar_index
+            if hitSL
+                consecSL += 1
+        if f_alive(z)
+            box.set_right(z.zoneBox, bar_index + 15)
+            if not na(z.shadowBox)
+                box.set_right(z.shadowBox, bar_index + 15)
+        if z.state != before or (barstate.islast and f_alive(z))
+            f_paint(z)
+
+if not na(highBreakAt) and bar_index - highBreakAt > maxBaseCount + maxLegOut
+    lastSwingHigh := na
+    lastSwingHighBar := na
+    highBreakAt := na
+if not na(lowBreakAt) and bar_index - lowBreakAt > maxBaseCount + maxLegOut
+    lastSwingLow := na
+    lastSwingLowBar := na
+    lowBreakAt := na
+
+// ============================================================ MTF LINES
+var array<line> mtfLines = array.new<line>(18)
+if barstate.islast
+    array<float> levels = array.from(d1, s1, d2, s2, d3, s3, d4, s4, d5, s5, d6, s6, d7, s7, d8, s8, d9, s9)
+    array<int> starts = array.from(dt1, st1, dt2, st2, dt3, st3, dt4, st4, dt5, st5, dt6, st6, dt7, st7, dt8, st8, dt9, st9)
+    array<color> palette = array.from(color.aqua, color.teal, color.blue, color.navy, color.fuchsia, color.purple, color.orange, color.maroon, color.lime, color.olive, color.rgb(30, 160, 140), color.rgb(10, 90, 80), color.rgb(160, 100, 240), color.rgb(90, 45, 130), color.rgb(250, 150, 110), color.rgb(160, 70, 50), color.rgb(35, 185, 60), color.rgb(175, 40, 30))
+    for k = 0 to 17
+        line oldLine = array.get(mtfLines, k)
+        if not na(oldLine)
+            line.delete(oldLine)
+            array.set(mtfLines, k, na)
+        float level = array.get(levels, k)
+        int origin = array.get(starts, k)
+        int endTime = na(time_close) ? time + 60000 : time_close
+        bool nearby = not filterDistantMTF or (close != 0 and math.abs(level - close) / math.abs(close) * 100 <= mtfNearPct)
+        bool visible = showMTF and not na(level) and origin > 0 and origin < endTime and nearby
+        if visible
+            line newLine = line.new(x1=origin, y1=level, x2=endTime, y2=level, xloc=xloc.bar_time, extend=extend.none, color=color.new(array.get(palette, k), 20), width=1)
+            array.set(mtfLines, k, newLine)
+
+// ============================================================ STATUS TABLE
+float sharesOut = request.financial(syminfo.tickerid, "TOTAL_SHARES_OUTSTANDING", "FQ", ignore_invalid_symbol=true)
+var table info = table.new(position.top_right, 2, 13, bgcolor=color.new(color.gray, 90), border_width=0)
+if barstate.islast and showTable
+    float mcapCr = na(sharesOut) ? na : sharesOut * close / 1.0e7
+    string ttName = ttype == 1 ? "Aggressive" : ttype == 2 ? "Hourly" : ttype == 3 ? "Daily" : ttype == 4 ? "Weekly/Swing" : "Monthly"
+    string pulseTxt = pulsePos ? "Positive" : pulseNeg ? "Negative" : "Mixed"
+    string trendTxt = trendUp ? "Up (12–3)" : trendDown ? "Down (3–6)" : "Sideways (~3)"
+    string actionTxt = pulsePos and trendUp ? "LONG only" : pulseNeg and trendDown ? "SHORT only" : "Caution / Playground"
+    color actionCol = pulsePos and trendUp ? color.green : pulseNeg and trendDown ? color.red : color.orange
+    bool priceOK = close >= minPrice and close <= maxPrice
+    int freshNow = 0
+    if array.size(active_zones) > 0
+        for j = 0 to array.size(active_zones) - 1
+            if f_alive(array.get(active_zones, j))
+                freshNow += 1
+    string topRej = "—"
+    int topCnt = 0
+    if array.size(rejCounts) > 0
+        for j = 0 to array.size(rejCounts) - 1
+            if array.get(rejCounts, j) > topCnt
+                topCnt := array.get(rejCounts, j)
+                topRej := array.get(rejNames, j)
+    if tableMode == "Compact"
+        table.clear(info, 0, 0, 1, 12)
+        string pt = (pulsePos ? "P+" : pulseNeg ? "P−" : "P~") + " " + (trendUp ? "T↑" : trendDown ? "T↓" : "T→")
+        table.cell(info, 0, 0, trendTF + " " + pt, text_size=size.tiny, text_color=actionCol)
+        table.cell(info, 1, 0, pulsePos and trendUp ? "LONG" : pulseNeg and trendDown ? "SHORT" : "WAIT", text_size=size.tiny, text_color=actionCol)
+        table.cell(info, 0, 1, "Zones " + str.tostring(freshNow), text_size=size.tiny)
+        table.cell(info, 1, 1, "SL " + str.tostring(consecSL) + "/4", text_size=size.tiny, text_color=consecSL >= 4 ? color.red : chart.fg_color)
+        table.cell(info, 0, 2, "Rej:", text_size=size.tiny)
+        table.cell(info, 1, 2, topRej, text_size=size.tiny)
+    else
+        table.cell(info, 0, 0, "Trader type", text_size=size.tiny)
+        table.cell(info, 1, 0, ttName + " · buffer " + str.tostring(bufPct) + "% DATR · T1 1:" + str.tostring(t1RR), text_size=size.tiny)
+        table.cell(info, 0, 1, "Strictness", text_size=size.tiny)
+        table.cell(info, 1, 1, modeIn, text_size=size.tiny)
+        table.cell(info, 0, 2, "Zones created / alive", text_size=size.tiny)
+        table.cell(info, 1, 2, str.tostring(zonesCreated) + " / " + str.tostring(freshNow), text_size=size.tiny)
+        table.cell(info, 0, 3, "Most rejected by (rule)", text_size=size.tiny)
+        table.cell(info, 1, 3, topRej + (topCnt > 0 ? " (" + str.tostring(topCnt) + ")" : ""), text_size=size.tiny)
+        table.cell(info, 0, 4, "Trend TF (25×)", text_size=size.tiny)
+        table.cell(info, 1, 4, trendTF + (ttype == 2 ? " + D" : ""), text_size=size.tiny)
+        table.cell(info, 0, 5, "Pulse", text_size=size.tiny)
+        table.cell(info, 1, 5, pulseTxt, text_size=size.tiny, text_color=pulsePos ? color.green : pulseNeg ? color.red : chart.fg_color)
+        table.cell(info, 0, 6, "Trend (7-candle)", text_size=size.tiny)
+        table.cell(info, 1, 6, trendTxt, text_size=size.tiny, text_color=trendUp ? color.green : trendDown ? color.red : chart.fg_color)
+        table.cell(info, 0, 7, "Action", text_size=size.tiny)
+        table.cell(info, 1, 7, actionTxt, text_size=size.tiny, text_color=actionCol)
+        table.cell(info, 0, 8, "Wholesale", text_size=size.tiny)
+        table.cell(info, 1, 8, "Buy < " + f_fmt(wsBuy) + " · Sell > " + f_fmt(wsSell), text_size=size.tiny)
+        table.cell(info, 0, 9, "Market cap", text_size=size.tiny)
+        table.cell(info, 1, 9, na(mcapCr) ? "n/a" : str.tostring(math.round(mcapCr)) + " Cr", text_size=size.tiny, text_color=na(mcapCr) ? chart.fg_color : mcapCr >= minMcapCr ? color.green : color.red)
+        table.cell(info, 0, 10, "Price ₹" + str.tostring(minPrice) + "–" + str.tostring(maxPrice), text_size=size.tiny)
+        table.cell(info, 1, 10, priceOK ? "✓" : "✗ (Nifty stock? ok)", text_size=size.tiny, text_color=priceOK ? color.green : color.orange)
+        table.cell(info, 0, 11, "Entry cut-off", text_size=size.tiny)
+        table.cell(info, 1, 11, ttype == 2 ? "No new hourly trade after 1:00 PM" : ttype == 3 ? "No entry after 12:30 PM" : ttype == 4 ? "No entry Fri after 12:30 PM" : "—", text_size=size.tiny)
+        table.cell(info, 0, 12, "Consecutive SL (month)", text_size=size.tiny)
+        table.cell(info, 1, 12, str.tostring(consecSL) + (consecSL >= 4 ? " → STOP this month" : " / 4"), text_size=size.tiny, text_color=consecSL >= 4 ? color.red : chart.fg_color)
+
+plot(close, "Close Price", display=display.none)

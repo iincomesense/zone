@@ -1,5 +1,5 @@
 // This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
-// © iincomesense — "Zone MTF (KTP rules v9)"
+// © iincomesense — "Zone MTF (KTP rules v10)"
 // Demand/Supply zones per Dr. Ravi R. Kumar's KTP / Super Trader rules (user's Drive notes)
 // + institutional order-flow confluence (displacement, relative volume, liquidity sweep, imbalance).
 // v8: rules chosen step by step by the user —
@@ -7,9 +7,11 @@
 //     · TR vs ATR (leg-in/out ≥ ATR×1.2, boring ≤ ATR) · White area · Formation · CBLI (covers >50%)
 //     · Power of leg-out to close ≥1:3 (★ 1:5) · No opposite zone before 1:5.
 //     Score /12: follow-up (FU), break zone (BZ), swing break (SB) each +1; Strong = boring↔leg-out gap < leg-in.
+//     Tags: FU BZ SB Strong WS C+F (zone also on current-month future same day) · 6C✗ exit alert.
+//     Commodity mode applies automatically on commodity symbols.
 //     States: 1st proximal touch = Tested, 2nd touch = Broken; maturity = 3 candles. SL buffer 2% DATR; T1 1:3, T2 1:5.
 //@version=6
-indicator("Zone MTF (KTP rules v9)", shorttitle="Zone MTF KTP", overlay=true, max_bars_back=5000, max_boxes_count=500, max_labels_count=500, max_lines_count=60)
+indicator("Zone MTF (KTP rules v10)", shorttitle="Zone MTF KTP", overlay=true, max_bars_back=5000, max_boxes_count=500, max_labels_count=500, max_lines_count=60)
 
 // ============================================================ INPUTS
 G0 = "0 · Capital, risk, buffer (SETS)"
@@ -82,7 +84,7 @@ maxTouches = input.int(3, "Max entries before zone is exhausted", minval=1, maxv
 meltingReversalOnly = input.bool(true, "Re-entry only on DBR/RBD (melting meter)", group=G2)
 reRunDays = input.int(30, "Re-test after this many days → ⚠", minval=1, group=G2)
 plusBuffer = input.bool(true, "Plus-shaped boring → buffer on entry too", group=G2)
-commodityMode = input.bool(false, "Commodity mode", group=G2, tooltip="2 लेग-आउट मान्य, white area/गैप नियम ढीले, ज़ोन बनते ही परिपक्व")
+commodityMode = input.bool(true, "Commodity mode (auto on commodity symbols)", group=G2, tooltip="2 लेग-आउट मान्य, white area/गैप नियम ढीले, ज़ोन बनते ही परिपक्व — सिर्फ़ commodity symbol पर")
 
 G3 = "3 · Institutional confluence"
 dispMult = input.float(1.5, "Displacement: leg-out TR ≥ ATR ×", minval=1, step=0.1, group=G3, tooltip="संस्थागत ऑर्डर का निशान: लेग-आउट सामान्य रेंज से बहुत बड़ी")
@@ -123,6 +125,7 @@ tf6 = input.timeframe("60", "TF 6", group=GM)
 tf7 = input.timeframe("75", "TF 7", group=GM)
 tf8 = input.timeframe("120", "TF 8", group=GM)
 tf9 = input.timeframe("D", "TF 9", group=GM)
+showCF = input.bool(true, "C+F: check same zone on current-month future (NSE stocks)", group=GM)
 
 GS = "7 · Shadows & swings"
 showShadow = input.bool(true, "Shadow when prior zone behind / broken / swing broken", group=GS)
@@ -135,11 +138,13 @@ maxStored = input.int(220, "Max chart zones", minval=10, maxval=240, group=GS)
 minBaseCount = math.max(1, math.min(minBaseCountInput, maxBaseCountInput))
 maxBaseCount = math.max(minBaseCount, maxBaseCountInput)
 bool isStrict = modeIn == "Strict (core + all notes rules)"
-bool effTwoLegOut = allowTwoLegOut or commodityMode
-bool hardWhite = useWhiteArea and not commodityMode
+bool isCommodity = syminfo.type == "commodity" or syminfo.prefix == "MCX" or syminfo.prefix == "COMEX" or syminfo.prefix == "NYMEX"
+bool effCommodity = commodityMode and isCommodity
+bool effTwoLegOut = allowTwoLegOut or effCommodity
+bool hardWhite = useWhiteArea and not effCommodity
 bool hardFormation = useFormation
 bool effCovered = useCoveredLegOut or coreFresh
-bool effMaturity = useMaturity and not commodityMode
+bool effMaturity = useMaturity and not effCommodity
 
 // ============================================================ HELPERS
 true_range() =>
@@ -383,7 +388,7 @@ f_candidate(int bc, int nOut) =>
         float fbHi = math.max(open[bLast], close[bLast])
         float fbLo = math.min(open[bLast], close[bLast])
         float gTol = gapTolAtr * atr_val[li]
-        bool r3 = commodityMode or not (fbLo > inBodyHi + gTol or fbHi < inBodyLo - gTol)
+        bool r3 = effCommodity or not (fbLo > inBodyHi + gTol or fbHi < inBodyLo - gTol)
         bool r4 = demand ? outLow >= baseLow : outHigh <= baseHigh
         bool gapOut = demand ? math.min(open[fo], close[fo]) > math.max(open[b0], close[b0]) : math.max(open[fo], close[fo]) < math.min(open[b0], close[b0])
         float gapSize = gapOut ? (demand ? math.min(open[fo], close[fo]) - math.max(open[b0], close[b0]) : math.min(open[b0], close[b0]) - math.max(open[fo], close[fo])) : 0.0
@@ -573,6 +578,19 @@ f_remote(string tf) =>
 [d8, s8, dt8, st8] = f_remote(tf8)
 [d9, s9, dt9, st9] = f_remote(tf9)
 
+// ---- C+F: same zone on current-month future (e.g. NSE:RELIANCE1!) ----
+string futTicker = syminfo.prefix == "NSE" and syminfo.type == "stock" ? "NSE:" + syminfo.ticker + "1!" : ""
+float cfD = na
+float cfS = na
+int cfDt = 0
+int cfSt = 0
+if showCF and futTicker != ""
+    [cfA, cfB, cfC, cfE] = request.security(futTicker, timeframe.period, f_mtf_confirmed(), lookahead=barmerge.lookahead_off, ignore_invalid_symbol=true)
+    cfD := cfA == 1e100 ? na : cfA
+    cfS := cfB == 1e100 ? na : cfB
+    cfDt := nz(cfC)
+    cfSt := nz(cfE)
+
 f_adj(string tf) =>
     float r = timeframe.in_seconds(tf) / chartSec
     r != 1.0 and r >= 0.2 and r <= 5.0
@@ -605,6 +623,7 @@ type Zone
     float powRR
     bool best = false
     string tags = ""
+    bool cf = false
     float coverVal
     int qty
     bool isDemand
@@ -853,7 +872,7 @@ if bar_index >= math.max(atrPeriod, maxBaseCount + maxLegOut + 3, sweepLen + 6, 
             if showFlags and (baseBreaksOld or swingBreak)
                 string msg = (baseBreaksOld ? "BZ" : "") + (baseBreaksOld and swingBreak ? "+" : "") + (swingBreak ? "SB" : "")
                 tag := label.new(bar_index, c.demand ? c.prox : c.dist, msg, style=c.demand ? label.style_label_up : label.style_label_down, color=baseBreaksOld ? color.orange : color.yellow, textcolor=color.black, size=size.tiny, tooltip="BZ = opposite zone broken · SB = swing high (DZ) / swing low (SZ) broken")
-            Zone z = Zone.new(proxVal=c.prox, distVal=c.dist, entryVal=entry, slVal=sl, tpVal=tp, t5Val=t5, xrptRR=xrr, roomRR=room, powRR=powRR, best=powerBest, tags=(followUp ? "FU " : "") + (baseBreaksOld ? "BZ " : "") + (swingBreak ? "SB " : "") + (c.strongGap ? "Strong" : ""), coverVal=c.cover, qty=qty, isDemand=c.demand, score=score, notesPass=c.notesPass, instScore=c.instScore, patternType=c.pattern, zoneCategory=c.category, mtfOK=f_mtf_ok(c.demand, c.prox, c.dist), wsOK=wsOK, actionOK=actionOK, isReversal=c.category == "Reversal", longOut=c.longOut, createdBarIndex=bar_index, createdTime=time, createdDay=dayCount, baseCount=bc, zoneBox=zBox, shadowBox=halo, tagLabel=tag)
+            Zone z = Zone.new(proxVal=c.prox, distVal=c.dist, entryVal=entry, slVal=sl, tpVal=tp, t5Val=t5, xrptRR=xrr, roomRR=room, powRR=powRR, best=powerBest, tags=(wsOK ? "WS " : "") + (followUp ? "FU " : "") + (baseBreaksOld ? "BZ " : "") + (swingBreak ? "SB " : "") + (c.strongGap ? "Strong" : ""), coverVal=c.cover, qty=qty, isDemand=c.demand, score=score, notesPass=c.notesPass, instScore=c.instScore, patternType=c.pattern, zoneCategory=c.category, mtfOK=f_mtf_ok(c.demand, c.prox, c.dist), wsOK=wsOK, actionOK=actionOK, isReversal=c.category == "Reversal", longOut=c.longOut, createdBarIndex=bar_index, createdTime=time, createdDay=dayCount, baseCount=bc, zoneBox=zBox, shadowBox=halo, tagLabel=tag)
             f_paint(z)
             if showInfo
                 bool compact = labelMode == "Compact"
@@ -893,6 +912,11 @@ if array.size(active_zones) > 0
         bool inZ = z.isDemand ? low <= z.proxVal : high >= z.proxVal
         if not z.mtfOK
             z.mtfOK := f_mtf_ok(z.isDemand, z.proxVal, z.distVal)
+        if showCF and not z.cf and bar_index - z.createdBarIndex <= 5
+            bool cfHit = z.isDemand ? (not na(cfD) and cfDt > 0 and f_day_id(cfDt) == f_day_id(z.createdTime)) : (not na(cfS) and cfSt > 0 and f_day_id(cfSt) == f_day_id(z.createdTime))
+            if cfHit
+                z.cf := true
+                z.tags := z.tags + " C+F"
         if z.state == "Fresh"
             if inZ
                 bool trendNow = z.isDemand ? (pulsePos and trendUp) : (pulseNeg and trendDown)
@@ -926,6 +950,9 @@ if array.size(active_zones) > 0
                         z.sixState := bar_index - z.entryBar + 1 <= 6 ? 1 : -1
                 if not z.targetHit and z.sixState == 0 and bar_index - z.entryBar + 1 > 6
                     z.sixState := -1
+                    z.tags := z.tags + " 6C✗"
+                    if enableAlerts
+                        alert(syminfo.ticker + " · " + z.patternType + " 6-candle rule: T1 not hit — EXIT · E " + f_fmt(z.entryVal), alert.freq_once_per_bar_close)
                 if not z.targetHit and not z.timeOut and f_timed_out(ttype, z.entryTime, z.entryDay, z.entryTod, dayCount)
                     z.timeOut := true
                 if not inZ

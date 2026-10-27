@@ -34,7 +34,7 @@ import pickle
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -524,6 +524,148 @@ def market_open_now(now: Optional[datetime] = None) -> bool:
 # ═══════════════════════════════════════════════════════════════════════
 
 
+
+# ═══════════════════════════════════════════════════════════════════════
+#  भाग 2b · Dhan API — current-month FUTURE candles (Cash + Future = "C+F")
+#  Streamlit → Manage app → Settings → Secrets में डालें:
+#      DHAN_CLIENT_ID = "1000xxxxxx"
+#      DHAN_ACCESS_TOKEN = "eyJ..."
+#  (सिर्फ़ डेटा पढ़ा जाता है — कोई order API इस्तेमाल नहीं होता)
+# ═══════════════════════════════════════════════════════════════════════
+DHAN_BASE = "https://api.dhan.co/v2"
+COMMODITY_SYMBOLS = {"XAUUSD", "XAGUSD", "SPOTCRUDE", "COPPER", "ALUMINIUM", "ZINC", "NATGAS"}
+_DHAN_STATUS: Dict[str, str] = {"status": "not configured"}
+
+
+def dhan_creds() -> Tuple[str, str]:
+    cid = tok = ""
+    try:
+        import streamlit as _st
+        cid = str(_st.secrets.get("DHAN_CLIENT_ID", "") or "")
+        tok = str(_st.secrets.get("DHAN_ACCESS_TOKEN", "") or "")
+    except Exception:                                          # noqa: BLE001
+        pass
+    cid = cid or os.environ.get("DHAN_CLIENT_ID", "")
+    tok = tok or os.environ.get("DHAN_ACCESS_TOKEN", "")
+    return cid.strip(), tok.strip()
+
+
+def _dhan_future_ids(symbols: Sequence[str]) -> Dict[str, str]:
+    """symbol → current-month FUTSTK security id (Dhan scrip master से)।"""
+    key = _ckey("dhan_fut_ids", datetime.now(IST).date().isoformat(), tuple(sorted(symbols)))
+    cached = _load(key, 12 * 3600)
+    if cached is not None:
+        return cached
+    try:
+        from scanner.dhan import build_security_map, load_instrument_master
+        _, fut = build_security_map(load_instrument_master(), list(symbols))
+        out = {s: v[0] for s, v in fut.items()}
+    except Exception as e:                                     # noqa: BLE001
+        _DHAN_STATUS["status"] = f"scrip master error: {type(e).__name__}"
+        return {}
+    _save(key, out)
+    return out
+
+
+def _dhan_post(endpoint: str, payload: dict, cid: str, tok: str) -> Optional[pd.DataFrame]:
+    headers = {"access-token": tok, "client-id": cid, "Accept": "application/json",
+               "Content-Type": "application/json"}
+    for attempt in range(3):
+        try:
+            r = requests.post(DHAN_BASE + endpoint, json=payload, headers=headers, timeout=20)
+            if r.status_code == 429:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            if r.status_code in (401, 403):
+                _DHAN_STATUS["status"] = "token गलत या पुराना (Dhan में नया token बनाएँ)"
+                return None
+            r.raise_for_status()
+            js = r.json()
+            data = js.get("data", js) if isinstance(js, dict) else {}
+            ts = data.get("timestamp") or []
+            if not ts:
+                return None
+            df = pd.DataFrame({k: data.get(k) for k in ("open", "high", "low", "close", "volume")})
+            df.index = pd.to_datetime(pd.Series(ts, dtype="float64"), unit="s", utc=True).dt.tz_convert("Asia/Kolkata")
+            df = df.astype("float64").dropna(subset=["open", "high", "low", "close"])
+            return df[~df.index.duplicated(keep="last")].sort_index()
+        except Exception:                                      # noqa: BLE001
+            time.sleep(0.6)
+    return None
+
+
+# Yahoo base interval → (Dhan interval, कितने दिन पीछे)
+_DHAN_BASE = {"1m": (1, 5), "5m": (5, 60), "15m": (15, 60), "60m": (60, 365), "1d": ("D", 400)}
+
+
+def _dhan_base_frame(sec_id: str, base: str, cid: str, tok: str) -> Optional[pd.DataFrame]:
+    key = _ckey("dhan_fut", sec_id, base)
+    cached = _load(key, _bar_ttl(base))
+    if cached is not None:
+        return cached
+    spec = _DHAN_BASE.get(base)
+    if not spec:
+        return None
+    interval, days = spec
+    today = datetime.now(IST).date()
+    common = {"securityId": str(sec_id), "exchangeSegment": "NSE_FNO", "instrument": "FUTSTK", "oi": False}
+    if interval == "D":
+        df = _dhan_post("/charts/historical",
+                        dict(common, expiryCode=0, fromDate=(today - timedelta(days=days)).isoformat(),
+                             toDate=(today + timedelta(days=1)).isoformat()), cid, tok)
+    else:
+        parts = []
+        start = today - timedelta(days=days)
+        while start <= today:                       # Dhan intraday: एक बार में ≤ 90 दिन
+            end = min(start + timedelta(days=89), today + timedelta(days=1))
+            part = _dhan_post("/charts/intraday",
+                              dict(common, interval=interval, fromDate=start.isoformat(),
+                                   toDate=end.isoformat()), cid, tok)
+            if part is not None and len(part):
+                parts.append(part)
+            start = end + timedelta(days=1)
+            time.sleep(0.25)                       # rate limit के भीतर
+        df = pd.concat(parts).sort_index() if parts else None
+        if df is not None:
+            df = df[~df.index.duplicated(keep="last")]
+    if df is not None and len(df):
+        _save(key, df)
+    return df
+
+
+def load_future_frames(symbols: Sequence[str], tfs: Sequence[str]) -> Dict[str, Dict[str, pd.DataFrame]]:
+    """{symbol: {tf: future DataFrame}} — Dhan secrets न हों तो {}।"""
+    cid, tok = dhan_creds()
+    if not cid or not tok:
+        _DHAN_STATUS["status"] = "not configured"
+        return {}
+    syms = [s for s in symbols if s.upper() not in GLOBAL_MAP and s.upper() not in IDX_SYMBOLS]
+    ids = _dhan_future_ids(syms)
+    if not ids:
+        _DHAN_STATUS.setdefault("status", "no futures mapped")
+        return {}
+    bases = sorted({TF_FETCH[tf][0] for tf in tfs if tf in TF_FETCH and TF_FETCH[tf][0] in _DHAN_BASE})
+    out: Dict[str, Dict[str, pd.DataFrame]] = {}
+
+    def one(sym):
+        per = {}
+        raw = {b: _dhan_base_frame(ids[sym], b, cid, tok) for b in bases}
+        for tf in tfs:
+            spec = TF_FETCH.get(tf)
+            if not spec or raw.get(spec[0]) is None:
+                continue
+            df = raw[spec[0]]
+            per[tf] = _resample_session(df, spec[1]) if spec[1] else df
+        return sym, per
+
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        for sym, per in ex.map(one, list(ids)):
+            if per:
+                out[sym] = per
+    _DHAN_STATUS["status"] = f"ok · {len(out)}/{len(ids)} futures" if out else _DHAN_STATUS.get("status", "no data")
+    return out
+
+
 # ═══════════════════════════════════════════════════════════════════════
 #  भाग 3 · ज़ोन इंजन — Pine v7 "Zone MTF (KTP rules v7)" (© iincomesense) का पोर्ट
 # ═══════════════════════════════════════════════════════════════════════
@@ -632,7 +774,7 @@ class PineInputs:
     meltingReversalOnly: bool = True
     reRunDays: int = 30
     plusBuffer: bool = True
-    commodityMode: bool = False
+    commodityMode: bool = True      # सिर्फ़ commodity symbols पर अपने-आप
     # ---- 3 · Institutional confluence ----
     dispMult: float = 1.5
     volLen: int = 20
@@ -1445,7 +1587,7 @@ def eod_band(df: Optional[pd.DataFrame], tf: str, atr_period: int = 14) -> Optio
 # ---------------------------------------------------------------------------
 _EMPTY_SNAP = {"demand": None, "supply": None, "demand_time": 0, "supply_time": 0}
 _ZCACHE: Dict[tuple, tuple] = {}
-_ZVER = "z9"           # इंजन बदले तो बढ़ाएँ — पुराना कैश अपने आप बेकार
+_ZVER = "z10"           # इंजन बदले तो बढ़ाएँ — पुराना कैश अपने आप बेकार
 
 
 def _inputs_hash(I: PineInputs) -> str:
@@ -1486,8 +1628,11 @@ def scan_symbol(symbol: str,
                 inputs: PineInputs,
                 range_pct: float,
                 tfs: Sequence[str] = ALL_TFS,
-                ltp: Optional[float] = None) -> dict:
+                ltp: Optional[float] = None,
+                fut_frames: Optional[Dict[str, pd.DataFrame]] = None) -> dict:
     I = inputs.sanitized()
+    # Commodity mode सिर्फ़ commodity symbols पर (2 leg-out, white area ढीला, तुरंत परिपक्व)
+    I = replace(I, commodityMode=bool(I.commodityMode and str(symbol).upper() in COMMODITY_SYMBOLS))
     ihash = _inputs_hash(I)
     skey = _ckey(_ZVER, ihash, symbol)
     store = _load(skey, 7 * 86400) or {}
@@ -1520,6 +1665,22 @@ def scan_symbol(symbol: str,
 
     def drop(key: str):
         rej[key] = rej.get(key, 0) + 1
+
+    # ---- Future चार्ट के ज़ोन (Dhan) → उसी TF, उसी दिन, उसी तरफ़ = C+F ----
+    fut_days: Dict[str, set] = {}
+    for tf in tfs:
+        fdf = (fut_frames or {}).get(tf)
+        if fdf is None or len(fdf) < 30:
+            continue
+        fkey = (symbol + "|FUT", tf, ihash)
+        mem = _ZCACHE.get(fkey)
+        bid = _bar_id(fdf)
+        if mem and mem[0] == bid:
+            fz = mem[1]
+        else:
+            fz = engine(fdf, I, tf, htf_daily=(fut_frames or {}).get("1d"), return_all=True)
+            _ZCACHE[fkey] = (bid, fz, None, None)
+        fut_days[tf] = {(z["demand"], datetime.fromtimestamp(z["time"] / 1000, IST).date()) for z in fz}
 
     rows: List[dict] = []
     px = ltp if ltp else _last_close(frames, tfs)
@@ -1577,6 +1738,10 @@ def scan_symbol(symbol: str,
                 continue
             if I.filterWholesale and not ws_ok:
                 continue
+            z["cf"] = (dem, datetime.fromtimestamp(z["time"] / 1000, IST).date()) in fut_days.get(tf, set())
+            extra_tags = [t for t, on in (("WS", ws_ok), ("C+F", z["cf"]),
+                                          ("6C✗ exit", z.get("six") == -1 and z["state"] == STATE_TRIG)) if on]
+            z["tags"] = " ".join([t for t in [z.get("tags", "")] + extra_tags if t])
             z["dist_pct"] = abs(z["prox"] - px) / px * 100.0 if px else None
             if range_pct and z["dist_pct"] is not None and z["dist_pct"] > range_pct:
                 continue
@@ -1603,7 +1768,7 @@ def _last_close(frames: Dict[str, pd.DataFrame], tfs: Sequence[str]) -> float:
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v9 · KTP rules · FU/BZ/SB · 2026-10-27"
+APP_BUILD = "v10 · KTP rules · C+F (Dhan) · WS · 6C · 2026-10-27"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -1994,6 +2159,15 @@ def cached_frames(symbols: tuple, tfs: tuple):
     return load_frames(list(symbols), list(tfs))
 
 
+@st.cache_resource(ttl=1800, max_entries=4, show_spinner=False)
+def cached_fut_frames(symbols: tuple, tfs: tuple):
+    try:
+        return load_future_frames(list(symbols), list(tfs))
+    except Exception as e:                                     # noqa: BLE001
+        _DHAN_STATUS["status"] = f"error: {type(e).__name__}"
+        return {}
+
+
 @st.cache_data(ttl=21600, show_spinner=False)
 def cached_caps(symbols: tuple):
     try:
@@ -2019,6 +2193,7 @@ def _scan_all(symbols, inp, opts):
     tfs = list(opts["tfs"]) or list(ALL_TFS)
     need = list(dict.fromkeys(list(tfs) + ["75m", "1d", "1w", "1M"]))
     frames = cached_frames(tuple(symbols), tuple(need))
+    fut_all = cached_fut_frames(tuple(symbols), tuple(tfs)) if all(dhan_creds()) else {}
     rows, snaps, atrs, ltps, errs = [], {}, {}, {}, {}
     rej_all: Dict[str, int] = {}
     created_all = 0
@@ -2028,7 +2203,8 @@ def _scan_all(symbols, inp, opts):
             errs[s] = "डेटा नहीं मिला"
     if jobs:
         with ThreadPoolExecutor(max_workers=min(8, len(jobs))) as ex:
-            futs = {ex.submit(scan_symbol, s, f, f.get("1d"), inp, 1e9, tfs): s
+            futs = {ex.submit(scan_symbol, s, f, f.get("1d"), inp, 1e9, tfs, None,
+                              fut_all.get(s)): s
                     for s, f in jobs}
             for fu in as_completed(futs):
                 s = futs[fu]
@@ -2061,7 +2237,7 @@ def _scan_all(symbols, inp, opts):
         df = df.sort_values(["dist_pct", "score"], ascending=[True, False]).reset_index(drop=True)
     return dict(rows=df, snaps=snaps, atr=atrs, ltp=ltps, errs=errs, bands=bands,
                 band_tf=btf, at=datetime.now(IST), scanned=len(jobs),
-                rej=rej_all, created=created_all)
+                rej=rej_all, created=created_all, dhan=_DHAN_STATUS.get("status", ""))
 
 
 # ---------------------------------------------------------------------------
@@ -2446,7 +2622,8 @@ def _main():
         file_name=f"zone_mtf_{datetime.now(IST):%Y%m%d_%H%M}.tsv",
         mime="text/tab-separated-values")
 
-    st.caption(f"ज़ोन दिख रहे: {len(f)} · बने (सभी TF): {res.get('created', 0)}" + _diag_text(res))
+    st.caption(f"ज़ोन दिख रहे: {len(f)} · बने (सभी TF): {res.get('created', 0)} · "
+               f"Dhan future: {res.get('dhan') or 'not configured'}" + _diag_text(res))
     if not f.empty:
         try:
             scale = float(max(1.0, f["dist_pct"].quantile(0.90)))

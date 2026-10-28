@@ -27,6 +27,10 @@ START = pd.Timestamp(os.environ.get("BT_START", "2024-01-01"), tz=IST)
 END = pd.Timestamp(os.environ.get("BT_END", "2026-10-01"), tz=IST) + pd.Timedelta(hours=23, minutes=59)
 SPLIT = pd.Timestamp(os.environ.get("BT_SPLIT", "2025-07-01"), tz=IST)
 TFS = os.environ.get("BT_TFS", "1h,2h,4h,1d,1w").split(",")
+_mode_f = os.path.join(os.path.dirname(os.path.abspath(__file__)), "MODE")
+COLLECT = os.path.exists(_mode_f) and open(_mode_f).read().strip().startswith("collect")
+if COLLECT:                                  # हर पैरामीटर अलग से परखने के लिए: बहुत ढीले नियम, सिर्फ़ signals
+    TFS = os.environ.get("BT_TFS_COLLECT", "15m,75m,1h,2h,4h,1d,1w").split(",")
 CAP, RISK, ALLOC, KEEP = 25000.0, 0.5, 25.0, 80.0
 
 t0 = time.time()
@@ -49,9 +53,23 @@ for s, fr in frames.items():
 
 I = A.PineInputs().sanitized()
 T = A.opt_collect(syms, frames, TFS, I, START, END,
-                  progress=lambda f, s: print(f"collect {f:.0%} {s}", flush=True) if int(f * 100) % 10 == 0 else None)
+                  progress=lambda f, s: print(f"collect {f:.0%} {s}", flush=True) if int(f * 100) % 10 == 0 else None,
+                  loose_all=COLLECT)
 print("signals rows", len(T), "zones", T["zid"].nunique() if len(T) else 0, "secs", round(time.time() - t0), flush=True)
-T.to_csv(os.path.join(OUT, "signals.csv.gz"), index=False, compression="gzip")
+if COLLECT:
+    for tf_, g_ in T.groupby("tf"):
+        g_.to_csv(os.path.join(OUT, f"signals_{tf_}.csv.gz"), index=False, compression="gzip")
+else:
+    T.to_csv(os.path.join(OUT, "signals.csv.gz"), index=False, compression="gzip")
+if COLLECT:
+    lines = [f"# collect-only run ({time.strftime('%Y-%m-%d %H:%M')} UTC)", "",
+             f"symbols {len(syms)} · with data {len(frames)} · TFs {TFS} · rows {len(T)} · zones {T['zid'].nunique() if len(T) else 0}", ""]
+    for tf, (a, b, n) in sorted(cover.items(), key=lambda kv: A.TF_SECONDS.get(kv[0], 0)):
+        lines.append(f"- {tf}: {a:%Y-%m-%d} → {b:%Y-%m-%d} ({n} symbols)")
+    open(os.path.join(OUT, "summary.md"), "w").write("\n".join(lines))
+    pd.DataFrame().to_csv(os.path.join(OUT, "optimizer_all.csv"), index=False)
+    print("collect-only done", round(time.time() - t0), flush=True)
+    sys.exit(0)
 R, meta = A.opt_run(T, CAP, RISK, SPLIT, KEEP, max_alloc=ALLOC,
                     progress=lambda f: print(f"opt {f:.0%}", flush=True) if int(f * 1000) % 100 == 0 else None)
 R.to_csv(os.path.join(OUT, "optimizer_all.csv"), index=False)

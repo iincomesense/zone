@@ -1018,6 +1018,10 @@ def _candidate(p: int, bc: int, nout: int, S: _S, I: PineInputs):
     in_body_hi, in_body_lo = max(o[li], c[li]), min(o[li], c[li])
     in_body = in_body_hi - in_body_lo
     # ---- 2. CBLI ----
+    m_cbli = 0.0
+    if in_body > 0 and ((in_bull and S.bear[pi]) or (in_bear and S.bull[pi])):
+        _ph, _pl = max(o[pi], c[pi]), min(o[pi], c[pi])
+        m_cbli = float(max(0.0, min(_ph, in_body_hi) - max(_pl, in_body_lo)) / in_body)
     if I.useCBLI and in_body > 0:
         opp = (in_bull and S.bear[pi]) or (in_bear and S.bull[pi])
         if opp:
@@ -1033,6 +1037,8 @@ def _candidate(p: int, bc: int, nout: int, S: _S, I: PineInputs):
     base_body_hi, base_body_lo = -1e20, 1e20
     any_bear = any_bull = False
     plus_b = bc == 1
+    m_base_tr = max(float(S.tr[i] / atr[i]) if np.isfinite(atr[i]) and atr[i] > 0 else 9.0 for i in range(bl, b0 + 1))
+    m_base_body = max(float(S.bp[i]) for i in range(bl, b0 + 1))
     for i in range(bl, b0 + 1):
         if not np.isfinite(atr[i]) or S.tr[i] > I.boringAtrMult * atr[i]:
             return (3, "Boring TR > ATR")
@@ -1060,6 +1066,7 @@ def _candidate(p: int, bc: int, nout: int, S: _S, I: PineInputs):
     # ---- 6. 3 तक leg-out (same colour, open ≈ prev close) ----
     out_high, out_low = h[fo], l[fo]
     ob_hi, ob_lo = max(o[fo], c[fo]), min(o[fo], c[fo])          # leg-out body extent
+    m_lo_minbody = min([float(S.bp[k]) for k in range(fo + 1, p + 1)] or [1.0])
     for k in range(fo + 1, p + 1):
         same = S.bull[k] if demand else S.bear[k]
         if (not same) or abs(o[k] - c[k - 1]) > I.legOutJoinTolAtr * atr[k - 1]:
@@ -1077,7 +1084,7 @@ def _candidate(p: int, bc: int, nout: int, S: _S, I: PineInputs):
     reversal = pat in ("DBR", "RBD")
     # ---- 8. Formation of leg-out (DBR/RBD) ----
     form_ok = True
-    if I.useFormation and reversal:
+    if reversal:
         tol = I.formationTolAtr * atr[fo]
         form_ok = not (o[fo] > in_body_hi + tol or o[fo] < in_body_lo - tol)
     if I.useFormation and not form_ok:
@@ -1171,7 +1178,13 @@ def _candidate(p: int, bc: int, nout: int, S: _S, I: PineInputs):
         f_relvol=float(S.v[fo] / vs) if (np.isfinite(vs) and vs > 0) else float("nan"),
         f_volratio=float(out_vol / base_vol) if (np.isfinite(base_vol) and base_vol > 0) else float("nan"),
         f_basebars=int(bc), f_nout=int(nout),
-        fx=dict(f_tight=f_tight, f_rejwick=f_rejwick, f_memory=f_memory, f_notes=int(notes_pass),
+        fx=dict(m_cbli=m_cbli, m_base_tr=m_base_tr, m_base_body=m_base_body, m_lo_minbody=m_lo_minbody,
+                m_li_closewick=float(closing_wick / in_range) if in_range > 0 else 0.0,
+                m_li_wick=float(in_wick), m_white=bool(white_ok), m_form=bool(form_ok),
+                m_r1=bool(r1), m_r2=bool(r2), m_r3=bool(r3), m_r4=bool(r4), m_r5=bool(r5),
+                m_lo_long=float((h[fo] - l[fo]) / in_range) if in_range > 0 else 0.0,
+                m_out_tr_all=float((out_high - out_low) / atr[fo]),
+                f_tight=f_tight, f_rejwick=f_rejwick, f_memory=f_memory, f_notes=int(notes_pass),
                 f_inst=int(disp) + int(rel_vol) + int(sweep) + int(imb)),
         b0=b0, bl=bl, li=li,
     )
@@ -2324,12 +2337,17 @@ def _act_at(series: Optional[pd.DataFrame], ts: pd.Timestamp) -> Tuple[bool, boo
 
 def opt_collect(symbols: Sequence[str], frames_all: Dict[str, Dict[str, pd.DataFrame]], tfs: Sequence[str],
                 I: PineInputs, start: pd.Timestamp, end: pd.Timestamp, use_buffer: bool = False,
-                progress=None) -> pd.DataFrame:
-    """ढीले नियमों से सारे ज़ोन + हर (rr, maturity, BE) का ट्रेड — एक बड़ी तालिका।"""
+                progress=None, loose_all: bool = False) -> pd.DataFrame:
+    """ढीले नियमों से सारे ज़ोन + हर (rr, maturity, BE) का ट्रेड — एक बड़ी तालिका।
+    loose_all = हर नियम बहुत ढीला (हर पैरामीटर को बाद में अलग-अलग परखने के लिए)"""
     loose = replace(I.sanitized(), scanBars=10 ** 7, maxStored=10 ** 7,
                     legInAtrMult=min(OPT_GRID["atr"]), legOutAtrMult=min(OPT_GRID["atr"]),
                     filledMinBody=min(OPT_GRID["body"]), legInToBaseSizeMult=min(OPT_GRID["li"]),
                     legOutToBaseSizeMult=min(OPT_GRID["lo"]), powerMinRR=min(OPT_GRID["power"]))
+    if loose_all:
+        loose = replace(loose, filledMinBody=0.4, legInAtrMult=0.8, legOutAtrMult=0.8, boringAtrMult=1.3,
+                        legInToBaseSizeMult=1.0, legOutToBaseSizeMult=1.5, legOutEachMinBody=0.3, powerMinRR=1.5,
+                        useCBLI=False, useWhiteArea=False, useFormation=False)
     rows = []
     syms = [s for s in symbols if s in frames_all]
     for i, sym in enumerate(syms):
@@ -2356,7 +2374,7 @@ def opt_collect(symbols: Sequence[str], frames_all: Dict[str, Dict[str, pd.DataF
                                     htf=PARENT_TF.get(tf))       # बड़े TF का ज़ोन — ढीले नियम से (कोर्स जैसा मोटा मार्किंग)
             OPT_DIAG[tf] = OPT_DIAG.get(tf, 0) + (0 if pspans is None else len(pspans["dem"]))
             for zid, z in enumerate(zs):
-                if z.get("room_tf") is not None and z["room_tf"] < Is.oppositeRR:
+                if (not loose_all) and z.get("room_tf") is not None and z["room_tf"] < Is.oppositeRR:
                     continue                                   # आपका अनिवार्य opposite-zone नियम
                 base = dict(symbol=sym, tf=tf, zid=f"{sym}|{tf}|{zid}", long=bool(z["demand"]),
                             m_in_atr=z["m_in_atr"], m_out_atr=z["m_out_atr"], m_li_body=z["m_li_body"],
@@ -2368,11 +2386,14 @@ def opt_collect(symbols: Sequence[str], frames_all: Dict[str, Dict[str, pd.DataF
                             f_bz=bool(z.get("base_break")), f_sb=bool(z.get("swing_break")),
                             f_zone_pct=abs(z["prox"] - z["dist"]) / z["prox"] * 100.0 if z["prox"] else float("nan"),
                             room_pt=int(z.get("room_tf") is None or z["room_tf"] >= 10 or z["xrr"] >= 10),
+                            m_room=float(z["room_tf"]) if z.get("room_tf") is not None else 99.0,
                             **z.get("fx", {}))
                 modes = (("CNC", False), ("MIS", True)) if (intra and z["demand"]) else (("ANY", False),)
+                if loose_all and intra and z["demand"]:
+                    modes = (("MIS", True),)
                 zborn = pd.Timestamp(int(z["time"]) + TF_SECONDS.get(tf, 0) * 1000, unit="ms", tz="UTC").tz_convert(IST)
                 for rr in OPT_GRID["rr"]:
-                    for mat in OPT_GRID["maturity"]:
+                    for mat in ([0] if loose_all else OPT_GRID["maturity"]):
                         for be in OPT_GRID["be"]:
                           for dm, lmis in modes:
                             t = _bt_sim_one(P, z, rr, mat, be, use_buffer, start, end, long_mis=lmis)

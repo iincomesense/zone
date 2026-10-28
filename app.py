@@ -767,6 +767,7 @@ class PineInputs:
     curveMode: str = "off"
     htfZoneReq: bool = False
     supplyIntradayOnly: bool = False
+    entryApproach: str = "any"     # any · clean · gap (सिर्फ़ session खुलते ही ज़ोन में gap)
     # ---- 2 · Note rules (grading; mandatory in Strict) ----
     legInMaxWick: float = 0.20
     legOutMinBody: float = 0.65
@@ -1979,7 +1980,12 @@ def bt_portfolio(trades: List[dict], capital: float, risk_pct: float,
             cash += blocked + net
             equity += net
 
+    seen = set()
     for t in trades:
+        key = (t.get("symbol"), t["long"], pd.Timestamp(t["entry_time"]).date())
+        if key in seen:                 # एक ही स्टॉक, दिन, दिशा — अलग TF के ज़ोन = एक ही ट्रेड
+            continue
+        seen.add(key)
         release(t["entry_time"])
         risk_amt = equity * risk_pct / 100.0
         rps = max(t["risk_ps"], 1e-9)
@@ -2061,6 +2067,10 @@ def bt_collect(symbols: Sequence[str], frames_all: Dict[str, Dict[str, pd.DataFr
                     tl = [t for t in tl if curve_ok(Is.curveMode, t["long"], loc_at(cs, t["entry_time"], t["entry"]))]
                 if Is.htfZoneReq:
                     tl = [t for t in tl if htf_conf(spans, t["long"], t["ztop"], t["zbot"], t["zborn"])]
+                if Is.entryApproach == "gap":
+                    tl = [t for t in tl if t["gap_entry"]]
+                elif Is.entryApproach == "clean":
+                    tl = [t for t in tl if not t["cov_before"]]
                 out[rr].extend(tl)
         if progress:
             progress((i + 1) / max(1, len(syms)), sym)
@@ -2193,8 +2203,8 @@ OPT_GRID = dict(
 )
 OPT_BASE = dict(atr=1.2, body=0.6, li=1.5, lo=2.5, power=3.0, maturity=3, score=0, trend="off",
                 side="both", be=0.0, minrisk=0.0, dmode="CNC", loc="off", htf="off", approach="any")
-BACKTESTED_PRESET = dict(atr=1.2, body=0.6, li=1.5, lo=3.0, power=2.0, maturity=0, score=0, trend="in_favour",
-                         side="demand", be=0.0, minrisk=0.0, dmode="MIS", loc="off", htf="off", approach="clean", rr=5.0)
+BACKTESTED_PRESET = dict(atr=1.2, body=0.6, li=1.5, lo=3.0, power=3.0, maturity=3, score=0, trend="not_against",
+                         side="both", be=0.0, minrisk=0.0, dmode="MIS", loc="off", htf="off", approach="gap", rr=5.0)
 
 
 TREND_TO_CORE = {"off": "Off (score only)", "not_against": "Higher-TF not against",
@@ -2518,7 +2528,7 @@ def opt_pick(R: pd.DataFrame, top: int = 15) -> Optional[dict]:
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v18 · realistic fills (gap only at session open) · 2026-10-28"
+APP_BUILD = "v19 · gap-open preset · dedupe · 2026-10-28"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -2785,6 +2795,11 @@ def pine_panel(slot=None):
                                   index=list(CURVE_MODES).index(D.curveMode), format_func=lambda k: CURVE_LABEL[k],
                                   key="in_curve")
             htfz = f13.checkbox("Zone-in-zone: ट्रेंड TF का ज़ोन साथ हो", D.htfZoneReq, key="in_htfz")
+            appr = st.selectbox("Entry का तरीका", ["any", "clean", "gap"],
+                                index=["any", "clean", "gap"].index(D.entryApproach),
+                                format_func=lambda k: {"any": "कोई भी टच", "clean": "साफ़ वापसी (leg-out 50% न ढका)",
+                                                       "gap": "सिर्फ़ gap-open (बाज़ार खुलते ही ज़ोन में)"}[k],
+                                key="in_appr")
             sup_intra = f14.checkbox("Supply सिर्फ़ intraday TF पर (MIS)", D.supplyIntradayOnly, key="in_supintra",
                                      help="₹25k में Daily/Weekly short संभव नहीं — MIS उसी दिन बंद होता है")
             min_risk = f11.number_input("SL की दूरी भाव का कम से कम %", 0.0, 10.0, D.minRiskPct, 0.1, key="in_minrisk",
@@ -2875,7 +2890,7 @@ def pine_panel(slot=None):
         target2RR=float(t2rr), legOutEachMinBody=float(lo_each), powerOnBody=bool(pow_body),
         showSupply=bool(show_sup), breakEvenRR=float(be_rr), minRiskPct=float(min_risk),
         demandIntradayMIS=bool(dmis), curveMode=str(curve), htfZoneReq=bool(htfz),
-        supplyIntradayOnly=bool(sup_intra),
+        supplyIntradayOnly=bool(sup_intra), entryApproach=str(appr),
         maturityBars=int(mat_bars),
         monthlyRR=float(mrr), halfQty3=bool(half), traderType=str(ttype), bufferMode=str(bmode),
         bufAggrPct=float(b_aggr), bufDailyPct=float(b_daily), bufSwingPct=float(b_swing),
@@ -3384,6 +3399,8 @@ def _opt_apply(best: dict) -> None:
     ss["in_htfz"] = str(best.get("htf", "off")) == "on"
     ss["in_showsupply"] = str(best["side"]) != "demand"
     ss["in_supintra"] = str(best["side"]) == "dem_intra_sup"
+    ss["in_appr"] = str(best.get("approach", "any"))
+    ss["in_t2rr"] = float(best.get("rr", 5.0))
     ss.pop("scan", None)
 
 
@@ -3405,15 +3422,17 @@ def _opt_pine_text(b: dict) -> str:
         f"Curve (Location)                   = {CURVE_LABEL.get(str(b.get('loc', 'off')))}",
         f"Zone-in-zone (HTF ज़ोन ज़रूरी)        = {'ON' if b.get('htf') == 'on' else 'OFF'}",
         f"Supply सिर्फ़ intraday TF            = {'ON' if b['side'] == 'dem_intra_sup' else 'OFF'}",
+        f"Entry का तरीका                      = {b.get('approach', 'any')}",
         f"सबसे अच्छा target                   = 1:{b['rr']:g}",
     ])
 
 
 def optimizer_panel(inp: PineInputs, tb: dict, cap: float, rp: float, d0, d1, alloc: float = 25.0) -> None:
-    st.markdown("**✅ बैकटेस्ट से पास नियम (28-Oct-2026 · 222 स्टॉक · Jan-2024 से Oct-2026)**")
-    st.caption("Demand सिर्फ़ · 1h/2h/4h ज़ोन पर MIS (उसी दिन बंद) · ट्रेंड TF का Pulse+Trend साथ · leg-out ≥ 3× boring · "
-               "Power ≥ 1:2 · target 1:5 — दोनों अवधियों में plus: Jan-24→Jun-25 +10.7% (DD −8.8%), Jul-25→Oct-26 +14.4% "
-               "(DD −5.6%), चार्ज के बाद, ₹25k पर। 2025 कैलेंडर साल घाटे में रहा — गारंटी नहीं।")
+    st.markdown("**✅ बैकटेस्ट से पास नियम (28-Oct-2026 · 222 स्टॉक · Jan-2024 से Oct-2026 · v18 सही fills)**")
+    st.caption("Gap-open entry (बाज़ार खुलते ही भाव ज़ोन में) · उसी दिन बंद (MIS) · ATR×1.2 · leg-out ≥ 3× boring · "
+               "Power ≥ 1:3 · ऊँचा TF उल्टा न हो · target 1:5 — चार्ज के बाद, एक ही दिन के दोहराव हटाकर: "
+               "Jan-24→Jun-25 +0.32R/ट्रेड (111), Jul-25→Oct-26 +0.39R/ट्रेड (93)। "
+               "चेतावनी: जीत ~19%, पूरा मुनाफ़ा ~10 बड़े दिनों से आया — लंबा घाटे का दौर संभव, गारंटी नहीं।")
     put(st, "button", "✅ ये नियम ⚙️ इनपुट में लगाएँ", on_click=_opt_apply, args=(BACKTESTED_PRESET,), key="preset_apply")
     st.divider()
     st.markdown("**🔧 Optimizer — असली डेटा पर सबसे अच्छे नियम (zone कम न हों + मुनाफ़ा)**")

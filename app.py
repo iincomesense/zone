@@ -772,6 +772,7 @@ class PineInputs:
     entryApproach: str = "any"     # any · clean · gap (सिर्फ़ session खुलते ही ज़ोन में gap)
     # ---- 2 · Note rules (grading; mandatory in Strict) ----
     legInMaxWick: float = 0.20
+    legInMaxCloseWick: float = 1.0   # leg-in की closing wick ÷ range ≤ (1 = बंद) · बैकटेस्ट: 0.3
     legOutMinBody: float = 0.65
     gapTolAtr: float = 0.10
     legOutTooLong: float = 4.0
@@ -1015,6 +1016,10 @@ def _candidate(p: int, bc: int, nout: int, S: _S, I: PineInputs):
         return (1, "Leg-in not filled")
     if S.tr[li] < I.legInAtrMult * atr[li]:
         return (1, "Leg-in TR < ATR")
+    if I.legInMaxCloseWick < 1.0:
+        _cw = (in_high - c[li]) if in_bull else (c[li] - in_low)
+        if _cw / in_range > I.legInMaxCloseWick:
+            return (1, "Leg-in closing wick बड़ी")
     in_body_hi, in_body_lo = max(o[li], c[li]), min(o[li], c[li])
     in_body = in_body_hi - in_body_lo
     # ---- 2. CBLI ----
@@ -2284,7 +2289,7 @@ OPT_BASE = dict(atr=1.2, body=0.6, li=1.5, lo=2.5, power=3.0, maturity=3, score=
                 side="both", be=0.0, minrisk=0.0, dmode="CNC", loc="off", htf="off", approach="any", volratio=0.0, edge=0)
 BACKTESTED_PRESET = dict(atr=1.0, body=0.6, li=1.5, lo=2.0, power=2.0, maturity=0, score=0, trend="not_against",
                          side="both", be=0.0, minrisk=0.4, dmode="MIS", loc="off", htf="off", approach="gap", rr=5.0,
-                         volratio=1.5, edge=4)
+                         volratio=1.5, edge=4, atr_out=1.2, boatr=0.7, licw=0.3, opprr=3.0, form=False)
 
 
 TREND_TO_CORE = {"off": "Off (score only)", "not_against": "Higher-TF not against",
@@ -2645,7 +2650,7 @@ def opt_pick(R: pd.DataFrame, top: int = 15) -> Optional[dict]:
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v22 · Edge score preset (gap-open · volume · चौड़ाई · pivot · HTF · FU · SB) · 2026-10-28"
+APP_BUILD = "v23 · हर पैरामीटर परखा: boring ≤0.7 ATR · closing wick ≤0.3 · leg-out ≥1.2 ATR · 2026-10-28"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -2951,6 +2956,8 @@ def pine_panel(slot=None):
             lo_body = n2.number_input("Leg-out: min body % (65:35)", 0.0, 1.0, D.legOutMinBody, 0.05, key="in_lobody")
             gap_tol = n3.number_input("Leg-in↔boring gap tolerance × ATR", 0.0, 2.0, D.gapTolAtr, 0.05, key="in_gaptol")
             lo_long = n4.number_input("⚠ अगर leg-out > leg-in ×", 1.0, 20.0, D.legOutTooLong, 0.5, key="in_lolong")
+            li_cw = n1.number_input("Leg-in: closing wick ≤ range का (1 = बंद)", 0.0, 1.0, D.legInMaxCloseWick, 0.05,
+                                    key="in_licw", help="बैकटेस्ट: 0.3 — बंद होते समय लंबी wick = कमज़ोर leg-in")
             n5, n6, n7, n8 = st.columns(4)
             covered = n5.checkbox("Covered leg-out = trap (ज़ोन के ठीक बाद की candle)", D.useCoveredLegOut, key="in_covered")
             cover_pct = n6.number_input("Covered: पहली leg-out body का %", 0.1, 1.0, D.coverPct, 0.05, key="in_coverpct")
@@ -3031,7 +3038,7 @@ def pine_panel(slot=None):
         useWhiteArea=bool(white), coreFresh=bool(fresh), coreOpposite=bool(opp),
         oppositeRR=float(opp_rr), corePlayground=bool(play), playRR=float(play_rr),
         oppUseMTF=bool(opp_mtf), coreMTF=str(core_mtf),
-        legInMaxWick=float(li_wick), legOutMinBody=float(lo_body), gapTolAtr=float(gap_tol),
+        legInMaxWick=float(li_wick), legInMaxCloseWick=float(li_cw), legOutMinBody=float(lo_body), gapTolAtr=float(gap_tol),
         legOutTooLong=float(lo_long), useCoveredLegOut=bool(covered), coverPct=float(cover_pct),
         useMaturity=bool(maturity), immatureWithTrend=bool(imm_trend), useTimeRule=bool(time_rule),
         maxTouches=int(max_touch), meltingReversalOnly=bool(melting), reRunDays=int(rerun),
@@ -3519,6 +3526,15 @@ def _opt_apply(best: dict) -> None:
     ss["in_minrisk"] = float(best.get("minrisk", 0.0))
     ss["in_volratio"] = float(best.get("volratio", 0.0))
     ss["in_edge"] = int(best.get("edge", 0))
+    if "atr_out" in best:
+        ss["in_loatr"] = float(best["atr_out"])
+    ss["in_boatr"] = float(best.get("boatr", PineInputs().boringAtrMult))
+    ss["in_licw"] = float(best.get("licw", 1.0))
+    if "opprr" in best:
+        ss["in_opp"] = True
+        ss["in_opprr"] = float(best["opprr"])
+    if "form" in best:
+        ss["in_form"] = bool(best["form"])
     ss["in_dmis"] = str(best.get("dmode", "CNC")) == "MIS"
     ss["in_curve"] = str(best.get("loc", "off"))
     ss["in_htfz"] = str(best.get("htf", "off")) == "on"
@@ -3555,14 +3571,14 @@ def _opt_pine_text(b: dict) -> str:
 
 
 def optimizer_panel(inp: PineInputs, tb: dict, cap: float, rp: float, d0, d1, alloc: float = 25.0) -> None:
-    st.markdown("**✅ बैकटेस्ट से पास नियम v22 (28-Oct-2026 · 222 स्टॉक · Jan-2024 से Oct-2026)**")
-    st.caption("ढीला core (ATR×1.0 · leg-out ≥ 2× boring · Power ≥ 1:2) + gap-open entry (बाज़ार खुलते ही भाव ज़ोन में) "
-               "+ ज़ोन चौड़ाई ≥ 0.4% + leg-out volume ≥ 1.5× boring + Edge score ≥ 4/9 (volume · rel vol · चौड़ाई · "
-               "pivot · बड़े TF का ज़ोन · notes 5/5 · FU · SB · gap ज़ोन) · BZ ज़ोन हटे · ऊँचा TF उल्टा न हो · MIS · 1:5। "
-               "₹25,000, 0.5% जोखिम, चार्ज के बाद: Jan-24→Jun-25 +₹10,467 (141 ट्रेड), Jul-25→Oct-26 +₹5,900 "
-               "(99 ट्रेड) · जीत ~23% · सबसे बड़ी गिरावट ~6%। कम ट्रेड पर ज़्यादा भरोसा चाहिए तो core मध्यम "
-               "(ATR 1.2 · leg-out 2.5× · Power 1:3 · maturity 3) रखें: +₹ प्रति ट्रेड ज़्यादा, ट्रेड आधे। "
-               "भविष्य की गारंटी नहीं।")
+    st.markdown("**✅ बैकटेस्ट से पास नियम v23 (28-Oct-2026 · 222 स्टॉक · हर leg-in / boring / leg-out पैरामीटर अलग परखा)**")
+    st.caption("Leg-in: body ≥60% · TR ≥ ATR×1.0 · closing wick ≤ 30% · Boring: हर candle TR ≤ ATR×0.7 · 1–3 candle · "
+               "Leg-in ≥ 1.5× boring · Leg-out: body ≥60% · TR ≥ ATR×1.2 · ≥ 2× boring · Power ≥ 1:2 · "
+               "Opposite zone 1:3 के अंदर नहीं · White area हाँ · Formation नहीं · ज़ोन ≥0.4% · volume ≥1.5× · Edge ≥4 · "
+               "gap-open entry · MIS · 1:5। चार्ज के बाद (R × ₹125): Jan-24→Jun-25 ≈ +₹7,000 (74 ट्रेड), "
+               "Jul-25→Oct-26 ≈ +₹5,200 (66 ट्रेड), हर साल मुनाफ़ा, 10 सबसे बड़े ट्रेड हटाकर भी मुनाफ़ा। "
+               "सबसे अच्छे TF: 4h, 1d, फिर 2h · 1h मिला-जुला · 15m/75m/1w पर ट्रेड नहीं के बराबर। "
+               "सामान्य limit entry (बिना gap-open) हर सेटिंग में घाटे में रही। भविष्य की गारंटी नहीं।")
     put(st, "button", "✅ ये नियम ⚙️ इनपुट में लगाएँ", on_click=_opt_apply, args=(BACKTESTED_PRESET,), key="preset_apply")
     st.divider()
     st.markdown("**🔧 Optimizer — असली डेटा पर सबसे अच्छे नियम (zone कम न हों + मुनाफ़ा)**")

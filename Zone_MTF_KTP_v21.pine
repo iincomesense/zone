@@ -329,6 +329,9 @@ f_candidate(int bc, int nOut) =>
             if na(atr_val[b]) or tr(b) > boringAtrMult * atr_val[b]
                 baseOK := false
                 break
+            if timeframe.isintraday and not na(time_close[b]) and (time_close[b] - time[b]) <= timeframe.in_seconds() * 500
+                baseOK := false          // दिन की आख़िरी छोटी candle (जैसे 15:15–15:30) boring नहीं मानी जाती
+                break
             baseHigh := math.max(baseHigh, high[b])
             baseLow := math.min(baseLow, low[b])
             baseBodyHi := math.max(baseBodyHi, math.max(open[b], close[b]))

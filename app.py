@@ -98,9 +98,9 @@ TF_FETCH: Dict[str, Tuple[str, Optional[str]]] = {
     "5m": ("5m", None),
     "10m": ("5m", "10min"),
     "15m": ("15m", None),
-    "30m": ("30m", None),
+    "30m": ("30m", "30min"),
     "75m": ("15m", "75min"),
-    "1h": ("60m", None),
+    "1h": ("60m", "60min"),
     "2h": ("60m", "120min"),
     "4h": ("60m", "240min"),
     "6h": ("60m", "360min"),
@@ -391,6 +391,17 @@ def _resample_session(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     secs = np.asarray(pd.TimedeltaIndex(wall - day).total_seconds(), dtype="float64")
     anchor = pd.Series(secs).groupby(day).transform("min").to_numpy()
     bucket = ((secs - anchor) // secs_rule).astype("int64")
+    # दिन की आख़िरी छोटी candle (जैसे NSE में 15:15–15:30) को पिछली candle में मिलाओ —
+    # वरना वह "boring" बनकर नकली ज़ोन बनाती है (1h, 2h, 6h पर)
+    if len(secs) > 1:
+        step = float(np.median(np.diff(np.unique(secs)))) if len(np.unique(secs)) > 1 else 0.0
+        dser = pd.Series(secs).groupby(day)
+        last_s = dser.transform("max").to_numpy()
+        close_s = np.minimum(last_s + max(step, 60.0), np.where(last_s < 55800, 55800, last_s + max(step, 60.0)))
+        last_b = pd.Series(bucket).groupby(day).transform("max").to_numpy()
+        b_start = anchor + last_b * secs_rule
+        stub = (bucket == last_b) & (last_b > 0) & ((close_s - b_start) <= 0.5 * secs_rule)
+        bucket = np.where(stub, bucket - 1, bucket)
     g = df.groupby([day.to_numpy(), bucket], sort=True).agg(
         {"open": "first", "high": "max", "low": "min",
          "close": "last", "volume": "sum"})

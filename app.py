@@ -2207,7 +2207,7 @@ OPT_GRID = dict(
     trend=["off", "not_against", "in_favour"],
     side=["both", "demand", "dem_intra_sup"],   # dem_intra_sup = Demand सब + Supply सिर्फ़ intraday TF
     be=[0.0],                       # (break-even से फ़र्क नहीं मिला)
-    minrisk=[0.0, 0.5],             # SL की दूरी भाव का कम से कम % (पतले ज़ोन में चार्ज R खा जाते हैं)
+    minrisk=[0.0, 0.4],             # SL की दूरी भाव का कम से कम % (पतले ज़ोन में चार्ज R खा जाते हैं)
     dmode=["CNC", "MIS"],           # intraday TF पर Demand: CNC (कई दिन) या MIS (उसी दिन, कम चार्ज)
     loc=["off", "half", "third"],   # Curve: DZ discount में / SZ premium में
     htf=["off", "on"],              # Zone-in-zone: ट्रेंड TF का जीवित ज़ोन साथ हो
@@ -2432,7 +2432,9 @@ def opt_run(T: pd.DataFrame, capital: float, risk_pct: float, split: pd.Timestam
     per_unit = np.where(cnc, en, en * MIS_MARGIN)
     qn = np.floor(np.minimum(R0 / np.maximum(rp, 1e-9), capital * max_alloc / 100.0 / np.maximum(per_unit, 1e-9)))
     qn = np.maximum(qn, 1.0)
-    risk_pct_px = rp / np.maximum(en, 1e-9) * 100.0
+    # ज़ोन की चौड़ाई (proximal–distal) — लाइव स्कैनर वाला ही नाप; gap-open entry पर SL छोटा हो जाता है, उसे नहीं गिनते
+    risk_pct_px = (T["f_zone_pct"].to_numpy(dtype=float) if "f_zone_pct" in T else rp / np.maximum(en, 1e-9) * 100.0)
+    risk_pct_px = np.nan_to_num(risk_pct_px, nan=0.0)
     buy = np.where(lg, qn * en, qn * ex)
     sell = np.where(lg, qn * ex, qn * en)
     r_gross = (sell - buy) / R0
@@ -2526,6 +2528,12 @@ def opt_run(T: pd.DataFrame, capital: float, risk_pct: float, split: pd.Timestam
         if len(q):
             _port(q.index[0])
             base[rr] = R.loc[q.index[0]].to_dict()
+    qp = R                                              # backtested preset (हर rr) का ₹ portfolio भी
+    for k, v in BACKTESTED_PRESET.items():
+        if k != "rr" and k in qp:
+            qp = qp[qp[k] == v]
+    for i in qp.index:
+        _port(i)
     R = R.drop(columns=["_IS_idx", "_OOS_idx"])
     for b in base.values():
         b.pop("_IS_idx", None)

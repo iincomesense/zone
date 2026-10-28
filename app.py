@@ -763,6 +763,7 @@ class PineInputs:
     showSupply: bool = True
     breakEvenRR: float = 0.0
     minRiskPct: float = 0.0
+    minVolRatio: float = 0.0      # leg-out का औसत volume ÷ boring का औसत volume (pending order का सबूत) · 0 = बंद
     demandIntradayMIS: bool = False
     curveMode: str = "off"
     htfZoneReq: bool = False
@@ -1805,6 +1806,8 @@ def scan_symbol(symbol: str,
                 continue
             if I.minRiskPct > 0 and z["prox"] and abs(z["prox"] - z["dist"]) / z["prox"] * 100.0 < I.minRiskPct:
                 continue
+            if I.minVolRatio > 0 and np.isfinite(z.get("f_volratio", np.nan)) and z["f_volratio"] < I.minVolRatio:
+                continue
             if I.filterAction and not act_ok:
                 continue
             if I.filterWholesale and not ws_ok:
@@ -2088,6 +2091,8 @@ def bt_collect(symbols: Sequence[str], frames_all: Dict[str, Dict[str, pd.DataFr
                 zs = [z for z in zs if z["demand"]]
             if Is.minRiskPct > 0:
                 zs = [z for z in zs if z["prox"] and abs(z["prox"] - z["dist"]) / z["prox"] * 100.0 >= Is.minRiskPct]
+            if Is.minVolRatio > 0:
+                zs = [z for z in zs if not (np.isfinite(z.get("f_volratio", np.nan)) and z["f_volratio"] < Is.minVolRatio)]
             if Is.supplyIntradayOnly and TF_SECONDS.get(tf, 0) >= 86400:
                 zs = [z for z in zs if z["demand"]]
             cs = curve_series(fr, tf) if Is.curveMode != "off" else None
@@ -2227,7 +2232,8 @@ OPT_GRID = dict(
     maturity=[0, 3],                # candles
     score=[0],                      # (score 7 पिछले रन में कभी नहीं चुना गया)
     trend=["off", "not_against", "in_favour"],
-    side=["both", "demand", "dem_intra_sup"],   # dem_intra_sup = Demand सब + Supply सिर्फ़ intraday TF
+    side=["both", "demand"],
+    volratio=[0.0, 1.5],            # leg-out volume ÷ boring volume ≥ (pending order का सबूत)
     be=[0.0],                       # (break-even से फ़र्क नहीं मिला)
     minrisk=[0.0, 0.4],             # SL की दूरी भाव का कम से कम % (पतले ज़ोन में चार्ज R खा जाते हैं)
     dmode=["CNC", "MIS"],           # intraday TF पर Demand: CNC (कई दिन) या MIS (उसी दिन, कम चार्ज)
@@ -2237,9 +2243,10 @@ OPT_GRID = dict(
     rr=[3.0, 5.0],
 )
 OPT_BASE = dict(atr=1.2, body=0.6, li=1.5, lo=2.5, power=3.0, maturity=3, score=0, trend="off",
-                side="both", be=0.0, minrisk=0.0, dmode="CNC", loc="off", htf="off", approach="any")
-BACKTESTED_PRESET = dict(atr=1.2, body=0.6, li=1.5, lo=3.0, power=3.0, maturity=3, score=0, trend="not_against",
-                         side="both", be=0.0, minrisk=0.4, dmode="MIS", loc="off", htf="off", approach="gap", rr=5.0)
+                side="both", be=0.0, minrisk=0.0, dmode="CNC", loc="off", htf="off", approach="any", volratio=0.0)
+BACKTESTED_PRESET = dict(atr=1.2, body=0.6, li=1.5, lo=2.5, power=3.0, maturity=3, score=0, trend="not_against",
+                         side="both", be=0.0, minrisk=0.4, dmode="MIS", loc="off", htf="off", approach="gap", rr=5.0,
+                         volratio=1.5)
 
 
 TREND_TO_CORE = {"off": "Off (score only)", "not_against": "Higher-TF not against",
@@ -2471,11 +2478,12 @@ def opt_run(T: pd.DataFrame, capital: float, risk_pct: float, split: pd.Timestam
     r_cost = _charges_vec(cnc, buy, sell, xt) / R0
     r_net = r_gross - r_cost
     keys = ["atr", "body", "li", "lo", "power", "maturity", "score", "trend", "side", "be", "minrisk", "dmode",
-            "loc", "htf", "approach", "rr"]
+            "loc", "htf", "approach", "rr", "volratio"]
+    vrat = np.nan_to_num(T["f_volratio"].to_numpy(dtype=float), nan=99.0) if "f_volratio" in T else np.full(len(T), 99.0)
     covb = T["cov_before"].to_numpy(dtype=bool)
     gape = T["gap_entry"].to_numpy(dtype=bool)
     locv = T["loc"].to_numpy(dtype="float64")
-    hconf = T["htf_conf"].to_numpy(dtype=bool)
+    hconf = T["htf_par" if "htf_par" in T else "htf_conf"].to_numpy(dtype=bool)   # बड़े TF के ज़ोन के अंदर
     intra = T["intra"].to_numpy(dtype=bool)
     loc_ok = {}
     for mode, lim in CURVE_MODES.items():
@@ -2498,7 +2506,8 @@ def opt_run(T: pd.DataFrame, capital: float, risk_pct: float, split: pd.Timestam
              & (A["m_li_ratio"] >= p["li"]) & (A["m_lo_ratio"] >= p["lo"])
              & (A["pow_rr"] >= p["power"]) & (score_act >= p["score"])
              & (A["rr"] == p["rr"]) & (A["maturity"] == p["maturity"]) & (A["be"] == p["be"])
-             & (risk_pct_px >= p["minrisk"]) & ((dmode == p["dmode"]) | (dmode == "ANY")))
+             & (risk_pct_px >= p["minrisk"]) & ((dmode == p["dmode"]) | (dmode == "ANY"))
+             & (vrat >= p["volratio"]))
         if p["side"] == "demand":
             m &= lg
         elif p["side"] == "dem_intra_sup":
@@ -2585,7 +2594,7 @@ def opt_pick(R: pd.DataFrame, top: int = 15) -> Optional[dict]:
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v20 · gap-open + zone ≥0.4% preset · 2026-10-28"
+APP_BUILD = "v21 · gap-open + zone ≥0.4% + volume 1.5× preset · 2026-10-28"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -2861,6 +2870,9 @@ def pine_panel(slot=None):
                                      help="₹25k में Daily/Weekly short संभव नहीं — MIS उसी दिन बंद होता है")
             min_risk = f11.number_input("SL की दूरी भाव का कम से कम %", 0.0, 10.0, D.minRiskPct, 0.1, key="in_minrisk",
                                         help="बहुत पतले ज़ोन में चार्ज (STT आदि) मुनाफ़ा खा जाते हैं")
+            min_vol = f11.number_input("Leg-out volume ÷ boring volume ≥ (0 = बंद)", 0.0, 10.0, D.minVolRatio, 0.1,
+                                       key="in_volratio",
+                                       help="boring शांत + leg-out में भारी volume = संस्थाओं का ऑर्डर। बैकटेस्ट: 1.5 सबसे अच्छा")
             show_sup = f9.checkbox("Supply ज़ोन भी दिखाएँ/ट्रेड करें", D.showSupply, key="in_showsupply")
             be_rr = f10.number_input("Break-even: 1: पर SL entry पर (0 = बंद)", 0.0, 10.0, D.breakEvenRR, 0.5, key="in_berr")
         with t2:
@@ -2945,7 +2957,7 @@ def pine_panel(slot=None):
     inp = PineInputs(
         accountCapital=float(cap), riskPct=float(risk), targetRR=float(rr), hourlyRR=float(hrr),
         target2RR=float(t2rr), legOutEachMinBody=float(lo_each), powerOnBody=bool(pow_body),
-        showSupply=bool(show_sup), breakEvenRR=float(be_rr), minRiskPct=float(min_risk),
+        showSupply=bool(show_sup), breakEvenRR=float(be_rr), minRiskPct=float(min_risk), minVolRatio=float(min_vol),
         demandIntradayMIS=bool(dmis), curveMode=str(curve), htfZoneReq=bool(htfz),
         supplyIntradayOnly=bool(sup_intra), entryApproach=str(appr),
         maturityBars=int(mat_bars),
@@ -3451,6 +3463,7 @@ def _opt_apply(best: dict) -> None:
     ss["in_showsupply"] = str(best["side"]) == "both"
     ss["in_berr"] = float(best["be"])
     ss["in_minrisk"] = float(best.get("minrisk", 0.0))
+    ss["in_volratio"] = float(best.get("volratio", 0.0))
     ss["in_dmis"] = str(best.get("dmode", "CNC")) == "MIS"
     ss["in_curve"] = str(best.get("loc", "off"))
     ss["in_htfz"] = str(best.get("htf", "off")) == "on"
@@ -3475,6 +3488,7 @@ def _opt_pine_text(b: dict) -> str:
         f"Show supply zones                  = {'ON' if b['side'] == 'both' else 'OFF'}",
         f"Break-even at 1: (0 = off)         = {b['be']}",
         f"Min SL distance % of price         = {b.get('minrisk', 0.0)}",
+        f"Min leg-out/boring volume ratio    = {b.get('volratio', 0.0)}",
         f"Intraday TF पर Demand               = {'MIS (उसी दिन बंद)' if b.get('dmode') == 'MIS' else 'CNC (delivery)'}",
         f"Curve (Location)                   = {CURVE_LABEL.get(str(b.get('loc', 'off')))}",
         f"Zone-in-zone (HTF ज़ोन ज़रूरी)        = {'ON' if b.get('htf') == 'on' else 'OFF'}",
@@ -3524,10 +3538,11 @@ def optimizer_panel(inp: PineInputs, tb: dict, cap: float, rp: float, d0, d1, al
     if R is None or R.empty or not best:
         st.warning("कोई ट्रेड नहीं बना — ज़्यादा स्क्रिप्ट या TF चुनें।")
         return
-    cols_show = ["atr", "body", "lo", "power", "maturity", "trend", "side", "be", "minrisk", "dmode", "loc", "htf", "rr",
+    cols_show = ["atr", "body", "lo", "power", "maturity", "trend", "side", "be", "minrisk", "volratio", "dmode", "loc", "htf", "rr",
                  "IS_sig", "IS_winR", "IS_grossR", "IS_costR", "IS_expR", "IS_totR",
                  "OOS_sig", "OOS_winR", "OOS_grossR", "OOS_costR", "OOS_expR", "OOS_totR",
                  "IS_trades", "IS_skipped", "IS_net", "OOS_trades", "OOS_skipped", "OOS_net", "OOS_max_dd"]
+    cols_show = [c for c in cols_show if c in R.columns]
     st.markdown(f"**{O['n']} स्क्रिप्ट · {O['zones']} ज़ोन · न्यूनतम signal (IS): {meta['min_trades']:.0f}**")
     st.caption("sig = signal (हर ज़ोन का पहला टच) · winR = जीत % · expR = हर signal का औसत नतीजा R में (चार्ज के बाद; "
                "+0.30 = हर ट्रेड पर औसतन जोखिम का 30% मुनाफ़ा) · totR = कुल R · "

@@ -1,5 +1,5 @@
 // This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
-// © iincomesense — "Zone MTF (KTP rules v17)"
+// © iincomesense — "Zone MTF (KTP rules v18)"
 // Demand/Supply zones per Dr. Ravi R. Kumar's KTP / Super Trader rules (user's Drive notes)
 // + institutional order-flow confluence (displacement, relative volume, liquidity sweep, imbalance).
 // v8: rules chosen step by step by the user —
@@ -50,7 +50,7 @@ boringAtrMult = input.float(1.0, "Boring: TR ≤ ATR ×", minval=0.1, step=0.05,
 minBaseCountInput = input.int(1, "Min boring candles", minval=1, maxval=4, group=G1)
 maxBaseCountInput = input.int(3, "Max boring candles (>3 not good)", minval=1, maxval=4, group=G1)
 legInToBaseSizeMult = input.float(1.5, "1-2-4: Leg-in ≥ boring ×", minval=1, step=0.25, group=G1)
-legOutToBaseSizeMult = input.float(3.0, "1-2-4: Leg-out (body to body) ≥ boring ×", minval=1, step=0.25, group=G1)
+legOutToBaseSizeMult = input.float(2.5, "1-2-4: Leg-out (body to body) ≥ boring ×", minval=1, step=0.25, group=G1)
 legOutEachMinBody = input.float(0.50, "Leg-out 2/3: each candle min body % (wick < 50%)", minval=0, maxval=1, step=0.05, group=G1)
 maxLegOut = input.int(3, "Max leg-out candles counted", minval=1, maxval=3, group=G1)
 allowTwoLegOut = input.bool(true, "Allow exactly 2 leg-out candles", group=G1)
@@ -84,6 +84,7 @@ supplyIntradayOnly = input.bool(false, "Supply only on intraday TF (MIS)", group
 gapEntryOnly = input.bool(true, "Entry only when session OPENS inside zone (gap-open)", group=GF, tooltip="बैकटेस्ट: दिन के बीच धीरे-धीरे ज़ोन में आए भाव पर घाटा; सिर्फ़ बाज़ार खुलते ही ज़ोन में gap वाले ट्रेड plus रहे")
 misExitAlert = input.bool(true, "Intraday: exit alert at 15:10 (MIS square-off)", group=GF)
 minRiskPct = input.float(0.4, "Min SL distance % of price (0 = off)", minval=0, step=0.1, group=GF, tooltip="बहुत पतले ज़ोन में चार्ज मुनाफ़ा खा जाते हैं")
+minVolRatio = input.float(1.5, "Leg-out avg volume ÷ boring avg volume ≥ (0 = off)", minval=0, step=0.1, group=GF, tooltip="boring शांत + leg-out में भारी volume = संस्थाओं का pending order। बैकटेस्ट में 1.5 सबसे अच्छा")
 coreMTF = input.string("Higher-TF not against", "MTF analysis → mandatory", options=["Off (score only)", "Higher-TF not against", "Higher-TF in favour (strict)"], group=GF)
 
 G2 = "2 · Note rules (grading; mandatory in Strict)"
@@ -255,6 +256,7 @@ type Candidate
     bool strongGap = false
     int notesPass = 0
     int instScore = 0
+    float volRatio = na
 
 // Bar 0 = LAST leg-out. fo = first leg-out, b0..bLast = boring, li = leg-in, pi = candle behind leg-in.
 f_candidate(int bc, int nOut) =>
@@ -432,6 +434,13 @@ f_candidate(int bc, int nOut) =>
         bool bodyProx = proxMode == "Boring body (precise)"
         float foTop = math.max(open[fo], close[fo])
         float foBot = math.min(open[fo], close[fo])
+        float outVolSum = 0.0
+        for k = 0 to fo
+            outVolSum += nz(volume[k])
+        float baseVolSum = 0.0
+        for k = b0 to bLast
+            baseVolSum += nz(volume[k])
+        c.volRatio := baseVolSum > 0 ? (outVolSum / (fo + 1)) / (baseVolSum / bc) : na
         c.valid := true
         c.stage := 11
         c.baseCount := bc
@@ -879,7 +888,7 @@ if bar_index >= math.max(atrPeriod, maxBaseCount + maxLegOut + 3, sweepLen + 6, 
             score += baseBreaksOld ? 1 : 0                          // BZ: break zone
             score += swingBreak ? 1 : 0                             // SB: swing break
             score += actionOK ? 1 : 0                               // Pulse & trend
-            bool skip = (hideNoTrade and score < minScore) or (filterAction and not actionOK) or (filterWholesale and not wsOK) or (not showSupply and not c.demand) or (supplyIntradayOnly and not c.demand and not timeframe.isintraday) or (not na(curveLim) and (na(cHH) or cHH <= cLL or (c.demand ? (c.prox - cLL) / (cHH - cLL) > curveLim : (c.prox - cLL) / (cHH - cLL) < 1 - curveLim))) or (minRiskPct > 0 and c.prox != 0 and math.abs(c.prox - c.dist) / c.prox * 100 < minRiskPct)
+            bool skip = (hideNoTrade and score < minScore) or (filterAction and not actionOK) or (filterWholesale and not wsOK) or (not showSupply and not c.demand) or (supplyIntradayOnly and not c.demand and not timeframe.isintraday) or (not na(curveLim) and (na(cHH) or cHH <= cLL or (c.demand ? (c.prox - cLL) / (cHH - cLL) > curveLim : (c.prox - cLL) / (cHH - cLL) < 1 - curveLim))) or (minRiskPct > 0 and c.prox != 0 and math.abs(c.prox - c.dist) / c.prox * 100 < minRiskPct) or (minVolRatio > 0 and not na(c.volRatio) and c.volRatio < minVolRatio)
             if skip
                 break
             color zoneColor = c.demand ? color.green : color.red

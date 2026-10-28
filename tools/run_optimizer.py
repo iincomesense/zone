@@ -32,7 +32,8 @@ COLLECT = os.path.exists(_mode_f) and open(_mode_f).read().strip().startswith("c
 if COLLECT:                                  # हर पैरामीटर अलग से परखने के लिए: बहुत ढीले नियम, सिर्फ़ signals
     TFS = os.environ.get("BT_TFS_COLLECT", "1h,2h,4h,6h,1d").split(",")
     END = pd.Timestamp.now(tz=IST).normalize() + pd.Timedelta(hours=23, minutes=59)
-    A.COLLECT_VARIANTS = [v for v in A.COLLECT_VARIANTS if v[0] in ("base", "rr3", "en0.1", "sl0.1")]
+    A.COLLECT_VARIANTS = [v for v in A.COLLECT_VARIANTS if v[0] in ("base", "rr2.5", "rr3")]
+    os.environ["COLLECT_ALL_ENTRIES"] = "1"      # सामान्य limit order भी (सिर्फ़ gap-open नहीं)
 if os.path.exists(_mode_f) and open(_mode_f).read().strip().startswith("full"):
     TFS = list(A.ALL_TFS)
     END = pd.Timestamp.now(tz=IST).normalize() + pd.Timedelta(hours=23, minutes=59)   # आज तक (पिछले 60 दिन भी)

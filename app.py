@@ -788,6 +788,9 @@ class PineInputs:
     legOutMinBody: float = 0.65
     gapTolAtr: float = 0.10
     legOutTooLong: float = 4.0
+    legInBodyVsBase: float = 0.0     # leg-in की body ≥ boring range (high–low) × (0 = बंद) · आपका नियम: 1.5
+    legOutBodyVsLegIn: float = 0.0   # पहली leg-out की body ≥ leg-in body × (0 = बंद) · आपका नियम: 1.5
+    whiteWick: bool = False          # leg-out की wick boring की पूरी range न ढके (Demand: leg-out low > boring low)
     useCoveredLegOut: bool = True
     coverPct: float = 0.50
     coverBars: int = 1              # covered leg-out सिर्फ़ ज़ोन बनने के बाद की इतनी candles में जाँचें
@@ -1099,6 +1102,10 @@ def _candidate(p: int, bc: int, nout: int, S: _S, I: PineInputs):
     # ---- 7. 1-2-4 part 2: leg-out body से body ≥ boring (wick से wick) × N ----
     if (ob_hi - ob_lo) < I.legOutToBaseSizeMult * base_size:
         return (7, f"1-2-4: leg-out < {I.legOutToBaseSizeMult:g}× boring")
+    if I.legInBodyVsBase > 0 and in_body < I.legInBodyVsBase * base_size:
+        return (7, f"Leg-in body < {I.legInBodyVsBase:g}× boring")
+    if I.legOutBodyVsLegIn > 0 and abs(c[fo] - o[fo]) < I.legOutBodyVsLegIn * in_body:
+        return (7, f"Leg-out body < {I.legOutBodyVsLegIn:g}× leg-in body")
     pat = ("RBR" if in_bull else "DBR") if demand else ("DBD" if in_bear else "RBD")
     reversal = pat in ("DBR", "RBD")
     # ---- 8. Formation of leg-out (DBR/RBD) ----
@@ -1114,6 +1121,9 @@ def _candidate(p: int, bc: int, nout: int, S: _S, I: PineInputs):
     white_ok = (out_body_near > base_body_lo) if demand else (out_body_near < base_body_hi)
     if I.useWhiteArea and not I.commodityMode and not white_ok:
         return (9, "No white area")
+    wick_ok = (l[fo] > base_low) if demand else (h[fo] < base_high)
+    if I.whiteWick and not I.commodityMode and not wick_ok:
+        return (9, "Leg-out की wick boring को पूरा ढकती है")
     # ---- 10. नोट्स के नियम (ग्रेडिंग; Strict में अनिवार्य) ----
     in_wick = 1.0 - S.bp[li]
     closing_wick = (in_high - c[li]) if in_bull else (c[li] - in_low)
@@ -1198,7 +1208,8 @@ def _candidate(p: int, bc: int, nout: int, S: _S, I: PineInputs):
         f_relvol=float(S.v[fo] / vs) if (np.isfinite(vs) and vs > 0) else float("nan"),
         f_volratio=float(out_vol / base_vol) if (np.isfinite(base_vol) and base_vol > 0) else float("nan"),
         f_basebars=int(bc), f_nout=int(nout),
-        fx=dict(m_lo_li_body=float(abs(c[fo] - o[fo]) / in_body) if in_body > 0 else 9.0,
+        fx=dict(m_white_wick=bool((l[fo] > base_low) if demand else (h[fo] < base_high)),
+                m_lo_li_body=float(abs(c[fo] - o[fo]) / in_body) if in_body > 0 else 9.0,
                 m_lo_li_range=float((h[fo] - l[fo]) / in_range) if in_range > 0 else 9.0,
                 m_loall_li_body=float((ob_hi - ob_lo) / in_body) if in_body > 0 else 9.0,
                 m_form_dev=float(max(0.0, o[fo] - in_body_hi, in_body_lo - o[fo]) / atr[fo]) if reversal else 0.0,
@@ -2375,7 +2386,7 @@ def _act_at(series: Optional[pd.DataFrame], ts: pd.Timestamp) -> Tuple[bool, boo
 
 # collect में हर ज़ोन पर ये रूप: (नाम, SL buffer ×ATR, entry buffer ×ATR, rr, target)
 COLLECT_VARIANTS = [
-    ("base", 0.0, 0.0, 5.0, "rr"), ("rr3", 0.0, 0.0, 3.0, "rr"),
+    ("base", 0.0, 0.0, 5.0, "rr"), ("rr3", 0.0, 0.0, 3.0, "rr"), ("rr2.5", 0.0, 0.0, 2.5, "rr"),
     ("sl0.1", 0.1, 0.0, 5.0, "rr"), ("sl0.25", 0.25, 0.0, 5.0, "rr"), ("sl0.5", 0.5, 0.0, 5.0, "rr"),
     ("en0.1", 0.0, 0.1, 5.0, "rr"), ("en0.25", 0.0, 0.25, 5.0, "rr"), ("sl0.25en0.1", 0.25, 0.1, 5.0, "rr"),
     ("sl0.25rr3", 0.25, 0.0, 3.0, "rr"),
@@ -3033,6 +3044,12 @@ def pine_panel(slot=None):
             lo_body = n2.number_input("Leg-out: min body % (65:35)", 0.0, 1.0, D.legOutMinBody, 0.05, key="in_lobody")
             gap_tol = n3.number_input("Leg-in↔boring gap tolerance × ATR", 0.0, 2.0, D.gapTolAtr, 0.05, key="in_gaptol")
             lo_long = n4.number_input("⚠ अगर leg-out > leg-in ×", 1.0, 20.0, D.legOutTooLong, 0.5, key="in_lolong")
+            nb1, nb2, nb3 = st.columns(3)
+            li_bb = nb1.number_input("Leg-in body ≥ boring range × (0 = बंद)", 0.0, 10.0, D.legInBodyVsBase, 0.25, key="in_libb",
+                                     help="boring (1–3 candle) के high–low से leg-in की body कितनी गुना हो · आपका नियम 1.5")
+            lo_bl = nb2.number_input("Leg-out body ≥ leg-in body × (0 = बंद)", 0.0, 10.0, D.legOutBodyVsLegIn, 0.25, key="in_lobl",
+                                     help="पहली leg-out की body, leg-in की body से कितनी गुना हो · आपका नियम 1.5")
+            w_wick = nb3.checkbox("White area: leg-out की wick boring को पूरा न ढके", D.whiteWick, key="in_wwick")
             li_cw = n1.number_input("Leg-in: closing wick ≤ range का (1 = बंद)", 0.0, 1.0, D.legInMaxCloseWick, 0.05,
                                     key="in_licw", help="बैकटेस्ट: 0.3 — बंद होते समय लंबी wick = कमज़ोर leg-in")
             n5, n6, n7, n8 = st.columns(4)
@@ -3115,7 +3132,8 @@ def pine_panel(slot=None):
         useWhiteArea=bool(white), coreFresh=bool(fresh), coreOpposite=bool(opp),
         oppositeRR=float(opp_rr), corePlayground=bool(play), playRR=float(play_rr),
         oppUseMTF=bool(opp_mtf), coreMTF=str(core_mtf),
-        legInMaxWick=float(li_wick), legInMaxCloseWick=float(li_cw), legOutMinBody=float(lo_body), gapTolAtr=float(gap_tol),
+        legInMaxWick=float(li_wick), legInMaxCloseWick=float(li_cw),
+        legInBodyVsBase=float(li_bb), legOutBodyVsLegIn=float(lo_bl), whiteWick=bool(w_wick), legOutMinBody=float(lo_body), gapTolAtr=float(gap_tol),
         legOutTooLong=float(lo_long), useCoveredLegOut=bool(covered), coverPct=float(cover_pct),
         useMaturity=bool(maturity), immatureWithTrend=bool(imm_trend), useTimeRule=bool(time_rule),
         maxTouches=int(max_touch), meltingReversalOnly=bool(melting), reRunDays=int(rerun),
@@ -3613,6 +3631,13 @@ def _opt_apply(best: dict) -> None:
     if "form" in best:
         ss["in_form"] = bool(best["form"])
     ss["in_formrng"] = bool(best.get("formrng", False))
+    if "formtol" in best:
+        ss["in_formtol"] = float(best["formtol"])
+    ss["in_libb"] = float(best.get("libody", 0.0))
+    ss["in_lobl"] = float(best.get("lobody", 0.0))
+    ss["in_wwick"] = bool(best.get("whitewick", False))
+    if "t1rr" in best:
+        ss["in_rr"] = ss["in_hrr"] = ss["in_mrr"] = float(best["t1rr"])
     ss["in_maturity"] = int(best.get("maturity", 0)) > 0
     ss["in_dmis"] = str(best.get("dmode", "CNC")) == "MIS"
     ss["in_curve"] = str(best.get("loc", "off"))

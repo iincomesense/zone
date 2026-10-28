@@ -2169,6 +2169,7 @@ def curve_ok(mode: str, demand: bool, loc: float) -> bool:
     return loc <= lim if demand else loc >= 1.0 - lim
 
 
+OPT_DIAG: Dict[str, int] = {}
 PARENT_TF = {"1h": "1d", "2h": "1d", "4h": "1w", "1d": "1w", "75m": "1d", "125m": "1d", "15m": "1h", "30m": "1d"}
 
 
@@ -2317,7 +2318,11 @@ def opt_collect(symbols: Sequence[str], frames_all: Dict[str, Dict[str, pd.DataF
             intra = P["intraday"]
             cs = curve_series(fr, tf)
             spans = htf_zone_spans(fr, tf, replace(I, commodityMode=Is.commodityMode))
-            pspans = htf_zone_spans(fr, tf, Is, htf=PARENT_TF.get(tf))
+            pspans = htf_zone_spans(fr, tf, replace(Is, legInAtrMult=0.8, legOutAtrMult=0.8, filledMinBody=0.5,
+                                                    legInToBaseSizeMult=1.0, legOutToBaseSizeMult=1.5, powerMinRR=1.0,
+                                                    useWhiteArea=False, useFormation=False),
+                                    htf=PARENT_TF.get(tf))       # बड़े TF का ज़ोन — ढीले नियम से (कोर्स जैसा मोटा मार्किंग)
+            OPT_DIAG[tf] = OPT_DIAG.get(tf, 0) + (0 if pspans is None else len(pspans["dem"]))
             for zid, z in enumerate(zs):
                 if z.get("room_tf") is not None and z["room_tf"] < Is.oppositeRR:
                     continue                                   # आपका अनिवार्य opposite-zone नियम

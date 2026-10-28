@@ -73,6 +73,7 @@ lines = [f"# Optimizer result ({time.strftime('%Y-%m-%d %H:%M')} UTC)", "",
          f"min signals (IS) {meta.get('min_trades', 0):.0f}", "", "## data coverage"]
 for tf, (a, b, n) in sorted(cover.items(), key=lambda kv: A.TF_SECONDS.get(kv[0], 0)):
     lines.append(f"- {tf}: {a:%Y-%m-%d} → {b:%Y-%m-%d} ({n} symbols)")
+lines += ["", f"## diag: parent-TF zones per TF {getattr(A, 'OPT_DIAG', {})} · htf_par share {T['htf_par'].mean() if 'htf_par' in T else 'na'}"]
 lines += ["", "## baseline (current rules)"]
 for rr, b in meta.get("base", {}).items():
     lines.append("- " + json.dumps({k: (round(v, 3) if isinstance(v, float) else v) for k, v in b.items() if k in keys + stats}, ensure_ascii=False, default=str))

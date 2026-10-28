@@ -2897,7 +2897,7 @@ h1,h2,h3{letter-spacing:.2px;}
 .inp-panel div[data-testid="stExpander"] label p{word-break:normal;overflow-wrap:normal;white-space:normal;line-height:1.3}
 div[data-testid="stExpander"] div[data-testid="stHorizontalBlock"]{flex-wrap:wrap;row-gap:.6rem}
 div[data-testid="stExpander"] div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"],
-div[data-testid="stExpander"] div[data-testid="stHorizontalBlock"] > div[data-testid="column"]{min-width:220px;flex:1 1 220px !important}
+div[data-testid="stExpander"] div[data-testid="stHorizontalBlock"] > div[data-testid="column"]{min-width:220px;flex:0 1 calc(33.333% - .45rem) !important}
 div[data-testid="stExpander"] label p{word-break:keep-all;overflow-wrap:break-word}
 div[data-testid="stExpander"] div[data-baseweb="tab-list"]{flex-wrap:wrap;gap:.25rem}
 @media (max-width: 760px){

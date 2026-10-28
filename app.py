@@ -2834,13 +2834,29 @@ QBT_CEIL = dict(boringAtrMult=1.3)
 
 def qbt_load() -> Optional[pd.DataFrame]:
     try:
-        return pd.read_csv(QBT_FILE)
+        return pd.read_csv(QBT_FILE, low_memory=False, dtype={"rc5": str, "rc25": str, "rc3": str}, keep_default_na=True)
     except Exception:                                          # noqa: BLE001
         return None
 
 
 def _qbt_rr_col(rr: float) -> str:
     return min((("25", 2.5), ("3", 3.0), ("5", 5.0)), key=lambda t: abs(t[1] - rr))[0]
+
+
+def _qbt_R(d: pd.DataFrame, rr: float) -> Tuple[pd.Series, pd.Series]:
+    """rr के सबसे पास वाला नतीजा; जहाँ वह न हो (छोटे TF में 1:3 नहीं) वहाँ अगला पास वाला।"""
+    order = sorted((("25", 2.5), ("3", 3.0), ("5", 5.0)), key=lambda t: abs(t[1] - rr))
+    R = pd.Series(np.nan, index=d.index)
+    rc = pd.Series("", index=d.index, dtype=object)
+    for c, _ in order:
+        miss = R.isna()
+        R[miss] = d.loc[miss, "nR" + c]
+        rc[miss] = d.loc[miss, "rc" + c]
+    return R, rc
+
+
+QBT_PERIOD = {"3m": ("7 दिन", 0.25), "5m": ("60 दिन", 2.0), "10m": ("60 दिन", 2.0), "15m": ("60 दिन", 2.0),
+              "30m": ("60 दिन", 2.0), "75m": ("60 दिन", 2.0)}
 
 
 def qbt_run(Z: pd.DataFrame, I: "PineInputs", tfs: Sequence[str], entry: Optional[str] = None) -> Tuple[pd.DataFrame, dict]:
@@ -2896,9 +2912,10 @@ def qbt_run(Z: pd.DataFrame, I: "PineInputs", tfs: Sequence[str], entry: Optiona
         m &= g("cov_before") == 0
     m &= Z["tf"].isin(list(tfs)).to_numpy()
     d = Z[m].copy()
-    a, b = _qbt_rr_col(I.targetRR), _qbt_rr_col(I.target2RR)
-    d["R"] = 0.5 * (d["nR" + a] + d["nR" + b]) if a != b else d["nR" + a]
-    d["res"] = d["rc" + b]
+    r1, _ = _qbt_R(d, I.targetRR)
+    r2, rc2 = _qbt_R(d, I.target2RR)
+    d["R"] = 0.5 * (r1 + r2) if abs(I.targetRR - I.target2RR) > 1e-9 else r2
+    d["res"] = rc2
     d["day"] = (d["et"] // 86400000).astype("int64")
     d = d.sort_values("tf").drop_duplicates(["symbol", "day", "long"])     # एक स्टॉक-दिन-दिशा = एक ट्रेड
     per_R = float(I.accountCapital) * float(I.riskPct) / 100.0
@@ -2911,19 +2928,20 @@ def qbt_run(Z: pd.DataFrame, I: "PineInputs", tfs: Sequence[str], entry: Optiona
             continue
         n = len(x)
         isx, oos = x[x["et"] < QBT_SPLIT_MS], x[x["et"] >= QBT_SPLIT_MS]
-        rows.append({"TF": tf, "ट्रेड": n, "Target": int((x["res"] == "T").sum()), "SL": int((x["res"] == "S").sum()),
+        per, months = QBT_PERIOD.get(tf, ("Jan-24→Oct-26", 34.0))
+        rows.append({"TF": tf, "डेटा": per if tf != "कुल" else "", "ट्रेड": n, "Target": int((x["res"] == "T").sum()), "SL": int((x["res"] == "S").sum()),
                      "दिन-अंत": int((x["res"] == "O").sum()),
                      "जीत %": round(float((x["R"] > 0).mean() * 100), 1) if n else 0.0,
                      "₹ कुल": round(float(x["R"].sum() * per_R)),
                      "₹ Jan-24→Jun-25": round(float(isx["R"].sum() * per_R)),
                      "₹ Jul-25→Oct-26": round(float(oos["R"].sum() * per_R)),
-                     "ट्रेड/माह": round(n / 34.0, 1)})
+                     "ट्रेड/माह": round(n / months, 1) if tf != "कुल" else None})
     tot = rows[-1]
     floor = [k for k, v in QBT_FLOOR.items() if getattr(I, k) < v - 1e-9] + [k for k, v in QBT_CEIL.items() if getattr(I, k) > v + 1e-9]
     return pd.DataFrame(rows), dict(total=tot, floor=floor, per_R=per_R)
 
 
-APP_BUILD = "v28 · इनपुट बदलते ही बैकटेस्ट तालिका · 2026-10-28"
+APP_BUILD = "v29 · बैकटेस्ट तालिका में 3m–75m (Yahoo 60 दिन) भी · 2026-10-28"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -4011,7 +4029,8 @@ def qbt_panel(inp: "PineInputs", tfs: Sequence[str]) -> None:
         stretch(st.dataframe, df.convert_dtypes(), hide_index=True)
         st.caption(f"222 F&O स्टॉक · Jan-2024 से Oct-2026 · पूँजी ₹{inp.accountCapital:,.0f}, जोखिम {inp.riskPct:g}% (1R = ₹{meta['per_R']:,.0f}) · "
                    f"आधी मात्रा T1 1:{inp.targetRR:g}, आधी T2 1:{inp.target2RR:g} (डेटा में 1:2.5, 1:3, 1:5 हैं; बाक़ी पास वाले पर) · "
-                   "चार्ज के बाद · MIS · एक स्टॉक-दिन-दिशा = एक ट्रेड · सिर्फ़ 1h, 2h, 4h, 6h, 1d (छोटे TF का Yahoo डेटा 60 दिन)। "
+                   "चार्ज के बाद · MIS · एक स्टॉक-दिन-दिशा = एक ट्रेड · 1h–1d: Jan-2024 से Oct-2026; 5m–75m: Yahoo के 60 दिन; "
+                   "3m: 7 दिन — छोटे TF के नंबर कम समय के हैं, सावधानी से देखें। "
                    "'बड़ा TF in favour' को 'उल्टा नहीं' जैसा गिना है।")
         if meta["floor"]:
             st.warning("ये इनपुट डेटा बनाने वाले नियमों से भी ढीले हैं, इसलिए उन पर असली गिनती इससे ज़्यादा होगी: " + ", ".join(meta["floor"]))

@@ -2174,6 +2174,10 @@ OPT_GRID = dict(
 )
 OPT_BASE = dict(atr=1.2, body=0.6, li=1.5, lo=2.5, power=3.0, maturity=3, score=0, trend="off",
                 side="both", be=0.0, minrisk=0.0, dmode="CNC", loc="off", htf="off")
+BACKTESTED_PRESET = dict(atr=1.2, body=0.6, li=1.5, lo=3.0, power=2.0, maturity=0, score=0, trend="in_favour",
+                         side="demand", be=0.0, minrisk=0.0, dmode="MIS", loc="off", htf="off", rr=5.0)
+
+
 TREND_TO_CORE = {"off": "Off (score only)", "not_against": "Higher-TF not against",
                  "in_favour": "Higher-TF in favour (strict)"}
 
@@ -3332,10 +3336,6 @@ def backtest_panel(inp: PineInputs, tb: dict) -> None:
                 file_name=f"backtest_1to{rr:g}_{datetime.now(IST):%Y%m%d}.csv", mime="text/csv",
                 key=f"bt_dl_{rr}")
             stretch(st.dataframe, show.round(2), hide_index=True, height=360)
-
-
-BACKTESTED_PRESET = dict(atr=1.2, body=0.6, li=1.5, lo=3.0, power=2.0, maturity=0, score=0, trend="in_favour",
-                         side="demand", be=0.0, minrisk=0.0, dmode="MIS", loc="off", htf="off", rr=5.0)
 
 
 def _opt_apply(best: dict) -> None:

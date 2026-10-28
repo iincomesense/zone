@@ -31,6 +31,8 @@ _mode_f = os.path.join(os.path.dirname(os.path.abspath(__file__)), "MODE")
 COLLECT = os.path.exists(_mode_f) and open(_mode_f).read().strip().startswith("collect")
 if COLLECT:                                  # हर पैरामीटर अलग से परखने के लिए: बहुत ढीले नियम, सिर्फ़ signals
     TFS = os.environ.get("BT_TFS_COLLECT", "1h,2h,4h,1d").split(",")
+if os.path.exists(_mode_f) and open(_mode_f).read().strip().startswith("full"):
+    TFS = list(A.ALL_TFS)
 CAP, RISK, ALLOC, KEEP = 25000.0, 0.5, 25.0, 80.0
 
 t0 = time.time()
@@ -56,7 +58,7 @@ for s, fr in frames.items():
             c = cover.setdefault(tf, [a, b, 0])
             c[0], c[1], c[2] = min(c[0], a), max(c[1], b), c[2] + 1
 
-if CHARTS:
+def build_charts(SEL):
     from dataclasses import replace as _rep
     I = A.PineInputs().sanitized()
     loose = A.opt_loose_inputs(I, True)
@@ -110,10 +112,50 @@ if CHARTS:
                             width=round(float(r.f_zone_pct), 2), lo_ratio=round(float(r.m_lo_ratio), 2), power=round(float(r.pow_rr), 2),
                             li_atr=round(float(r.m_in_atr), 2), lo_atr=round(float(r.m_out_atr), 2), base_tr=round(float(r.m_base_tr), 2),
                             li_body=round(float(r.m_li_body), 2), lo_body=round(float(r.m_fo_body), 2)))
+    return out, miss
+
+if CHARTS:
+    out, miss = build_charts(SEL)
     json.dump(dict(trades=out, missing=miss), open(os.path.join(OUT, "charts.json"), "w"), ensure_ascii=False)
     open(os.path.join(OUT, "summary.md"), "w").write(f"# charts run · trades {len(out)} · missing {miss}\n")
     print("charts", len(out), "missing", miss, flush=True)
     sys.exit(0)
+
+FULL = os.path.exists(_mode_f) and open(_mode_f).read().strip().startswith("full")
+if FULL:                                     # सारे F&O स्टॉक · सारे 13 TF · v25 नियम → हर ट्रेड का चार्ट
+    A.COLLECT_VARIANTS = [("base", 0.0, 0.0, 5.0, "rr")]
+    I = A.PineInputs().sanitized()
+    T = A.opt_collect(syms, frames, TFS, I, START, END, loose_all=True,
+                      progress=lambda f, s: print(f"collect {f:.0%} {s}", flush=True) if int(f * 100) % 10 == 0 else None)
+    print("rows", len(T), flush=True)
+    lg = T["long"].to_numpy(bool)
+    en, ex, rp = T["entry"].to_numpy(), T["exit"].to_numpy(), T["risk_ps"].to_numpy()
+    xt = pd.to_datetime(T["exit_time"]).map(lambda x: x.value).to_numpy()
+    qn = np.maximum(np.floor(np.minimum(125.0 / np.maximum(rp, 1e-9), 25000 * 0.25 / np.maximum(en * A.MIS_MARGIN, 1e-9))), 1)
+    buy = np.where(lg, qn * en, qn * ex); sell = np.where(lg, qn * ex, qn * en)
+    T["nR"] = ((sell - buy) - A._charges_vec(np.zeros(len(T), bool), buy, sell, xt)) / 125.0
+    notag = ~np.where(lg, T["act_short"], T["act_long"]).astype(bool)
+    vr = T["f_volratio"].fillna(9.0)
+    V = ((T.m_li_body >= .6) & (T.m_in_atr >= 1.0) & (T.m_li_closewick <= .3) & (T.m_cbli <= .5) & (T.m_base_tr <= .7)
+         & (T.m_li_ratio >= 1.5) & (T.m_fo_body >= .6) & (T.m_out_atr >= 1.2) & (T.m_lo_minbody >= .5) & (T.m_lo_ratio >= 2.0)
+         & (T.pow_rr >= 2.0) & (T.m_room >= 3) & T.m_white.astype(bool) & (T.f_zone_pct >= .4) & (vr >= 1.5) & (T.f_edge >= 4)
+         & ~T.f_bz.astype(bool) & notag & T.m_form_range.astype(bool) & (T.away >= 3))
+    if os.environ.get("FULL_NOFILTER"):
+        V = T["reason"].notna()
+    SEL = T[V].copy()
+    SEL.to_csv(os.path.join(OUT, "v25_trades.csv"), index=False)
+    out, miss = build_charts(SEL)
+    json.dump(dict(trades=out, missing=miss), open(os.path.join(OUT, "charts.json"), "w"), ensure_ascii=False)
+    lines_ = [f"# full v25 run · TFs {TFS} · trades {len(SEL)} · charts {len(out)} · missing {miss}", ""]
+    for tf_, g_ in SEL.groupby("tf"):
+        lines_.append(f"- {tf_}: n {len(g_)} · target {(g_.reason == 'Target').sum()} · SL {(g_.reason == 'SL').sum()} · "
+                      f"win {(g_.nR > 0).mean() * 100:.0f}% · R {g_.nR.sum():.1f}")
+    for tf, (a, b, n) in sorted(cover.items(), key=lambda kv: A.TF_SECONDS.get(kv[0], 0)):
+        lines_.append(f"- data {tf}: {a:%Y-%m-%d} → {b:%Y-%m-%d} ({n} symbols)")
+    open(os.path.join(OUT, "summary.md"), "w").write("\n".join(lines_))
+    print("full done", len(out), flush=True)
+    sys.exit(0)
+
 
 I = A.PineInputs().sanitized()
 T = A.opt_collect(syms, frames, TFS, I, START, END,

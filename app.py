@@ -1117,6 +1117,12 @@ def _candidate(p: int, bc: int, nout: int, S: _S, I: PineInputs):
     sweep = bool((np.isfinite(lp) and zone_low < lp) if demand else (np.isfinite(hp) and zone_high > hp))
     fvg = nout >= 2 and ((l[fo + 1] > h[b0]) if demand else (h[fo + 1] < l[b0]))
     imb = gap_out or fvg
+    # ---- pending-order अनुमान के लिए कच्चे आँकड़े (बैकटेस्ट में परखने को) ----
+    base_vol = float(np.nanmean(S.v[bl:b0 + 1])) if b0 >= bl else float("nan")
+    out_vol = float(np.nanmean(S.v[fo:p + 1]))
+    lo20 = float(np.nanmin(l[max(0, li - 20):li])) if li > 0 else float("nan")
+    hi20 = float(np.nanmax(h[max(0, li - 20):li])) if li > 0 else float("nan")
+    pivot = bool((zone_low <= lo20) if demand else (zone_high >= hi20)) if np.isfinite(lo20) else False
     # ---- Levels ----
     course = I.distalMode == DIST_MODES[0]
     d_dist = (min(base_low, in_low, out_low) if reversal else min(base_low, out_low)) if course else base_low
@@ -1143,6 +1149,10 @@ def _candidate(p: int, bc: int, nout: int, S: _S, I: PineInputs):
         m_in_atr=float(S.tr[li] / atr[li]), m_out_atr=float(S.tr[fo] / atr[fo]),
         m_li_body=float(S.bp[li]), m_fo_body=float(S.bp[fo]),
         m_li_ratio=float(in_range / base_size), m_lo_ratio=float((ob_hi - ob_lo) / base_size),
+        f_pivot=pivot, f_gapout=bool(gap_out), f_fvg=bool(fvg), f_sweep=bool(sweep), f_disp=float(S.tr[fo] / atr[fo]),
+        f_relvol=float(S.v[fo] / vs) if (np.isfinite(vs) and vs > 0) else float("nan"),
+        f_volratio=float(out_vol / base_vol) if (np.isfinite(base_vol) and base_vol > 0) else float("nan"),
+        f_basebars=int(bc), f_nout=int(nout),
         b0=b0, bl=bl, li=li,
     )
 
@@ -1360,6 +1370,9 @@ def engine(df: pd.DataFrame, I: PineInputs, tf: str, htf_daily: Optional[pd.Data
                         m_in_atr=cand["m_in_atr"], m_out_atr=cand["m_out_atr"],
                         m_li_body=cand["m_li_body"], m_fo_body=cand["m_fo_body"],
                         m_li_ratio=cand["m_li_ratio"], m_lo_ratio=cand["m_lo_ratio"],
+                        f_pivot=cand["f_pivot"], f_gapout=cand["f_gapout"], f_fvg=cand["f_fvg"], f_sweep=cand["f_sweep"],
+                        f_disp=cand["f_disp"], f_relvol=cand["f_relvol"], f_volratio=cand["f_volratio"],
+                        f_strong=cand["strong_gap"],
                         long_out=cand["long_out"], follow=follow, base_break=base_brk,
                         swing_break=swing_brk, trader_type=TT_NAME.get(tt, ""), t1_rr=t1,
                         state=STATE_FRESH, touches=0, outside=True, target_hit=False,
@@ -1934,7 +1947,7 @@ def _bt_sim_one(P: dict, z: dict, rr: float, maturity: int, be_rr: float, use_bu
                 break
     if exit_px is None:
         exit_px, exit_j, reason = c[n - 1], n - 1, "Open (last price)"
-    return dict(cov_before=bool(cov_before), gap_entry=bool(open_first),
+    return dict(ej=int(ej), cov_before=bool(cov_before), gap_entry=bool(open_first),
                 entry_time=idx[ej], exit_time=idx[exit_j], entry=float(fill), sl=float(sl0),
                 target=float(tgt), exit=float(exit_px), risk_ps=float(abs(fill - sl0)) or risk_ps,
                 reason=reason, long=dem, kind="CNC" if (dem and not long_mis) else "MIS",
@@ -2290,6 +2303,11 @@ def opt_collect(symbols: Sequence[str], frames_all: Dict[str, Dict[str, pd.DataF
                             m_in_atr=z["m_in_atr"], m_out_atr=z["m_out_atr"], m_li_body=z["m_li_body"],
                             m_fo_body=z["m_fo_body"], m_li_ratio=z["m_li_ratio"], m_lo_ratio=z["m_lo_ratio"],
                             pow_rr=z["pow_rr"], score_base=int(z["score_base"]),
+                            f_pivot=z["f_pivot"], f_gapout=z["f_gapout"], f_fvg=z["f_fvg"], f_sweep=z["f_sweep"],
+                            f_disp=z["f_disp"], f_relvol=z["f_relvol"], f_volratio=z["f_volratio"], f_strong=z["f_strong"],
+                            f_basebars=int(z["base_count"]), f_nout=int(z["leg_outs"]), f_fu=bool(z.get("follow")),
+                            f_bz=bool(z.get("base_break")), f_sb=bool(z.get("swing_break")),
+                            f_zone_pct=abs(z["prox"] - z["dist"]) / z["prox"] * 100.0 if z["prox"] else float("nan"),
                             room_pt=int(z.get("room_tf") is None or z["room_tf"] >= 10 or z["xrr"] >= 10))
                 modes = (("CNC", False), ("MIS", True)) if (intra and z["demand"]) else (("ANY", False),)
                 zborn = pd.Timestamp(int(z["time"]) + TF_SECONDS.get(tf, 0) * 1000, unit="ms", tz="UTC").tz_convert(IST)
@@ -2305,6 +2323,7 @@ def opt_collect(symbols: Sequence[str], frames_all: Dict[str, Dict[str, pd.DataF
                             hc = htf_conf(spans, bool(z["demand"]), max(z["prox"], z["dist"]),
                                           min(z["prox"], z["dist"]), zborn)
                             rows.append(dict(base, rr=rr, maturity=mat, be=be, dmode=dm, loc=lv, htf_conf=hc,
+                                             away=int(t["ej"]) - int(z["created_bar"]),
                                              intra=intra, cov_before=t["cov_before"], gap_entry=t["gap_entry"],
                                              entry_time=t["entry_time"], exit_time=t["exit_time"],
                                              entry=t["entry"], exit=t["exit"], risk_ps=t["risk_ps"],

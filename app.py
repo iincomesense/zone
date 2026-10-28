@@ -774,6 +774,7 @@ class PineInputs:
     legOutTooLong: float = 4.0
     useCoveredLegOut: bool = True
     coverPct: float = 0.50
+    coverBars: int = 1              # covered leg-out सिर्फ़ ज़ोन बनने के बाद की इतनी candles में जाँचें
     useMaturity: bool = True
     maturityBars: int = 3
     immatureWithTrend: bool = False
@@ -1402,7 +1403,8 @@ def engine(df: pd.DataFrame, I: PineInputs, tf: str, htf_daily: Optional[pd.Data
                             z["touches"] = 1
                             z["outside"] = False
                             z["entry_bar"] = p
-                    elif eff_covered and ((min(op_, cl_) < z["cover"]) if dem else (max(op_, cl_) > z["cover"])):
+                    elif (eff_covered and p - z["created_bar"] <= I.coverBars
+                          and ((min(op_, cl_) < z["cover"]) if dem else (max(op_, cl_) > z["cover"]))):
                         z["state"] = STATE_COVERED
                 else:
                     if hit_sl:
@@ -1605,7 +1607,7 @@ def eod_band(df: Optional[pd.DataFrame], tf: str, atr_period: int = 14) -> Optio
 # ---------------------------------------------------------------------------
 _EMPTY_SNAP = {"demand": None, "supply": None, "demand_time": 0, "supply_time": 0}
 _ZCACHE: Dict[tuple, tuple] = {}
-_ZVER = "z15"           # इंजन बदले तो बढ़ाएँ — पुराना कैश अपने आप बेकार
+_ZVER = "z17"           # इंजन बदले तो बढ़ाएँ — पुराना कैश अपने आप बेकार
 
 
 def _inputs_hash(I: PineInputs) -> str:
@@ -1817,6 +1819,7 @@ def _last_close(frames: Dict[str, pd.DataFrame], tfs: Sequence[str]) -> float:
 # ═══════════════════════════════════════════════════════════════════════
 BT_DEFAULT_START = "2024-01-01"
 BT_DEFAULT_END = "2026-10-01"
+COVER_BARS = 1            # covered leg-out: सिर्फ़ ज़ोन के ठीक बाद की candle
 MIS_MARGIN = 0.20          # SEBI: intraday पर कम से कम 20% margin (5×)
 DP_CHARGE = 15.34          # CDSL ₹13.5 + 18% GST — हर scrip, हर बिक्री वाले दिन
 
@@ -1873,8 +1876,8 @@ def _bt_sim_one(P: dict, z: dict, rr: float, maturity: int, be_rr: float, use_bu
     for j in range(cb + 1, n):
         touch = (l[j] <= prox) if dem else (h[j] >= prox)
         if not touch:
-            if (min(o[j], c[j]) < z["cover"]) if dem else (max(o[j], c[j]) > z["cover"]):
-                return None                                  # covered leg-out → ज़ोन ख़त्म
+            if j - cb <= COVER_BARS and ((min(o[j], c[j]) < z["cover"]) if dem else (max(o[j], c[j]) > z["cover"])):
+                return None                                  # ज़ोन बनते ही अगली candle ने leg-out ढका → trap
             continue
         if j - cb < maturity or idx[j] < start or idx[j] > end:
             return None                                      # immature trap / अवधि के बाहर
@@ -2493,7 +2496,7 @@ def opt_pick(R: pd.DataFrame, top: int = 15) -> Optional[dict]:
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v16 · backtested preset · HTF fix · 2026-10-28"
+APP_BUILD = "v17 · covered-leg-out fix · 2026-10-28"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -2789,7 +2792,7 @@ def pine_panel(slot=None):
             gap_tol = n3.number_input("Leg-in↔boring gap tolerance × ATR", 0.0, 2.0, D.gapTolAtr, 0.05, key="in_gaptol")
             lo_long = n4.number_input("⚠ अगर leg-out > leg-in ×", 1.0, 20.0, D.legOutTooLong, 0.5, key="in_lolong")
             n5, n6, n7, n8 = st.columns(4)
-            covered = n5.checkbox("Covered leg-out = trap", D.useCoveredLegOut, key="in_covered")
+            covered = n5.checkbox("Covered leg-out = trap (ज़ोन के ठीक बाद की candle)", D.useCoveredLegOut, key="in_covered")
             cover_pct = n6.number_input("Covered: पहली leg-out body का %", 0.1, 1.0, D.coverPct, 0.05, key="in_coverpct")
             maturity = n7.checkbox("Zone maturity", D.useMaturity, key="in_maturity")
             mat_bars = n7.number_input("Maturity: कितनी candle बाद", 0, 50, D.maturityBars, 1, key="in_matbars")

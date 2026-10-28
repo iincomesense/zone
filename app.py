@@ -2635,7 +2635,7 @@ table.gs a{color:#1a73e8;} table.gs a.fut{color:#0b57d0;}
 
 def css():
     base = """
-.block-container{padding-top:.55rem;padding-bottom:1rem;max-width:100%;}
+.block-container{padding-top:3.2rem;padding-bottom:1rem;max-width:100%;}
 div[data-testid="stHorizontalBlock"]{gap:.45rem;}
 h1,h2,h3{letter-spacing:.2px;}
 """
@@ -3511,7 +3511,7 @@ def _main():
             st.session_state["scan"] = res
 
     # ── Backtest ────────────────────────────────────────────────────────
-    with st.expander("🧪 Backtest", expanded=False):
+    with st.expander(f"🧪 Backtest · 🔧 Optimizer  ·  ({APP_BUILD.split(' ·')[0]})", expanded=False):
         backtest_panel(inp, tb)
 
     res = st.session_state.get("scan")

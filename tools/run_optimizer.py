@@ -33,6 +33,7 @@ if COLLECT:                                  # हर पैरामीटर �
     TFS = os.environ.get("BT_TFS_COLLECT", "1h,2h,4h,1d").split(",")
 if os.path.exists(_mode_f) and open(_mode_f).read().strip().startswith("full"):
     TFS = list(A.ALL_TFS)
+    END = pd.Timestamp.now(tz=IST).normalize() + pd.Timedelta(hours=23, minutes=59)   # आज तक (पिछले 60 दिन भी)
 CAP, RISK, ALLOC, KEEP = 25000.0, 0.5, 25.0, 80.0
 
 t0 = time.time()

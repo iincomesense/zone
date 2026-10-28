@@ -3499,13 +3499,13 @@ def _opt_pine_text(b: dict) -> str:
 
 
 def optimizer_panel(inp: PineInputs, tb: dict, cap: float, rp: float, d0, d1, alloc: float = 25.0) -> None:
-    st.markdown("**✅ बैकटेस्ट से पास नियम v20 (28-Oct-2026 · 222 स्टॉक · Jan-2024 से Oct-2026)**")
-    st.caption("Gap-open entry (बाज़ार खुलते ही भाव ज़ोन में) · उसी दिन बंद (MIS) · ATR×1.2 · leg-out ≥ 3× boring · "
-               "Power ≥ 1:3 · ऊँचा TF उल्टा न हो · ज़ोन चौड़ाई (SL दूरी) ≥ 0.4% भाव · target 1:5 — चार्ज के बाद, "
-               "₹25,000 पूँजी, 0.5% जोखिम: Jan-24→Jun-25 +₹6,359 (95 ट्रेड), Jul-25→Oct-26 +₹7,774 (78 ट्रेड), "
-               "जीत ~24%, सबसे बड़ी गिरावट ~5%। "
-               "Pivot / FVG / HTF zone-in-zone / volume — परखे, स्थिर फ़ायदा नहीं दिखा, इसलिए अनिवार्य नहीं। "
-               "चेतावनी: ट्रेड कम (~5/महीना), भविष्य की गारंटी नहीं।")
+    st.markdown("**✅ बैकटेस्ट से पास नियम v21 (28-Oct-2026 · 222 स्टॉक · Jan-2024 से Oct-2026)**")
+    st.caption("मध्यम validation (ATR×1.2 · leg-out ≥ 2.5× boring · Power ≥ 1:3 · maturity 3) + gap-open entry "
+               "(बाज़ार खुलते ही भाव ज़ोन में) + ज़ोन चौड़ाई ≥ 0.4% + leg-out volume ≥ 1.5× boring volume "
+               "(pending order का सबूत) · ऊँचा TF उल्टा न हो · उसी दिन बंद (MIS) · target 1:5। "
+               "₹25,000, 0.5% जोखिम, चार्ज के बाद: Jan-24→Jun-25 +₹6,335 (69 ट्रेड), Jul-25→Oct-26 +₹7,250 "
+               "(50 ट्रेड) · जीत ~27% · सबसे बड़ी गिरावट ~3.5%। Pivot / FVG / बड़े TF का ज़ोन / price memory — "
+               "परखे, स्थिर फ़ायदा नहीं। चेतावनी: ट्रेड कम (~4/महीना), भविष्य की गारंटी नहीं।")
     put(st, "button", "✅ ये नियम ⚙️ इनपुट में लगाएँ", on_click=_opt_apply, args=(BACKTESTED_PRESET,), key="preset_apply")
     st.divider()
     st.markdown("**🔧 Optimizer — असली डेटा पर सबसे अच्छे नियम (zone कम न हों + मुनाफ़ा)**")

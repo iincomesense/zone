@@ -39,6 +39,11 @@ try:
 except Exception:  # noqa: BLE001
     syms = list(A.FALLBACK_FNO)
 syms = list(dict.fromkeys(syms))
+CHARTS = os.path.exists(_mode_f) and open(_mode_f).read().strip().startswith("charts")
+if CHARTS:                                   # चुने हुए ट्रेड के असली चार्ट (OHLC + ज़ोन) — JSON
+    SEL = pd.read_csv(os.path.join(ROOT, "tools", "chart_trades.csv"))
+    syms = sorted(SEL["symbol"].unique())
+    TFS = sorted(SEL["tf"].unique())
 print("symbols", len(syms), flush=True)
 need = list(dict.fromkeys(TFS + ["75m", "1d", "1w", "1M"]))
 frames = A.load_frames(syms, need)
@@ -50,6 +55,65 @@ for s, fr in frames.items():
             a, b = pd.Timestamp(df.index[0]), pd.Timestamp(df.index[-1])
             c = cover.setdefault(tf, [a, b, 0])
             c[0], c[1], c[2] = min(c[0], a), max(c[1], b), c[2] + 1
+
+if CHARTS:
+    from dataclasses import replace as _rep
+    I = A.PineInputs().sanitized()
+    loose = A.opt_loose_inputs(I, True)
+    out, miss = [], 0
+    for (sym, tf), g in SEL.groupby(["symbol", "tf"]):
+        fr = frames.get(sym) or {}
+        df = fr.get(tf)
+        if df is None or len(df) < 40:
+            miss += len(g)
+            continue
+        Is = _rep(loose, commodityMode=bool(loose.commodityMode and sym.upper() in A.COMMODITY_SYMBOLS))
+        zs = A.engine(df, Is, tf, htf_daily=fr.get("1d"), return_all=True) or []
+        P = A._bt_prep(df, tf)
+        sims = []
+        for z in zs:
+            t = A._bt_sim_one(P, z, 5.0, 0, 0.0, False, START, END, long_mis=bool(P["intraday"] and z["demand"]))
+            if t:
+                sims.append((z, t))
+        idx = P["idx"]
+        for r in g.itertuples():
+            et = pd.Timestamp(r.entry_time)
+            cand = [(z, t) for z, t in sims if pd.Timestamp(t["entry_time"]) == et and bool(t["long"]) == bool(r.long)]
+            if not cand:
+                miss += 1
+                continue
+            z, t = min(cand, key=lambda zt: abs(zt[1]["entry"] - r.entry))
+            li, bc, no, pb = int(z["left_bar"]), int(z["base_count"]), int(z["leg_outs"]), int(z["created_bar"])
+            ej = int(t["ej"])
+            xj = int(idx.get_indexer([pd.Timestamp(t["exit_time"])])[0])
+            if xj < 0:
+                xj = ej
+            s1 = (max(0, li - 25), min(len(df), pb + 12))
+            s2 = (max(0, ej - 20), min(len(df), xj + 8))
+            segs = [(s1[0], s2[1])] if s2[0] <= s1[1] + 30 else [s1, s2]
+            bars, pos = [], {}
+            for a_, b_ in segs:
+                if bars:
+                    bars.append(None)                     # बीच का हिस्सा छोड़ा
+                for k in range(a_, b_):
+                    pos[k] = len(bars)
+                    bars.append([int(idx[k].value // 10 ** 6), round(float(P["o"][k]), 2), round(float(P["h"][k]), 2),
+                                 round(float(P["l"][k]), 2), round(float(P["c"][k]), 2)])
+            dist = float(z["dist"]); prox = float(z["prox"]); dem = bool(z["demand"])
+            out.append(dict(symbol=sym, tf=tf, long=dem, pattern=z.get("pattern", ""), bars=bars,
+                            li=pos.get(li), boring=[pos.get(k) for k in range(li + 1, li + 1 + bc)],
+                            legout=[pos.get(k) for k in range(li + 1 + bc, li + 1 + bc + no)],
+                            entry_i=pos.get(ej), exit_i=pos.get(xj), prox=round(prox, 2), dist=round(dist, 2),
+                            target=round(float(t["target"]), 2), entry=round(float(t["entry"]), 2), exit=round(float(t["exit"]), 2),
+                            reason=t["reason"], entry_time=str(t["entry_time"]), exit_time=str(t["exit_time"]),
+                            nR=round(float(r.nR), 2), edge=int(getattr(r, "f_edge", 0)), volratio=round(float(getattr(r, "f_volratio", 0) or 0), 2),
+                            width=round(float(r.f_zone_pct), 2), lo_ratio=round(float(r.m_lo_ratio), 2), power=round(float(r.pow_rr), 2),
+                            li_atr=round(float(r.m_in_atr), 2), lo_atr=round(float(r.m_out_atr), 2), base_tr=round(float(r.m_base_tr), 2),
+                            li_body=round(float(r.m_li_body), 2), lo_body=round(float(r.m_fo_body), 2)))
+    json.dump(dict(trades=out, missing=miss), open(os.path.join(OUT, "charts.json"), "w"), ensure_ascii=False)
+    open(os.path.join(OUT, "summary.md"), "w").write(f"# charts run · trades {len(out)} · missing {miss}\n")
+    print("charts", len(out), "missing", miss, flush=True)
+    sys.exit(0)
 
 I = A.PineInputs().sanitized()
 T = A.opt_collect(syms, frames, TFS, I, START, END,

@@ -2340,11 +2340,8 @@ def _act_at(series: Optional[pd.DataFrame], ts: pd.Timestamp) -> Tuple[bool, boo
     return bool(row["long"]), bool(row["short"])
 
 
-def opt_collect(symbols: Sequence[str], frames_all: Dict[str, Dict[str, pd.DataFrame]], tfs: Sequence[str],
-                I: PineInputs, start: pd.Timestamp, end: pd.Timestamp, use_buffer: bool = False,
-                progress=None, loose_all: bool = False) -> pd.DataFrame:
-    """ढीले नियमों से सारे ज़ोन + हर (rr, maturity, BE) का ट्रेड — एक बड़ी तालिका।
-    loose_all = हर नियम बहुत ढीला (हर पैरामीटर को बाद में अलग-अलग परखने के लिए)"""
+def opt_loose_inputs(I: PineInputs, loose_all: bool = False) -> PineInputs:
+    """Optimizer/collect के ढीले नियम (चार्ट बनाते समय भी यही)।"""
     loose = replace(I.sanitized(), scanBars=10 ** 7, maxStored=10 ** 7,
                     legInAtrMult=min(OPT_GRID["atr"]), legOutAtrMult=min(OPT_GRID["atr"]),
                     filledMinBody=min(OPT_GRID["body"]), legInToBaseSizeMult=min(OPT_GRID["li"]),
@@ -2353,6 +2350,15 @@ def opt_collect(symbols: Sequence[str], frames_all: Dict[str, Dict[str, pd.DataF
         loose = replace(loose, filledMinBody=0.4, legInAtrMult=0.8, legOutAtrMult=0.8, boringAtrMult=1.3,
                         legInToBaseSizeMult=1.0, legOutToBaseSizeMult=1.5, legOutEachMinBody=0.3, powerMinRR=1.5,
                         useCBLI=False, useWhiteArea=False, useFormation=False)
+    return loose
+
+
+def opt_collect(symbols: Sequence[str], frames_all: Dict[str, Dict[str, pd.DataFrame]], tfs: Sequence[str],
+                I: PineInputs, start: pd.Timestamp, end: pd.Timestamp, use_buffer: bool = False,
+                progress=None, loose_all: bool = False) -> pd.DataFrame:
+    """ढीले नियमों से सारे ज़ोन + हर (rr, maturity, BE) का ट्रेड — एक बड़ी तालिका।
+    loose_all = हर नियम बहुत ढीला (हर पैरामीटर को बाद में अलग-अलग परखने के लिए)"""
+    loose = opt_loose_inputs(I, loose_all)
     rows = []
     syms = [s for s in symbols if s in frames_all]
     for i, sym in enumerate(syms):

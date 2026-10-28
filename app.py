@@ -2739,7 +2739,110 @@ def opt_pick(R: pd.DataFrame, top: int = 15) -> Optional[dict]:
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v27 FINAL · v26 नियम ही default · TF 2h·4h·1d · 2026-10-28"
+# ═══════════════════════════════════════════════════════════════════════
+#  भाग 3d · तुरंत बैकटेस्ट — इनपुट बदलते ही ज़ोन संख्या और जीत %
+#   data/bt_zones.csv.gz = 222 F&O स्टॉक, 1h–1d, Jan-2024 से Oct-2026, बहुत ढीले नियमों से बने
+#   हर ज़ोन के नाप (body, ATR, 1-2-4, power…) और उसका नतीजा (1:2.5, 1:3, 1:5) — चार्ज के बाद
+# ═══════════════════════════════════════════════════════════════════════
+QBT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "bt_zones.csv.gz")
+QBT_SPLIT_MS = int(pd.Timestamp("2025-07-01", tz=IST).value // 10 ** 6)
+QBT_FLOOR = dict(filledMinBody=0.4, legInAtrMult=0.8, legOutAtrMult=0.8, legInToBaseSizeMult=1.0,
+                 legOutToBaseSizeMult=1.5, powerMinRR=1.5, legOutEachMinBody=0.3)
+QBT_CEIL = dict(boringAtrMult=1.3)
+
+
+def qbt_load() -> Optional[pd.DataFrame]:
+    try:
+        return pd.read_csv(QBT_FILE)
+    except Exception:                                          # noqa: BLE001
+        return None
+
+
+def _qbt_rr_col(rr: float) -> str:
+    return min((("25", 2.5), ("3", 3.0), ("5", 5.0)), key=lambda t: abs(t[1] - rr))[0]
+
+
+def qbt_run(Z: pd.DataFrame, I: "PineInputs", tfs: Sequence[str], entry: Optional[str] = None) -> Tuple[pd.DataFrame, dict]:
+    """इनपुट के हिसाब से ज़ोन छानो → हर TF की गिनती, जीत %, ₹ (आधी T1, आधी T2)।"""
+    m = np.ones(len(Z), dtype=bool)
+    g = lambda c: Z[c].to_numpy()
+    m &= (g("m_li_body") >= I.filledMinBody - 1e-9) & (g("m_fo_body") >= I.filledMinBody - 1e-9)
+    m &= (g("m_in_atr") >= I.legInAtrMult - 1e-9) & (g("m_out_atr") >= I.legOutAtrMult - 1e-9)
+    m &= g("m_base_tr") <= I.boringAtrMult + 1e-9
+    m &= (g("m_li_ratio") >= I.legInToBaseSizeMult - 1e-9) & (g("m_lo_ratio") >= I.legOutToBaseSizeMult - 1e-9)
+    m &= g("m_lo_minbody") >= I.legOutEachMinBody - 1e-9
+    m &= (g("f_basebars") >= I.minBaseCountInput) & (g("f_basebars") <= I.maxBaseCountInput)
+    m &= g("f_nout") <= I.maxLegOut
+    if not I.allowTwoLegOut:
+        m &= g("f_nout") != 2
+    if I.corePower:
+        m &= g("pow_rr") >= I.powerMinRR - 1e-9
+    if I.coreOpposite:
+        m &= g("m_room") >= I.oppositeRR - 1e-9
+    if I.useWhiteArea:
+        m &= g("m_white") == 1
+    if I.whiteWick:
+        m &= g("m_white_wick") == 1
+    if I.useFormation:
+        m &= (g("m_form_range") == 1) if I.formationRange else (g("m_form_dev") <= I.formationTolAtr + 1e-9)
+    if I.useCBLI:
+        m &= g("m_cbli") <= I.cbliMaxPct + 1e-9
+    if I.legInMaxCloseWick < 1.0:
+        m &= g("m_li_closewick") <= I.legInMaxCloseWick + 1e-9
+    if I.legInBodyVsBase > 0:
+        m &= g("m_li_body_base") >= I.legInBodyVsBase - 1e-9
+    if I.legOutBodyVsLegIn > 0:
+        m &= g("m_lo_li_body") >= I.legOutBodyVsLegIn - 1e-9
+    if I.strict:
+        m &= g("f_notes") >= 5
+    if I.minRiskPct > 0:
+        m &= g("f_zone_pct") >= I.minRiskPct - 1e-9
+    if I.minVolRatio > 0:
+        vr = g("f_volratio")
+        m &= ~(np.isfinite(vr) & (vr < I.minVolRatio))
+    if I.minEdge > 0:
+        m &= (g("f_edge") >= I.minEdge) & (g("f_bz") == 0)
+    if I.coreMTF != MTF_CORE_MODES[0]:
+        m &= g("notag") == 1
+    if I.useMaturity and I.maturityBars > 0:
+        m &= g("away") >= I.maturityBars
+    if not I.showSupply:
+        m &= g("long") == 1
+    ent = entry or I.entryApproach
+    if ent == "gap":
+        m &= g("gap_entry") == 1
+    elif ent == "clean":
+        m &= g("cov_before") == 0
+    m &= Z["tf"].isin(list(tfs)).to_numpy()
+    d = Z[m].copy()
+    a, b = _qbt_rr_col(I.targetRR), _qbt_rr_col(I.target2RR)
+    d["R"] = 0.5 * (d["nR" + a] + d["nR" + b]) if a != b else d["nR" + a]
+    d["res"] = d["rc" + b]
+    d["day"] = (d["et"] // 86400000).astype("int64")
+    d = d.sort_values("tf").drop_duplicates(["symbol", "day", "long"])     # एक स्टॉक-दिन-दिशा = एक ट्रेड
+    per_R = float(I.accountCapital) * float(I.riskPct) / 100.0
+    rows = []
+    order = [t for t in ALL_TFS if t in set(d["tf"]) or t in tfs]
+    for tf in order + ["कुल"]:
+        x = d if tf == "कुल" else d[d["tf"] == tf]
+        if tf != "कुल" and tf not in Z["tf"].unique():
+            rows.append({"TF": tf, "ट्रेड": None, "टिप्पणी": "इस TF का लंबा डेटा नहीं (Yahoo)"})
+            continue
+        n = len(x)
+        isx, oos = x[x["et"] < QBT_SPLIT_MS], x[x["et"] >= QBT_SPLIT_MS]
+        rows.append({"TF": tf, "ट्रेड": n, "Target": int((x["res"] == "T").sum()), "SL": int((x["res"] == "S").sum()),
+                     "दिन-अंत": int((x["res"] == "O").sum()),
+                     "जीत %": round(float((x["R"] > 0).mean() * 100), 1) if n else 0.0,
+                     "₹ कुल": round(float(x["R"].sum() * per_R)),
+                     "₹ Jan-24→Jun-25": round(float(isx["R"].sum() * per_R)),
+                     "₹ Jul-25→Oct-26": round(float(oos["R"].sum() * per_R)),
+                     "ट्रेड/माह": round(n / 34.0, 1)})
+    tot = rows[-1]
+    floor = [k for k, v in QBT_FLOOR.items() if getattr(I, k) < v - 1e-9] + [k for k, v in QBT_CEIL.items() if getattr(I, k) > v + 1e-9]
+    return pd.DataFrame(rows), dict(total=tot, floor=floor, per_R=per_R)
+
+
+APP_BUILD = "v28 · इनपुट बदलते ही बैकटेस्ट तालिका · 2026-10-28"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -3808,6 +3911,36 @@ def main():
         st.code(traceback.format_exc(), language="text")
 
 
+def qbt_panel(inp: "PineInputs", tfs: Sequence[str]) -> None:
+    """⚙️ इनपुट के ठीक नीचे: अभी की सेटिंग पर ज़ोन संख्या और जीत % (बदलते ही नया)।"""
+    Z = _qbt_cached()
+    with st.expander("📊 इन सेटिंग पर बैकटेस्ट — ज़ोन संख्या और जीत % (इनपुट बदलते ही बदलता है)", expanded=True):
+        if Z is None:
+            st.info("बैकटेस्ट डेटा (data/bt_zones.csv.gz) नहीं मिला।")
+            return
+        tfs_ok = [t for t in tfs if t in set(Z["tf"])] or ["2h", "4h", "1d"]
+        df, meta = qbt_run(Z, inp, tfs_ok)
+        other = "any" if inp.entryApproach == "gap" else "gap"
+        df2, meta2 = qbt_run(Z, inp, tfs_ok, entry=other)
+        t, t2 = meta["total"], meta2["total"]
+        name = {"gap": "gap-open", "any": "सामान्य limit", "clean": "clean"}
+        st.markdown(f"**अभी की सेटिंग ({name.get(inp.entryApproach, inp.entryApproach)} entry):** {t.get('ट्रेड', 0)} ट्रेड · "
+                    f"जीत {t.get('जीत %', 0)}% · कुल ₹{t.get('₹ कुल', 0):,} &nbsp;|&nbsp; "
+                    f"यही नियम {name[other]} entry पर: {t2.get('ट्रेड', 0)} ट्रेड · जीत {t2.get('जीत %', 0)}% · ₹{t2.get('₹ कुल', 0):,}")
+        stretch(st.dataframe, df.convert_dtypes(), hide_index=True)
+        st.caption(f"222 F&O स्टॉक · Jan-2024 से Oct-2026 · पूँजी ₹{inp.accountCapital:,.0f}, जोखिम {inp.riskPct:g}% (1R = ₹{meta['per_R']:,.0f}) · "
+                   f"आधी मात्रा T1 1:{inp.targetRR:g}, आधी T2 1:{inp.target2RR:g} (डेटा में 1:2.5, 1:3, 1:5 हैं; बाक़ी पास वाले पर) · "
+                   "चार्ज के बाद · MIS · एक स्टॉक-दिन-दिशा = एक ट्रेड · सिर्फ़ 1h, 2h, 4h, 6h, 1d (छोटे TF का Yahoo डेटा 60 दिन)। "
+                   "'बड़ा TF in favour' को 'उल्टा नहीं' जैसा गिना है।")
+        if meta["floor"]:
+            st.warning("ये इनपुट डेटा बनाने वाले नियमों से भी ढीले हैं, इसलिए उन पर असली गिनती इससे ज़्यादा होगी: " + ", ".join(meta["floor"]))
+
+
+@st.cache_data(show_spinner=False)
+def _qbt_cached():
+    return qbt_load()
+
+
 def _main():
     st.caption(f"build {APP_BUILD} · streamlit {st.__version__}")
     css()
@@ -3817,6 +3950,10 @@ def _main():
     tb = top_bar()
     ctrl = cols([.01, .85, .7, .7, 4.9])
     inp, uo = pine_panel(None)          # ⚙️ इनपुट पूरी चौड़ाई में (tablet पर साफ़ दिखे)
+    try:
+        qbt_panel(inp, tb["tfs"])
+    except Exception as e:                                     # noqa: BLE001
+        st.caption(f"तुरंत बैकटेस्ट नहीं चला: {e}")
 
     # ── स्कैन ────────────────────────────────────────────────────────────
     if tb["go"]:

@@ -10,6 +10,11 @@ with sync_playwright() as p:
         pg.wait_for_timeout(8000)
         pg.screenshot(path=f"shots/{nm}_top.png", full_page=False)
         try:
+            q = pg.locator('div[data-testid="stExpander"]').nth(1)
+            q.screenshot(path=f"shots/{nm}_qbt.png")
+        except Exception as e:  # noqa: BLE001
+            open(f"shots/{nm}_qbt_err.txt", "w").write(repr(e))
+        try:
             pg.get_by_text("⚙️ इनपुट").first.click()
             pg.wait_for_timeout(2500)
             exp = pg.locator('div[data-testid="stExpander"]').first

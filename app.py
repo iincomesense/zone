@@ -721,9 +721,9 @@ class PineInputs:
     # ---- 0 · Capital, risk, buffer (SETS) ----
     accountCapital: float = 25000.0
     riskPct: float = 0.5
-    targetRR: float = 3.0
-    hourlyRR: float = 3.0
-    monthlyRR: float = 3.0
+    targetRR: float = 2.5
+    hourlyRR: float = 2.5
+    monthlyRR: float = 2.5
     target2RR: float = 5.0
     halfQty3: bool = True
     maxAllocPct: float = 25.0       # एक ट्रेड में पूँजी का अधिकतम % (4 live ट्रेड)
@@ -738,13 +738,13 @@ class PineInputs:
     strict: bool = False
     atrPeriod: int = 14
     filledMinBody: float = 0.60
-    legInAtrMult: float = 1.2
+    legInAtrMult: float = 1.0
     legOutAtrMult: float = 1.2
-    boringAtrMult: float = 1.0
+    boringAtrMult: float = 0.7
     minBaseCountInput: int = 1
     maxBaseCountInput: int = 3
     legInToBaseSizeMult: float = 1.5
-    legOutToBaseSizeMult: float = 2.5
+    legOutToBaseSizeMult: float = 2.0
     legOutEachMinBody: float = 0.50
     maxLegOut: int = 3
     allowTwoLegOut: bool = True
@@ -753,44 +753,44 @@ class PineInputs:
     cbliMode: str = "Covers >50% (notes)"
     cbliMaxPct: float = 0.50
     useFormation: bool = True
-    formationTolAtr: float = 0.10
+    formationTolAtr: float = 0.0
     formationRange: bool = False     # True = leg-out की open leg-in की पूरी range (high–low) के अंदर हो · बैकटेस्ट: बेहतर
     proxMode: str = "Boring wick (wick-to-wick)"
     distalMode: str = "Pattern lowest/highest (course)"
     # ---- 1A · MANDATORY: Power of leg-out ----
     corePower: bool = True
     powerMode: str = "All leg-outs (max 3)"
-    powerMinRR: float = 3.0
+    powerMinRR: float = 2.5
     powerBestRR: float = 5.0
     powerOnBody: bool = True
     # ---- 1B · Flexible rules (score) ----
     useWhiteArea: bool = True
     coreFresh: bool = True
     coreOpposite: bool = True
-    oppositeRR: float = 5.0
+    oppositeRR: float = 3.0
     corePlayground: bool = False
     playRR: float = 10.0
     oppUseMTF: bool = True
-    coreMTF: str = "Off (score only)"
+    coreMTF: str = "Higher-TF not against"
     showSupply: bool = True
     breakEvenRR: float = 0.0
-    minRiskPct: float = 0.0
-    minVolRatio: float = 0.0
-    minEdge: int = 0              # Edge score /9 कम से कम (0 = बंद) · BZ ज़ोन हटते हैं      # leg-out का औसत volume ÷ boring का औसत volume (pending order का सबूत) · 0 = बंद
-    demandIntradayMIS: bool = False
+    minRiskPct: float = 0.4
+    minVolRatio: float = 1.5
+    minEdge: int = 4              # Edge score /9 कम से कम (0 = बंद) · BZ ज़ोन हटते हैं      # leg-out का औसत volume ÷ boring का औसत volume (pending order का सबूत) · 0 = बंद
+    demandIntradayMIS: bool = True
     curveMode: str = "off"
     htfZoneReq: bool = False
     supplyIntradayOnly: bool = False
-    entryApproach: str = "any"     # any · clean · gap (सिर्फ़ session खुलते ही ज़ोन में gap)
+    entryApproach: str = "gap"     # any · clean · gap (सिर्फ़ session खुलते ही ज़ोन में gap)
     # ---- 2 · Note rules (grading; mandatory in Strict) ----
     legInMaxWick: float = 0.20
-    legInMaxCloseWick: float = 1.0   # leg-in की closing wick ÷ range ≤ (1 = बंद) · बैकटेस्ट: 0.3
+    legInMaxCloseWick: float = 0.3   # leg-in की closing wick ÷ range ≤ (1 = बंद) · बैकटेस्ट: 0.3
     legOutMinBody: float = 0.65
     gapTolAtr: float = 0.10
     legOutTooLong: float = 4.0
-    legInBodyVsBase: float = 0.0     # leg-in की body ≥ boring range (high–low) × (0 = बंद) · आपका नियम: 1.5
-    legOutBodyVsLegIn: float = 0.0   # पहली leg-out की body ≥ leg-in body × (0 = बंद) · आपका नियम: 1.5
-    whiteWick: bool = False          # leg-out की wick boring की पूरी range न ढके (Demand: leg-out low > boring low)
+    legInBodyVsBase: float = 1.5     # leg-in की body ≥ boring range (high–low) × (0 = बंद) · आपका नियम: 1.5
+    legOutBodyVsLegIn: float = 1.0   # पहली leg-out की body ≥ leg-in body × (0 = बंद) · आपका नियम: 1.5
+    whiteWick: bool = True          # leg-out की wick boring की पूरी range न ढके (Demand: leg-out low > boring low)
     useCoveredLegOut: bool = True
     coverPct: float = 0.50
     coverBars: int = 1              # covered leg-out सिर्फ़ ज़ोन बनने के बाद की इतनी candles में जाँचें
@@ -2397,6 +2397,9 @@ COLLECT_VARIANTS = [
 
 def opt_loose_inputs(I: PineInputs, loose_all: bool = False) -> PineInputs:
     """Optimizer/collect के ढीले नियम (चार्ट बनाते समय भी यही)।"""
+    I = replace(I, legInBodyVsBase=0.0, legOutBodyVsLegIn=0.0, whiteWick=False, legInMaxCloseWick=1.0, minRiskPct=0.0,
+                minVolRatio=0.0, minEdge=0, entryApproach="any", coreMTF=MTF_CORE_MODES[0], boringAtrMult=max(I.boringAtrMult, 1.0),
+                formationTolAtr=0.10, powerMinRR=min(I.powerMinRR, 2.0), oppositeRR=5.0)
     loose = replace(I.sanitized(), scanBars=10 ** 7, maxStored=10 ** 7,
                     legInAtrMult=min(OPT_GRID["atr"]), legOutAtrMult=min(OPT_GRID["atr"]),
                     filledMinBody=min(OPT_GRID["body"]), legInToBaseSizeMult=min(OPT_GRID["li"]),
@@ -2736,7 +2739,7 @@ def opt_pick(R: pd.DataFrame, top: int = 15) -> Optional[dict]:
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v26 · आपके नियम: leg-in body ≥1.5× boring · leg-out ≥ leg-in · white area wick · 15:15 candle ठीक · 2026-10-28"
+APP_BUILD = "v27 FINAL · v26 नियम ही default · TF 2h·4h·1d · 2026-10-28"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -2932,7 +2935,7 @@ def preset_loose():
 def top_bar():
     c = cols([1.5, 2.0, .8, .85, 1.05, 1.15, .95])
     uni = c[0].selectbox("यूनिवर्स", UNIVERSES, key="in_uni", label_visibility="collapsed")
-    tfs = c[1].multiselect("TF", list(ALL_TFS), default=list(ALL_TFS),
+    tfs = c[1].multiselect("TF", list(ALL_TFS), default=["2h", "4h", "1d"],
                            key="in_tfs", label_visibility="collapsed")
     side = c[2].selectbox("पक्ष", ["All", "Demand", "Supply"], key="in_side",
                           label_visibility="collapsed")

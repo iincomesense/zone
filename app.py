@@ -763,6 +763,9 @@ class PineInputs:
     breakEvenRR: float = 0.0
     minRiskPct: float = 0.0
     demandIntradayMIS: bool = False
+    curveMode: str = "off"
+    htfZoneReq: bool = False
+    supplyIntradayOnly: bool = False
     # ---- 2 · Note rules (grading; mandatory in Strict) ----
     legInMaxWick: float = 0.20
     legOutMinBody: float = 0.65
@@ -923,14 +926,14 @@ class _S:
         try:
             if idx.tz is not None:
                 wall_idx = idx.tz_convert(IST).tz_localize(None)
-                self.t = idx.asi8 // 1_000_000
+                self.t = idx.as_unit("ns").asi8 // 1_000_000
             else:
                 wall_idx = idx
-                self.t = (idx.asi8 - 19800 * 10 ** 9) // 1_000_000   # naive = IST मानें
+                self.t = (idx.as_unit("ns").asi8 - 19800 * 10 ** 9) // 1_000_000   # naive = IST मानें
         except Exception:                                      # noqa: BLE001
             wall_idx = idx
-            self.t = idx.asi8 // 1_000_000
-        wall = wall_idx.asi8
+            self.t = idx.as_unit("ns").asi8 // 1_000_000
+        wall = pd.DatetimeIndex(wall_idx).as_unit("ns").asi8
         day_id = wall // 86_400_000_000_000
         self.dow = ((day_id + 3) % 7).astype("int64")          # 0 = Mon … 4 = Fri
         self.tod = ((wall // 60_000_000_000) % 1440).astype("int64")
@@ -969,7 +972,7 @@ class _S:
                 didx = pd.DatetimeIndex(daily.index)
                 if didx.tz is not None:
                     didx = didx.tz_convert(IST).tz_localize(None)
-                dday = didx.asi8 // 86_400_000_000_000
+                dday = didx.as_unit("ns").asi8 // 86_400_000_000_000
                 pos = np.searchsorted(dday, self.day_id, side="left") - 1   # पिछला पूरा दिन
                 ok = pos >= 0
                 self.datr[ok] = datr[pos[ok]]
@@ -1418,6 +1421,8 @@ def engine(df: pd.DataFrame, I: PineInputs, tf: str, htf_daily: Optional[pd.Data
                 if z["state"] == STATE_BROKEN and z["broken_at"] is None:
                     z["broken_at"] = p
                 if z["state"] not in ALIVE_STATES:
+                    z["dead_bar"] = p
+                    z["dead_time"] = int(S.t[p])
                     alive.remove(z)
 
         if h_brk is not None and p - h_brk > I.maxBaseCount + I.maxLegOut:
@@ -1597,7 +1602,7 @@ def eod_band(df: Optional[pd.DataFrame], tf: str, atr_period: int = 14) -> Optio
 # ---------------------------------------------------------------------------
 _EMPTY_SNAP = {"demand": None, "supply": None, "demand_time": 0, "supply_time": 0}
 _ZCACHE: Dict[tuple, tuple] = {}
-_ZVER = "z14"           # इंजन बदले तो बढ़ाएँ — पुराना कैश अपने आप बेकार
+_ZVER = "z15"           # इंजन बदले तो बढ़ाएँ — पुराना कैश अपने आप बेकार
 
 
 def _inputs_hash(I: PineInputs) -> str:
@@ -1676,6 +1681,7 @@ def scan_symbol(symbol: str,
     def drop(key: str):
         rej[key] = rej.get(key, 0) + 1
 
+    curves = {tf: curve_series(frames, tf) for tf in tfs}
     # ---- Future चार्ट के ज़ोन (Dhan) → उसी TF, उसी दिन, उसी तरफ़ = C+F ----
     fut_days: Dict[str, set] = {}
     for tf in tfs:
@@ -1746,6 +1752,20 @@ def scan_symbol(symbol: str,
                 continue
             if not I.showSupply and not dem:
                 continue
+            if I.supplyIntradayOnly and not dem and TF_SECONDS.get(tf, 0) >= 86400:
+                continue
+            lv = loc_at(curves.get(tf), pd.Timestamp.now(tz=IST), z["prox"])
+            z["loc"] = lv
+            if I.curveMode != "off" and not curve_ok(I.curveMode, dem, lv):
+                drop("Curve: location ठीक नहीं")
+                continue
+            hz = per_tf.get(trend_tf(tf)) or []
+            top_, bot_ = max(z["prox"], z["dist"]), min(z["prox"], z["dist"])
+            z["htf_conf"] = trend_tf(tf) != tf and any(
+                h["demand"] == dem and min(h["prox"], h["dist"]) <= top_ and max(h["prox"], h["dist"]) >= bot_ for h in hz)
+            if I.htfZoneReq and not z["htf_conf"]:
+                drop("HTF ज़ोन साथ नहीं")
+                continue
             if I.minRiskPct > 0 and z["prox"] and abs(z["prox"] - z["dist"]) / z["prox"] * 100.0 < I.minRiskPct:
                 continue
             if I.filterAction and not act_ok:
@@ -1753,7 +1773,8 @@ def scan_symbol(symbol: str,
             if I.filterWholesale and not ws_ok:
                 continue
             z["cf"] = (dem, datetime.fromtimestamp(z["time"] / 1000, IST).date()) in fut_days.get(tf, set())
-            extra_tags = [t for t, on in (("WS", ws_ok), ("C+F", z["cf"]),
+            extra_tags = [t for t, on in (("WS", ws_ok), ("C+F", z["cf"]), ("HTF", z["htf_conf"]),
+                                          ("Discount" if dem else "Premium", curve_ok("half", dem, z["loc"])),
                                           ("6C✗ exit", z.get("six") == -1 and z["state"] == STATE_TRIG)) if on]
             z["tags"] = " ".join([t for t in [z.get("tags", "")] + extra_tags if t])
             z["dist_pct"] = abs(z["prox"] - px) / px * 100.0 if px else None
@@ -1921,7 +1942,7 @@ def _bt_zone_trades(df: pd.DataFrame, zones: List[dict], tf: str, symbol: str, I
         if t is None:
             continue
         t.update(symbol=symbol, tf=tf, pattern=z["pattern"], score=int(z.get("score_base", 0)),
-                 tags=z.get("tags", ""))
+                 tags=z.get("tags", ""), ztop=max(z["prox"], z["dist"]), zbot=min(z["prox"], z["dist"]))
         out.append(t)
     return out
 
@@ -2016,9 +2037,17 @@ def bt_collect(symbols: Sequence[str], frames_all: Dict[str, Dict[str, pd.DataFr
                 zs = [z for z in zs if z["demand"]]
             if Is.minRiskPct > 0:
                 zs = [z for z in zs if z["prox"] and abs(z["prox"] - z["dist"]) / z["prox"] * 100.0 >= Is.minRiskPct]
+            if Is.supplyIntradayOnly and TF_SECONDS.get(tf, 0) >= 86400:
+                zs = [z for z in zs if z["demand"]]
+            cs = curve_series(fr, tf) if Is.curveMode != "off" else None
+            spans = htf_zone_spans(fr, tf, Is) if Is.htfZoneReq else None
             for rr in rrs:
-                out[rr].extend(_bt_zone_trades(df, zs, tf, sym, Is, rr, use_buffer, start, end,
-                                               be_rr=Is.breakEvenRR))
+                tl = _bt_zone_trades(df, zs, tf, sym, Is, rr, use_buffer, start, end, be_rr=Is.breakEvenRR)
+                if Is.curveMode != "off":
+                    tl = [t for t in tl if curve_ok(Is.curveMode, t["long"], loc_at(cs, t["entry_time"], t["entry"]))]
+                if Is.htfZoneReq:
+                    tl = [t for t in tl if htf_conf(spans, t["long"], t["ztop"], t["zbot"], t["entry_time"])]
+                out[rr].extend(tl)
         if progress:
             progress((i + 1) / max(1, len(syms)), sym)
     def _ist(ts):
@@ -2038,6 +2067,83 @@ def bt_collect(symbols: Sequence[str], frames_all: Dict[str, Dict[str, pd.DataFr
     return out, pd.DataFrame(rows)
 
 
+
+# ═══════════════════════════════════════════════════════════════════════
+#  भाग 3d · INSTITUTIONAL फ़िल्टर — Location (Curve) और Zone-in-Zone
+#   • Curve: ट्रेंड TF (25×) की पिछली 50 candles का दायरा; DZ निचले हिस्से
+#     (discount) में, SZ ऊपरी हिस्से (premium) में — बिना भविष्य देखे
+#   • HTF: छोटा ज़ोन, ट्रेंड TF के जीवित (Fresh/Tested) उसी तरफ़ के ज़ोन से टकराता हो
+# ═══════════════════════════════════════════════════════════════════════
+CURVE_LEN = 50
+CURVE_MODES = {"off": None, "half": 0.5, "third": 1.0 / 3.0}
+CURVE_LABEL = {"off": "बंद", "half": "आधे में (DZ नीचे 50%, SZ ऊपर 50%)",
+               "third": "तिहाई में (DZ नीचे 33%, SZ ऊपर 33%)"}
+
+
+def curve_series(frames: Dict[str, pd.DataFrame], tf: str) -> Optional[pd.DataFrame]:
+    df = frames.get(trend_tf(tf))
+    if df is None or len(df) < CURVE_LEN + 2:
+        return None
+    hh = df["high"].astype("float64").rolling(CURVE_LEN).max().shift(1)
+    ll = df["low"].astype("float64").rolling(CURVE_LEN).min().shift(1)
+    out = pd.DataFrame({"hh": hh, "ll": ll}).dropna()
+    ix = pd.DatetimeIndex(out.index)
+    out.index = ix.tz_localize(IST) if ix.tz is None else ix.tz_convert(IST)
+    return out
+
+
+def loc_at(series: Optional[pd.DataFrame], ts: pd.Timestamp, price: float) -> float:
+    """0 = दायरे का निचला सिरा, 1 = ऊपरी सिरा; पता न हो तो nan।"""
+    if series is None or series.empty:
+        return float("nan")
+    pos = series.index.searchsorted(ts, side="right") - 1
+    if pos < 0:
+        return float("nan")
+    hh, ll = series["hh"].iat[pos], series["ll"].iat[pos]
+    if not (hh > ll):
+        return float("nan")
+    return float(min(1.0, max(0.0, (price - ll) / (hh - ll))))
+
+
+def curve_ok(mode: str, demand: bool, loc: float) -> bool:
+    lim = CURVE_MODES.get(mode)
+    if lim is None:
+        return True
+    if not np.isfinite(loc):
+        return False
+    return loc <= lim if demand else loc >= 1.0 - lim
+
+
+def htf_zone_spans(frames: Dict[str, pd.DataFrame], tf: str, I: PineInputs) -> Optional[dict]:
+    """ट्रेंड TF के सभी ज़ोन: कब से (candle पूरी होने पर) कब तक जीवित, कहाँ।"""
+    htf = trend_tf(tf)
+    df = frames.get(htf)
+    if df is None or len(df) < 40 or htf == tf:
+        return None
+    try:
+        zs = engine(df, replace(I.sanitized(), scanBars=10 ** 7, maxStored=10 ** 7), htf,
+                    htf_daily=frames.get("1d"), return_all=True)
+    except Exception:                                          # noqa: BLE001
+        return None
+    if not zs:
+        return None
+    sec = TF_SECONDS.get(htf, 0) * 1000
+    return dict(dem=np.array([z["demand"] for z in zs]),
+                top=np.array([max(z["prox"], z["dist"]) for z in zs]),
+                bot=np.array([min(z["prox"], z["dist"]) for z in zs]),
+                t0=np.array([z["time"] + sec for z in zs], dtype="int64"),
+                t1=np.array([z.get("dead_time") or 2 ** 62 for z in zs], dtype="int64"))
+
+
+def htf_conf(spans: Optional[dict], demand: bool, top: float, bot: float, ts: pd.Timestamp) -> bool:
+    if spans is None:
+        return False
+    ms = ts.value // 1_000_000
+    m = ((spans["dem"] == demand) & (spans["t0"] <= ms) & (ms < spans["t1"])
+         & (spans["bot"] <= top) & (spans["top"] >= bot))
+    return bool(m.any())
+
+
 # ═══════════════════════════════════════════════════════════════════════
 #  भाग 3c · OPTIMIZER — असली डेटा पर नियमों के हज़ारों संयोजन
 #   • एक बार ढीले नियमों से इंजन चलता है, हर ज़ोन के आँकड़े रखे जाते हैं
@@ -2048,20 +2154,22 @@ def bt_collect(symbols: Sequence[str], frames_all: Dict[str, Dict[str, pd.DataFr
 OPT_GRID = dict(
     atr=[1.0, 1.2],                 # leg-in और leg-out: TR ≥ ATR ×
     body=[0.5, 0.6],                # filled candle body ≥
-    li=[1.5, 2.0],                  # 1-2-4: leg-in ≥ boring ×
+    li=[1.5],                       # 1-2-4: leg-in ≥ boring ×
     lo=[2.0, 2.5, 3.0],             # 1-2-4: leg-out (body) ≥ boring ×
     power=[2.0, 3.0],               # power of leg-out ≥ 1:x
     maturity=[0, 3],                # candles
     score=[0],                      # (score 7 पिछले रन में कभी नहीं चुना गया)
     trend=["off", "not_against", "in_favour"],
-    side=["both", "demand"],
+    side=["both", "demand", "dem_intra_sup"],   # dem_intra_sup = Demand सब + Supply सिर्फ़ intraday TF
     be=[0.0, 2.0],                  # 1:2 पर SL entry पर
-    minrisk=[0.0, 0.5, 1.0],        # SL की दूरी भाव का कम से कम % (पतले ज़ोन में चार्ज R खा जाते हैं)
+    minrisk=[0.0, 0.5],             # SL की दूरी भाव का कम से कम % (पतले ज़ोन में चार्ज R खा जाते हैं)
     dmode=["CNC", "MIS"],           # intraday TF पर Demand: CNC (कई दिन) या MIS (उसी दिन, कम चार्ज)
+    loc=["off", "half", "third"],   # Curve: DZ discount में / SZ premium में
+    htf=["off", "on"],              # Zone-in-zone: ट्रेंड TF का जीवित ज़ोन साथ हो
     rr=[3.0, 5.0],
 )
 OPT_BASE = dict(atr=1.2, body=0.6, li=1.5, lo=2.5, power=3.0, maturity=3, score=0, trend="off",
-                side="both", be=0.0, minrisk=0.0, dmode="CNC")
+                side="both", be=0.0, minrisk=0.0, dmode="CNC", loc="off", htf="off")
 TREND_TO_CORE = {"off": "Off (score only)", "not_against": "Higher-TF not against",
                  "in_favour": "Higher-TF in favour (strict)"}
 
@@ -2136,6 +2244,8 @@ def opt_collect(symbols: Sequence[str], frames_all: Dict[str, Dict[str, pd.DataF
             P = _bt_prep(df, tf)
             act = htf_action_series(fr, tf, Is)
             intra = P["intraday"]
+            cs = curve_series(fr, tf)
+            spans = htf_zone_spans(fr, tf, I)
             for zid, z in enumerate(zs):
                 if z.get("room_tf") is not None and z["room_tf"] < Is.oppositeRR:
                     continue                                   # आपका अनिवार्य opposite-zone नियम
@@ -2153,7 +2263,11 @@ def opt_collect(symbols: Sequence[str], frames_all: Dict[str, Dict[str, pd.DataF
                             if t is None:
                                 continue
                             al, ash = _act_at(act, t["entry_time"])
-                            rows.append(dict(base, rr=rr, maturity=mat, be=be, dmode=dm,
+                            lv = loc_at(cs, t["entry_time"], t["entry"])
+                            hc = htf_conf(spans, bool(z["demand"]), max(z["prox"], z["dist"]),
+                                          min(z["prox"], z["dist"]), t["entry_time"])
+                            rows.append(dict(base, rr=rr, maturity=mat, be=be, dmode=dm, loc=lv, htf_conf=hc,
+                                             intra=intra,
                                              entry_time=t["entry_time"], exit_time=t["exit_time"],
                                              entry=t["entry"], exit=t["exit"], risk_ps=t["risk_ps"],
                                              reason=t["reason"], act_long=al, act_short=ash))
@@ -2267,7 +2381,18 @@ def opt_run(T: pd.DataFrame, capital: float, risk_pct: float, split: pd.Timestam
     r_gross = (sell - buy) / R0
     r_cost = _charges_vec(cnc, buy, sell, xt) / R0
     r_net = r_gross - r_cost
-    keys = ["atr", "body", "li", "lo", "power", "maturity", "score", "trend", "side", "be", "minrisk", "dmode", "rr"]
+    keys = ["atr", "body", "li", "lo", "power", "maturity", "score", "trend", "side", "be", "minrisk", "dmode",
+            "loc", "htf", "rr"]
+    locv = T["loc"].to_numpy(dtype="float64")
+    hconf = T["htf_conf"].to_numpy(dtype=bool)
+    intra = T["intra"].to_numpy(dtype=bool)
+    loc_ok = {}
+    for mode, lim in CURVE_MODES.items():
+        if lim is None:
+            loc_ok[mode] = np.ones(len(T), dtype=bool)
+        else:
+            fin = np.isfinite(locv)
+            loc_ok[mode] = fin & np.where(lg, locv <= lim, locv >= 1.0 - lim)
     combos = list(itertools.product(*[OPT_GRID[k] for k in keys]))
     out = []
     A = {k: T[k].to_numpy() for k in ("m_in_atr", "m_out_atr", "m_li_body", "m_fo_body", "m_li_ratio",
@@ -2285,6 +2410,11 @@ def opt_run(T: pd.DataFrame, capital: float, risk_pct: float, split: pd.Timestam
              & (risk_pct_px >= p["minrisk"]) & ((dmode == p["dmode"]) | (dmode == "ANY")))
         if p["side"] == "demand":
             m &= lg
+        elif p["side"] == "dem_intra_sup":
+            m &= lg | intra
+        m &= loc_ok[p["loc"]]
+        if p["htf"] == "on":
+            m &= hconf
         if p["trend"] == "not_against":
             m &= ~act_against
         elif p["trend"] == "in_favour":
@@ -2354,7 +2484,7 @@ def opt_pick(R: pd.DataFrame, top: int = 15) -> Optional[dict]:
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v14 · 1h data 730d · gross/cost R · MIS option · 2026-10-28"
+APP_BUILD = "v15 · Curve location · Zone-in-zone · intraday supply · 2026-10-28"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -2616,6 +2746,13 @@ def pine_panel(slot=None):
                                     index=MTF_CORE_MODES.index(D.coreMTF), key="in_coremtf")
             f9, f10, f11, _ = st.columns(4)
             dmis = f9.checkbox("Intraday TF पर Demand भी MIS (उसी दिन बंद)", D.demandIntradayMIS, key="in_dmis")
+            f12, f13, f14, _ = st.columns(4)
+            curve = f12.selectbox("Curve (Location) — DZ discount / SZ premium", list(CURVE_MODES),
+                                  index=list(CURVE_MODES).index(D.curveMode), format_func=lambda k: CURVE_LABEL[k],
+                                  key="in_curve")
+            htfz = f13.checkbox("Zone-in-zone: ट्रेंड TF का ज़ोन साथ हो", D.htfZoneReq, key="in_htfz")
+            sup_intra = f14.checkbox("Supply सिर्फ़ intraday TF पर (MIS)", D.supplyIntradayOnly, key="in_supintra",
+                                     help="₹25k में Daily/Weekly short संभव नहीं — MIS उसी दिन बंद होता है")
             min_risk = f11.number_input("SL की दूरी भाव का कम से कम %", 0.0, 10.0, D.minRiskPct, 0.1, key="in_minrisk",
                                         help="बहुत पतले ज़ोन में चार्ज (STT आदि) मुनाफ़ा खा जाते हैं")
             show_sup = f9.checkbox("Supply ज़ोन भी दिखाएँ/ट्रेड करें", D.showSupply, key="in_showsupply")
@@ -2703,7 +2840,8 @@ def pine_panel(slot=None):
         accountCapital=float(cap), riskPct=float(risk), targetRR=float(rr), hourlyRR=float(hrr),
         target2RR=float(t2rr), legOutEachMinBody=float(lo_each), powerOnBody=bool(pow_body),
         showSupply=bool(show_sup), breakEvenRR=float(be_rr), minRiskPct=float(min_risk),
-        demandIntradayMIS=bool(dmis),
+        demandIntradayMIS=bool(dmis), curveMode=str(curve), htfZoneReq=bool(htfz),
+        supplyIntradayOnly=bool(sup_intra),
         maturityBars=int(mat_bars),
         monthlyRR=float(mrr), halfQty3=bool(half), traderType=str(ttype), bufferMode=str(bmode),
         bufAggrPct=float(b_aggr), bufDailyPct=float(b_daily), bufSwingPct=float(b_swing),
@@ -3208,6 +3346,10 @@ def _opt_apply(best: dict) -> None:
     ss["in_berr"] = float(best["be"])
     ss["in_minrisk"] = float(best.get("minrisk", 0.0))
     ss["in_dmis"] = str(best.get("dmode", "CNC")) == "MIS"
+    ss["in_curve"] = str(best.get("loc", "off"))
+    ss["in_htfz"] = str(best.get("htf", "off")) == "on"
+    ss["in_showsupply"] = str(best["side"]) != "demand"
+    ss["in_supintra"] = str(best["side"]) == "dem_intra_sup"
     ss.pop("scan", None)
 
 
@@ -3226,6 +3368,9 @@ def _opt_pine_text(b: dict) -> str:
         f"Break-even at 1: (0 = off)         = {b['be']}",
         f"Min SL distance % of price         = {b.get('minrisk', 0.0)}",
         f"Intraday TF पर Demand               = {'MIS (उसी दिन बंद)' if b.get('dmode') == 'MIS' else 'CNC (delivery)'}",
+        f"Curve (Location)                   = {CURVE_LABEL.get(str(b.get('loc', 'off')))}",
+        f"Zone-in-zone (HTF ज़ोन ज़रूरी)        = {'ON' if b.get('htf') == 'on' else 'OFF'}",
+        f"Supply सिर्फ़ intraday TF            = {'ON' if b['side'] == 'dem_intra_sup' else 'OFF'}",
         f"सबसे अच्छा target                   = 1:{b['rr']:g}",
     ])
 
@@ -3261,7 +3406,7 @@ def optimizer_panel(inp: PineInputs, tb: dict, cap: float, rp: float, d0, d1, al
     if R is None or R.empty or not best:
         st.warning("कोई ट्रेड नहीं बना — ज़्यादा स्क्रिप्ट या TF चुनें।")
         return
-    cols_show = ["atr", "body", "li", "lo", "power", "maturity", "trend", "side", "be", "minrisk", "dmode", "rr",
+    cols_show = ["atr", "body", "lo", "power", "maturity", "trend", "side", "be", "minrisk", "dmode", "loc", "htf", "rr",
                  "IS_sig", "IS_winR", "IS_grossR", "IS_costR", "IS_expR", "IS_totR",
                  "OOS_sig", "OOS_winR", "OOS_grossR", "OOS_costR", "OOS_expR", "OOS_totR",
                  "IS_trades", "IS_skipped", "IS_net", "OOS_trades", "OOS_skipped", "OOS_net", "OOS_max_dd"]

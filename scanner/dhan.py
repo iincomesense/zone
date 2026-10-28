@@ -54,6 +54,10 @@ def _underlying(row: pd.Series, trading_col: str | None,
         value = str(row.get(underlying_col, "")).strip().upper()
         if value and value not in {"NAN", "NONE"}:
             return value
+    if str(row.get("_instrument", "")).upper() == "EQUITY" and trading_col:
+        value = str(row.get(trading_col, "")).strip().upper()
+        if value and value not in {"NAN", "NONE"}:
+            return value
     for col in (custom_col, trading_col):
         if not col:
             continue
@@ -106,15 +110,24 @@ def build_security_map(master: pd.DataFrame, symbols: list[str] | tuple[str, ...
             matches = frame[frame[trade_col].astype(str).str.upper() == symbol]
         # Equity contracts: NSE_EQ + EQUITY (or segment NSE_EQ when instrument
         # descriptions are absent).
-        eq = matches[
-            matches["_segment"].str.contains("NSE_EQ|EQ", na=False)
-            & ~matches["_instrument"].str.contains("FUT|OPT", na=False)
-        ]
+        # Dhan scrip master: SEM_EXM_EXCH_ID = NSE, SEM_INSTRUMENT_NAME = EQUITY (segment "E")
+        nse = matches["_exchange"].str.contains("NSE", na=False) | matches["_segment"].str.contains("NSE", na=False)
+        eq = matches[nse & (matches["_instrument"] == "EQUITY")]
+        if eq.empty and trade_col:
+            exact = frame[(frame[trade_col].astype(str).str.upper() == symbol)
+                          & (frame["_instrument"] == "EQUITY")]
+            exact = exact[exact["_exchange"].str.contains("NSE", na=False) | exact["_segment"].str.contains("NSE", na=False)]
+            eq = exact if not exact.empty else eq
+        if eq.empty:
+            eq = matches[
+                matches["_segment"].str.contains("NSE_EQ|EQ", na=False)
+                & ~matches["_instrument"].str.contains("FUT|OPT", na=False)
+            ]
         if not eq.empty:
             equity_ids[symbol] = str(eq.iloc[0]["_sec"])
         fut = matches[
-            matches["_segment"].str.contains("NSE_FNO|FNO", na=False)
-            & matches["_instrument"].str.contains("FUTSTK|FUT", na=False)
+            (matches["_segment"].str.contains("NSE_FNO|FNO", na=False) | (nse & matches["_segment"].isin(["D", "NSE_FNO"])))
+            & matches["_instrument"].str.contains("FUTSTK", na=False)
         ].copy()
         if not fut.empty:
             fut = fut.dropna(subset=["_expiry"])

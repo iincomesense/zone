@@ -54,6 +54,46 @@ if CHARTS:                                   # चुने हुए ट्र�
     TFS = sorted(SEL["tf"].unique())
 print("symbols", len(syms), flush=True)
 need = list(dict.fromkeys(TFS + ["75m", "1d", "1w", "1M"]))
+DHAN = os.path.exists(_mode_f) and open(_mode_f).read().strip().startswith("dhan")
+if DHAN:                                     # छोटे TF: NSE cash का लंबा इतिहास Dhan API से
+    cid_, tok_ = A.dhan_creds()
+    ids_ = A._dhan_eq_ids(syms)
+    lines_ = [f"# Dhan run ({time.strftime('%Y-%m-%d %H:%M')} UTC)", "",
+              f"secrets: {'हाँ' if cid_ and tok_ else 'नहीं'} · scrip master से cash id मिले: {len(ids_)}/{len(syms)} · "
+              f"उदाहरण: {dict(list(ids_.items())[:5])} · स्थिति: {A._DHAN_STATUS.get('status')}"]
+    if not (cid_ and tok_ and ids_):
+        open(os.path.join(OUT, "summary.md"), "w").write("\n".join(lines_))
+        pd.DataFrame().to_csv(os.path.join(OUT, "optimizer_all.csv"), index=False)
+        print("\n".join(lines_), flush=True)
+        sys.exit(0)
+    TFS = ["3m", "5m", "10m", "15m", "30m", "75m"]
+    START = pd.Timestamp.now(tz=IST).normalize() - pd.Timedelta(days=730)
+    END = pd.Timestamp.now(tz=IST).normalize() + pd.Timedelta(hours=23, minutes=59)
+    frames = A.load_dhan_equity_frames(syms, TFS, progress=lambda f, s: print(f"dhan {f:.0%} {s}", flush=True)
+                                       if int(f * 100) % 5 == 0 else None)
+    yf_ = A.load_frames(syms, ["1d", "1w", "1M"])
+    for s_, fr_ in yf_.items():
+        frames.setdefault(s_, {}).update(fr_)
+    print("dhan frames", len(frames), "secs", round(time.time() - t0), flush=True)
+    A.COLLECT_VARIANTS = [v for v in A.COLLECT_VARIANTS if v[0] in ("base", "rr2.5", "rr3")]
+    os.environ["COLLECT_ALL_ENTRIES"] = "1"
+    T = A.opt_collect(syms, frames, TFS, A.PineInputs().sanitized(), START, END, loose_all=True,
+                      progress=lambda f, s: print(f"collect {f:.0%} {s}", flush=True) if int(f * 100) % 5 == 0 else None)
+    for tf_, g_ in T.groupby("tf"):
+        g_.to_csv(os.path.join(OUT, f"signals_{tf_}.csv.gz"), index=False, compression="gzip")
+    for tf_ in TFS:
+        a_, b_, n_ = None, None, 0
+        for fr_ in frames.values():
+            df_ = fr_.get(tf_)
+            if df_ is not None and len(df_):
+                a_ = min(a_, df_.index[0]) if a_ is not None else df_.index[0]
+                b_ = max(b_, df_.index[-1]) if b_ is not None else df_.index[-1]
+                n_ += 1
+        lines_.append(f"- {tf_}: {a_} → {b_} ({n_} symbols) · rows {int((T['tf'] == tf_).sum()) if len(T) else 0}")
+    open(os.path.join(OUT, "summary.md"), "w").write("\n".join(lines_))
+    pd.DataFrame().to_csv(os.path.join(OUT, "optimizer_all.csv"), index=False)
+    print("dhan done", len(T), flush=True)
+    sys.exit(0)
 frames = A.load_frames(syms, need)
 print("frames", len(frames), "secs", round(time.time() - t0), flush=True)
 cover = {}

@@ -36,6 +36,7 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
+from datetime import time as dtime
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -674,6 +675,86 @@ def load_future_frames(symbols: Sequence[str], tfs: Sequence[str]) -> Dict[str, 
             if per:
                 out[sym] = per
     _DHAN_STATUS["status"] = f"ok · {len(out)}/{len(ids)} futures" if out else _DHAN_STATUS.get("status", "no data")
+    return out
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  भाग 2c · Dhan API — NSE CASH (equity) intraday का लंबा इतिहास (बैकटेस्ट के लिए)
+#   Dhan: 1, 5, 15, 25, 60 मिनट · पिछले 5 साल तक · एक बार में ≤ 90 दिन
+# ═══════════════════════════════════════════════════════════════════════
+DHAN_EQ_DAYS = {"1m": 90, "5m": 365, "15m": 730, "60m": 730}
+DHAN_EQ_INTERVAL = {"1m": 1, "5m": 5, "15m": 15, "60m": 60}
+
+
+def _dhan_eq_ids(symbols: Sequence[str]) -> Dict[str, str]:
+    key = _ckey("dhan_eq_ids", datetime.now(IST).date().isoformat(), tuple(sorted(symbols)))
+    cached = _load(key, 12 * 3600)
+    if cached is not None:
+        return cached
+    try:
+        from scanner.dhan import build_security_map, load_instrument_master
+        eq, _ = build_security_map(load_instrument_master(), list(symbols))
+    except Exception as e:                                     # noqa: BLE001
+        _DHAN_STATUS["status"] = f"scrip master error: {type(e).__name__}"
+        return {}
+    if eq:
+        _save(key, eq)
+    return eq
+
+
+def _dhan_eq_base(sec_id: str, base: str, cid: str, tok: str, days: Optional[int] = None) -> Optional[pd.DataFrame]:
+    days = int(days or DHAN_EQ_DAYS.get(base, 60))
+    key = _ckey("dhan_eq", sec_id, base, days, datetime.now(IST).date().isoformat())
+    cached = _load(key, 12 * 3600)
+    if cached is not None:
+        return cached
+    interval = DHAN_EQ_INTERVAL.get(base)
+    if not interval:
+        return None
+    today = datetime.now(IST).date()
+    common = {"securityId": str(sec_id), "exchangeSegment": "NSE_EQ", "instrument": "EQUITY", "oi": False}
+    parts, start = [], today - timedelta(days=days)
+    while start <= today:
+        end = min(start + timedelta(days=89), today + timedelta(days=1))
+        part = _dhan_post("/charts/intraday", dict(common, interval=interval, fromDate=start.isoformat(),
+                                                    toDate=end.isoformat()), cid, tok)
+        if part is not None and len(part):
+            parts.append(part)
+        start = end + timedelta(days=1)
+        time.sleep(0.22)
+    if not parts:
+        return None
+    df = pd.concat(parts).sort_index()
+    df = df[~df.index.duplicated(keep="last")]
+    df = df[(df.index.time >= dtime(9, 15)) & (df.index.time <= dtime(15, 29))]
+    _save(key, df)
+    return df
+
+
+def load_dhan_equity_frames(symbols: Sequence[str], tfs: Sequence[str],
+                            days_map: Optional[Dict[str, int]] = None, progress=None) -> Dict[str, Dict[str, pd.DataFrame]]:
+    """{symbol: {tf: cash DataFrame}} Dhan से (छोटे TF का लंबा इतिहास) — secrets न हों तो {}।"""
+    cid, tok = dhan_creds()
+    if not cid or not tok:
+        _DHAN_STATUS["status"] = "not configured"
+        return {}
+    ids = _dhan_eq_ids([s for s in symbols if s.upper() not in GLOBAL_MAP and s.upper() not in IDX_SYMBOLS])
+    bases = sorted({TF_FETCH[tf][0] for tf in tfs if tf in TF_FETCH and TF_FETCH[tf][0] in DHAN_EQ_INTERVAL})
+    out: Dict[str, Dict[str, pd.DataFrame]] = {}
+    for i, sym in enumerate(list(ids)):
+        raw = {b: _dhan_eq_base(ids[sym], b, cid, tok, (days_map or {}).get(b)) for b in bases}
+        per = {}
+        for tf in tfs:
+            spec = TF_FETCH.get(tf)
+            if not spec or raw.get(spec[0]) is None:
+                continue
+            df = raw[spec[0]]
+            per[tf] = _resample_session(df, spec[1]) if spec[1] else df
+        if per:
+            out[sym] = per
+        if progress:
+            progress((i + 1) / max(1, len(ids)), sym)
+    _DHAN_STATUS["status"] = f"ok · cash {len(out)}/{len(ids)}" if out else _DHAN_STATUS.get("status", "no data")
     return out
 
 

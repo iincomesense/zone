@@ -1967,6 +1967,8 @@ def _bt_sim_one(P: dict, z: dict, rr: float, maturity: int, be_rr: float, use_bu
         return None
     fod = P["fod"]          # open पर fill सिर्फ़ session की पहली candle (रात का gap) पर — बीच की candle में भाव लगातार चलता है
     open_first = bool(fod[ej]) and ((o[ej] <= prox) if dem else (o[ej] >= prox))
+    if open_first and ((o[ej] <= sl0) if dem else (o[ej] >= sl0)):
+        return None          # बाज़ार SL (distal) के भी पार खुला = ज़ोन टूटा, कोई ट्रेड नहीं (order cancel)
     fill = (min(prox, o[ej]) if dem else max(prox, o[ej])) if open_first else prox
     sl = sl0
     be_lvl = (fill + be_rr * risk_ps if dem else fill - be_rr * risk_ps) if be_rr > 0 else None
@@ -2656,7 +2658,7 @@ def opt_pick(R: pd.DataFrame, top: int = 15) -> Optional[dict]:
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v23 · हर पैरामीटर परखा: boring ≤0.7 ATR · closing wick ≤0.3 · leg-out ≥1.2 ATR · 2026-10-28"
+APP_BUILD = "v24 · v23 नियम + SL के पार gap = ट्रेड नहीं (चार्ट से मिली ग़लती) · 2026-10-28"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -3581,8 +3583,9 @@ def optimizer_panel(inp: PineInputs, tb: dict, cap: float, rp: float, d0, d1, al
     st.caption("Leg-in: body ≥60% · TR ≥ ATR×1.0 · closing wick ≤ 30% · Boring: हर candle TR ≤ ATR×0.7 · 1–3 candle · "
                "Leg-in ≥ 1.5× boring · Leg-out: body ≥60% · TR ≥ ATR×1.2 · ≥ 2× boring · Power ≥ 1:2 · "
                "Opposite zone 1:3 के अंदर नहीं · White area हाँ · Formation नहीं · ज़ोन ≥0.4% · volume ≥1.5× · Edge ≥4 · "
-               "gap-open entry · MIS · 1:5। चार्ज के बाद (R × ₹125): Jan-24→Jun-25 ≈ +₹7,000 (74 ट्रेड), "
-               "Jul-25→Oct-26 ≈ +₹5,200 (66 ट्रेड), हर साल मुनाफ़ा, 10 सबसे बड़े ट्रेड हटाकर भी मुनाफ़ा। "
+               "gap-open entry (बाज़ार ज़ोन के अंदर खुले; SL के पार खुले तो ट्रेड नहीं) · MIS · 1:5। "
+               "चार्ज के बाद, 2h·4h·1d (R × ₹125): Jan-24→Jun-25 ≈ +₹6,300, Jul-25→Oct-26 ≈ +₹6,150 · "
+               "कुल 64 असली ट्रेड (~25/साल) · जीत ~48% · target ~14%, SL ~50%, बाक़ी दिन के अंत में बंद। "
                "सबसे अच्छे TF: 4h, 1d, फिर 2h · 1h मिला-जुला · 15m/75m/1w पर ट्रेड नहीं के बराबर। "
                "सामान्य limit entry (बिना gap-open) हर सेटिंग में घाटे में रही। भविष्य की गारंटी नहीं।")
     put(st, "button", "✅ ये नियम ⚙️ इनपुट में लगाएँ", on_click=_opt_apply, args=(BACKTESTED_PRESET,), key="preset_apply")

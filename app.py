@@ -2893,6 +2893,17 @@ def css():
 .block-container{padding-top:3.2rem;padding-bottom:1rem;max-width:100%;}
 div[data-testid="stHorizontalBlock"]{gap:.45rem;}
 h1,h2,h3{letter-spacing:.2px;}
+/* ⚙️ इनपुट: tablet/मोबाइल पर हर इनपुट पूरी चौड़ाई के आधे या पूरे में, शब्द टूटें नहीं */
+.inp-panel div[data-testid="stExpander"] label p{word-break:normal;overflow-wrap:normal;white-space:normal;line-height:1.3}
+div[data-testid="stExpander"] div[data-testid="stHorizontalBlock"]{flex-wrap:wrap;row-gap:.6rem}
+div[data-testid="stExpander"] div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"],
+div[data-testid="stExpander"] div[data-testid="stHorizontalBlock"] > div[data-testid="column"]{min-width:220px;flex:1 1 220px !important}
+div[data-testid="stExpander"] label p{word-break:keep-all;overflow-wrap:break-word}
+div[data-testid="stExpander"] div[data-baseweb="tab-list"]{flex-wrap:wrap;gap:.25rem}
+@media (max-width: 760px){
+  div[data-testid="stExpander"] div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"],
+  div[data-testid="stExpander"] div[data-testid="stHorizontalBlock"] > div[data-testid="column"]{min-width:100%;flex:1 1 100% !important}
+}
 """
     extra = SHEET_CSS_DARK if is_dark() else SHEET_CSS_LIGHT
     _html("<style>" + base + SHEET_CSS + extra + "</style>")
@@ -3804,8 +3815,8 @@ def _main():
         return
 
     tb = top_bar()
-    ctrl = cols([1.55, .85, .7, .7, 3.4])
-    inp, uo = pine_panel(ctrl[0])
+    ctrl = cols([.01, .85, .7, .7, 4.9])
+    inp, uo = pine_panel(None)          # ⚙️ इनपुट पूरी चौड़ाई में (tablet पर साफ़ दिखे)
 
     # ── स्कैन ────────────────────────────────────────────────────────────
     if tb["go"]:

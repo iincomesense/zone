@@ -1,0 +1,33 @@
+name: uishot
+on:
+  push:
+    paths:
+      - "tools/UISHOT"
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  shot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt playwright && python -m playwright install --with-deps chromium
+      - run: |
+          nohup streamlit run app.py --server.headless true --server.port 8501 > /tmp/st.log 2>&1 &
+          sleep 25
+          python tools/uishot.py
+      - name: save shots
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          mkdir -p /tmp/shots && cp shots/* /tmp/shots/ && cp /tmp/st.log /tmp/shots/st.log || true
+          git checkout -B ui-shots
+          git rm -rq . || true
+          mkdir -p shots && cp /tmp/shots/* shots/
+          git add -f shots
+          git commit -m "ui shots ${GITHUB_SHA::7}" || true
+          git push -f origin ui-shots

@@ -87,7 +87,7 @@ BASE_SPEC: Dict[str, Tuple[str, str]] = {
     "5m": ("5m", "60d"),
     "15m": ("15m", "60d"),
     "30m": ("30m", "60d"),
-    "60m": ("60m", "1y"),
+    "60m": ("60m", "729d"),       # Yahoo: 60m सिर्फ़ ~730 दिन
     "1d": ("1d", "5y"),
     "1wk": ("1wk", "10y"),
     "1mo": ("1mo", "max"),
@@ -762,6 +762,7 @@ class PineInputs:
     showSupply: bool = True
     breakEvenRR: float = 0.0
     minRiskPct: float = 0.0
+    demandIntradayMIS: bool = False
     # ---- 2 · Note rules (grading; mandatory in Strict) ----
     legInMaxWick: float = 0.20
     legOutMinBody: float = 0.65
@@ -1596,7 +1597,7 @@ def eod_band(df: Optional[pd.DataFrame], tf: str, atr_period: int = 14) -> Optio
 # ---------------------------------------------------------------------------
 _EMPTY_SNAP = {"demand": None, "supply": None, "demand_time": 0, "supply_time": 0}
 _ZCACHE: Dict[tuple, tuple] = {}
-_ZVER = "z12"           # इंजन बदले तो बढ़ाएँ — पुराना कैश अपने आप बेकार
+_ZVER = "z14"           # इंजन बदले तो बढ़ाएँ — पुराना कैश अपने आप बेकार
 
 
 def _inputs_hash(I: PineInputs) -> str:
@@ -1833,7 +1834,7 @@ def _bt_prep(df: pd.DataFrame, tf: str) -> dict:
 
 
 def _bt_sim_one(P: dict, z: dict, rr: float, maturity: int, be_rr: float, use_buffer: bool,
-                start: pd.Timestamp, end: pd.Timestamp) -> Optional[dict]:
+                start: pd.Timestamp, end: pd.Timestamp, long_mis: bool = False) -> Optional[dict]:
     """एक ज़ोन का एक ट्रेड (प्रति शेयर)। be_rr > 0 → price 1:be_rr पहुँचे तो SL = entry।"""
     idx, o, h, l, c, n = P["idx"], P["o"], P["h"], P["l"], P["c"], P["n"]
     dem = bool(z["demand"])
@@ -1880,6 +1881,9 @@ def _bt_sim_one(P: dict, z: dict, rr: float, maturity: int, be_rr: float, use_bu
                 break
             if be_lvl is not None and sl == sl0 and h[k] >= be_lvl and (not first or open_first):
                 sl = fill
+            if long_mis and P["lod"][k]:                       # intraday long: उसी दिन बंद
+                exit_px, exit_j, reason = c[k], k, "MIS square-off"
+                break
         else:
             if h[k] >= sl:
                 exit_px = fill if (first and fill >= sl) else (sl if first else max(o[k], sl))
@@ -1898,8 +1902,8 @@ def _bt_sim_one(P: dict, z: dict, rr: float, maturity: int, be_rr: float, use_bu
         exit_px, exit_j, reason = c[n - 1], n - 1, "Open (last price)"
     return dict(entry_time=idx[ej], exit_time=idx[exit_j], entry=float(fill), sl=float(sl0),
                 target=float(tgt), exit=float(exit_px), risk_ps=float(abs(fill - sl0)) or risk_ps,
-                reason=reason, long=dem, kind="CNC" if dem else "MIS",
-                side="Long CNC" if dem else "Short MIS")
+                reason=reason, long=dem, kind="CNC" if (dem and not long_mis) else "MIS",
+                side=("Long MIS" if long_mis else "Long CNC") if dem else "Short MIS")
 
 
 def _bt_zone_trades(df: pd.DataFrame, zones: List[dict], tf: str, symbol: str, I: PineInputs,
@@ -1907,12 +1911,13 @@ def _bt_zone_trades(df: pd.DataFrame, zones: List[dict], tf: str, symbol: str, I
                     maturity: Optional[int] = None, be_rr: float = 0.0) -> List[dict]:
     """हर ज़ोन का (qty के बिना) संभावित ट्रेड — प्रति शेयर भाव के साथ।"""
     P = _bt_prep(df, tf)
+    long_mis = bool(I.demandIntradayMIS and P["intraday"])
     mat = I.maturityBars if maturity is None else maturity
     out: List[dict] = []
     for z in zones:
         if I.coreOpposite and z.get("room_tf") is not None and z["room_tf"] < I.oppositeRR:
             continue
-        t = _bt_sim_one(P, z, rr, mat, be_rr, use_buffer, start, end)
+        t = _bt_sim_one(P, z, rr, mat, be_rr, use_buffer, start, end, long_mis=long_mis)
         if t is None:
             continue
         t.update(symbol=symbol, tf=tf, pattern=z["pattern"], score=int(z.get("score_base", 0)),
@@ -2047,15 +2052,16 @@ OPT_GRID = dict(
     lo=[2.0, 2.5, 3.0],             # 1-2-4: leg-out (body) ≥ boring ×
     power=[2.0, 3.0],               # power of leg-out ≥ 1:x
     maturity=[0, 3],                # candles
-    score=[0, 7],                   # सिर्फ़ इतने score से ऊपर ट्रेड
+    score=[0],                      # (score 7 पिछले रन में कभी नहीं चुना गया)
     trend=["off", "not_against", "in_favour"],
     side=["both", "demand"],
     be=[0.0, 2.0],                  # 1:2 पर SL entry पर
     minrisk=[0.0, 0.5, 1.0],        # SL की दूरी भाव का कम से कम % (पतले ज़ोन में चार्ज R खा जाते हैं)
+    dmode=["CNC", "MIS"],           # intraday TF पर Demand: CNC (कई दिन) या MIS (उसी दिन, कम चार्ज)
     rr=[3.0, 5.0],
 )
 OPT_BASE = dict(atr=1.2, body=0.6, li=1.5, lo=2.5, power=3.0, maturity=3, score=0, trend="off",
-                side="both", be=0.0, minrisk=0.0)
+                side="both", be=0.0, minrisk=0.0, dmode="CNC")
 TREND_TO_CORE = {"off": "Off (score only)", "not_against": "Higher-TF not against",
                  "in_favour": "Higher-TF in favour (strict)"}
 
@@ -2129,6 +2135,7 @@ def opt_collect(symbols: Sequence[str], frames_all: Dict[str, Dict[str, pd.DataF
                 continue
             P = _bt_prep(df, tf)
             act = htf_action_series(fr, tf, Is)
+            intra = P["intraday"]
             for zid, z in enumerate(zs):
                 if z.get("room_tf") is not None and z["room_tf"] < Is.oppositeRR:
                     continue                                   # आपका अनिवार्य opposite-zone नियम
@@ -2137,14 +2144,16 @@ def opt_collect(symbols: Sequence[str], frames_all: Dict[str, Dict[str, pd.DataF
                             m_fo_body=z["m_fo_body"], m_li_ratio=z["m_li_ratio"], m_lo_ratio=z["m_lo_ratio"],
                             pow_rr=z["pow_rr"], score_base=int(z["score_base"]),
                             room_pt=int(z.get("room_tf") is None or z["room_tf"] >= 10 or z["xrr"] >= 10))
+                modes = (("CNC", False), ("MIS", True)) if (intra and z["demand"]) else (("ANY", False),)
                 for rr in OPT_GRID["rr"]:
                     for mat in OPT_GRID["maturity"]:
                         for be in OPT_GRID["be"]:
-                            t = _bt_sim_one(P, z, rr, mat, be, use_buffer, start, end)
+                          for dm, lmis in modes:
+                            t = _bt_sim_one(P, z, rr, mat, be, use_buffer, start, end, long_mis=lmis)
                             if t is None:
                                 continue
                             al, ash = _act_at(act, t["entry_time"])
-                            rows.append(dict(base, rr=rr, maturity=mat, be=be,
+                            rows.append(dict(base, rr=rr, maturity=mat, be=be, dmode=dm,
                                              entry_time=t["entry_time"], exit_time=t["exit_time"],
                                              entry=t["entry"], exit=t["exit"], risk_ps=t["risk_ps"],
                                              reason=t["reason"], act_long=al, act_short=ash))
@@ -2154,7 +2163,7 @@ def opt_collect(symbols: Sequence[str], frames_all: Dict[str, Dict[str, pd.DataF
 
 
 def _fast_portfolio(et, xt, entry, exitp, rps, is_long, capital: float, risk_pct: float,
-                    max_alloc: float = 25.0) -> dict:
+                    max_alloc: float = 25.0, is_cnc=None) -> dict:
     """bt_portfolio जैसा ही, पर तेज़ (arrays)। et/xt = int64 ns, पहले से entry के क्रम में।"""
     import heapq
     cash = equity = peak = float(capital)
@@ -2163,6 +2172,8 @@ def _fast_portfolio(et, xt, entry, exitp, rps, is_long, capital: float, risk_pct
     n_tr = wins = skipped = 0
     net_sum = gw = gl = 0.0
     oct24 = pd.Timestamp("2024-10-01", tz=IST).value
+    if is_cnc is None:
+        is_cnc = is_long
     for i in range(len(et)):
         while heap and heap[0][0] <= et[i]:
             _, _, blk, nt = heapq.heappop(heap)
@@ -2171,7 +2182,7 @@ def _fast_portfolio(et, xt, entry, exitp, rps, is_long, capital: float, risk_pct
             peak = max(peak, equity)
             max_dd = min(max_dd, (equity - peak) / peak * 100.0)
         qty = int(equity * risk_pct / 100.0 / max(rps[i], 1e-9))
-        per = entry[i] if is_long[i] else entry[i] * MIS_MARGIN
+        per = entry[i] if is_cnc[i] else entry[i] * MIS_MARGIN
         qty = min(qty, int(cash / per) if per > 0 else 0, int(equity * max_alloc / 100.0 / per) if per > 0 else 0)
         if qty < 1:
             skipped += 1
@@ -2182,7 +2193,7 @@ def _fast_portfolio(et, xt, entry, exitp, rps, is_long, capital: float, risk_pct
             sell, buy = qty * entry[i], qty * exitp[i]
         turn = buy + sell
         ex = turn * (0.0000322 if xt[i] < oct24 else 0.0000297)
-        if is_long[i]:
+        if is_cnc[i]:
             brk, stt, stamp, dp = 0.0, 0.001 * turn, 0.00015 * buy, DP_CHARGE
         else:
             brk = min(20.0, 0.0003 * buy) + min(20.0, 0.0003 * sell)
@@ -2242,17 +2253,21 @@ def opt_run(T: pd.DataFrame, capital: float, risk_pct: float, split: pd.Timestam
     xt = T["exit_time"].map(lambda x: x.value).to_numpy()
     en, ex, rp = T["entry"].to_numpy(), T["exit"].to_numpy(), T["risk_ps"].to_numpy()
     lg = T["long"].to_numpy()
+    dmode = T["dmode"].to_numpy()
+    cnc = lg & (dmode != "MIS")
     is_mask = et < split.value
     # हर signal का नतीजा R में (चार्ज के बाद) — पूँजी की कमी से स्वतंत्र, सारे ज़ोन गिने जाते हैं
     R0 = capital * risk_pct / 100.0
-    per_unit = np.where(lg, en, en * MIS_MARGIN)
+    per_unit = np.where(cnc, en, en * MIS_MARGIN)
     qn = np.floor(np.minimum(R0 / np.maximum(rp, 1e-9), capital * max_alloc / 100.0 / np.maximum(per_unit, 1e-9)))
     qn = np.maximum(qn, 1.0)
     risk_pct_px = rp / np.maximum(en, 1e-9) * 100.0
     buy = np.where(lg, qn * en, qn * ex)
     sell = np.where(lg, qn * ex, qn * en)
-    r_net = (sell - buy - _charges_vec(lg, buy, sell, xt)) / R0
-    keys = ["atr", "body", "li", "lo", "power", "maturity", "score", "trend", "side", "be", "minrisk", "rr"]
+    r_gross = (sell - buy) / R0
+    r_cost = _charges_vec(cnc, buy, sell, xt) / R0
+    r_net = r_gross - r_cost
+    keys = ["atr", "body", "li", "lo", "power", "maturity", "score", "trend", "side", "be", "minrisk", "dmode", "rr"]
     combos = list(itertools.product(*[OPT_GRID[k] for k in keys]))
     out = []
     A = {k: T[k].to_numpy() for k in ("m_in_atr", "m_out_atr", "m_li_body", "m_fo_body", "m_li_ratio",
@@ -2267,26 +2282,35 @@ def opt_run(T: pd.DataFrame, capital: float, risk_pct: float, split: pd.Timestam
              & (A["m_li_ratio"] >= p["li"]) & (A["m_lo_ratio"] >= p["lo"])
              & (A["pow_rr"] >= p["power"]) & (score_act >= p["score"])
              & (A["rr"] == p["rr"]) & (A["maturity"] == p["maturity"]) & (A["be"] == p["be"])
-             & (risk_pct_px >= p["minrisk"]))
+             & (risk_pct_px >= p["minrisk"]) & ((dmode == p["dmode"]) | (dmode == "ANY")))
         if p["side"] == "demand":
             m &= lg
         if p["trend"] == "not_against":
             m &= ~act_against
         elif p["trend"] == "in_favour":
             m &= act_with
-        r = {}
+        row = dict(p)
         for tag, pm in (("IS", m & is_mask), ("OOS", m & ~is_mask)):
             ii = np.flatnonzero(pm)
-            r[tag] = _fast_portfolio(et[ii], xt[ii], en[ii], ex[ii], rp[ii], lg[ii], capital, risk_pct, max_alloc)
-            r[tag].update(_r_stats(r_net[ii]))
-        row = dict(p)
-        for tag in ("IS", "OOS"):
-            for k in ("sig", "winR", "expR", "totR", "pfR", "trades", "skipped", "win_pct", "net", "ret", "max_dd", "pf"):
-                row[f"{tag}_{k}"] = r[tag][k]
+            for k, v in _r_stats(r_net[ii]).items():
+                row[f"{tag}_{k}"] = v
+            row[f"{tag}_grossR"] = float(r_gross[ii].mean()) if len(ii) else 0.0
+            row[f"{tag}_costR"] = float(r_cost[ii].mean()) if len(ii) else 0.0
+            row[f"_{tag}_idx"] = ii
         out.append(row)
         if progress and ci % 50 == 0:
             progress(ci / len(combos))
     R = pd.DataFrame(out)
+
+    def _port(i):                                       # ₹ portfolio — सिर्फ़ ज़रूरी पंक्तियों के लिए
+        for tag in ("IS", "OOS"):
+            ii = R.at[i, f"_{tag}_idx"]
+            pr = _fast_portfolio(et[ii], xt[ii], en[ii], ex[ii], rp[ii], lg[ii], capital, risk_pct, max_alloc, cnc[ii])
+            for k in ("trades", "skipped", "win_pct", "net", "ret", "max_dd", "pf"):
+                R.at[i, f"{tag}_{k}"] = pr[k]
+    for tag in ("IS", "OOS"):
+        for k in ("trades", "skipped", "win_pct", "net", "ret", "max_dd", "pf"):
+            R[f"{tag}_{k}"] = np.nan
     base = {}
     for rr in OPT_GRID["rr"]:
         q = R
@@ -2298,6 +2322,21 @@ def opt_run(T: pd.DataFrame, capital: float, risk_pct: float, split: pd.Timestam
     min_tr = keep_pct / 100.0 * max([b["IS_sig"] for b in base.values()] or [0])
     R["feasible"] = R["IS_sig"] >= min_tr
     R = R.sort_values(["feasible", "IS_totR"], ascending=[False, False]).reset_index(drop=True)
+    top_idx = list(R.index[R["feasible"]][:60])
+    for i in top_idx:
+        _port(i)
+    for rr, b in base.items():                          # baseline का ₹ portfolio भी
+        q = R
+        for k, v in OPT_BASE.items():
+            q = q[q[k] == v]
+        q = q[q["rr"] == rr]
+        if len(q):
+            _port(q.index[0])
+            base[rr] = R.loc[q.index[0]].to_dict()
+    R = R.drop(columns=["_IS_idx", "_OOS_idx"])
+    for b in base.values():
+        b.pop("_IS_idx", None)
+        b.pop("_OOS_idx", None)
     return R, dict(base=base, min_trades=min_tr)
 
 
@@ -2315,7 +2354,7 @@ def opt_pick(R: pd.DataFrame, top: int = 15) -> Optional[dict]:
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v13 · Optimizer R-multiple · max 25%/trade · 2026-10-28"
+APP_BUILD = "v14 · 1h data 730d · gross/cost R · MIS option · 2026-10-28"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -2576,6 +2615,7 @@ def pine_panel(slot=None):
             core_mtf = f8.selectbox("MTF analysis", MTF_CORE_MODES,
                                     index=MTF_CORE_MODES.index(D.coreMTF), key="in_coremtf")
             f9, f10, f11, _ = st.columns(4)
+            dmis = f9.checkbox("Intraday TF पर Demand भी MIS (उसी दिन बंद)", D.demandIntradayMIS, key="in_dmis")
             min_risk = f11.number_input("SL की दूरी भाव का कम से कम %", 0.0, 10.0, D.minRiskPct, 0.1, key="in_minrisk",
                                         help="बहुत पतले ज़ोन में चार्ज (STT आदि) मुनाफ़ा खा जाते हैं")
             show_sup = f9.checkbox("Supply ज़ोन भी दिखाएँ/ट्रेड करें", D.showSupply, key="in_showsupply")
@@ -2663,6 +2703,7 @@ def pine_panel(slot=None):
         accountCapital=float(cap), riskPct=float(risk), targetRR=float(rr), hourlyRR=float(hrr),
         target2RR=float(t2rr), legOutEachMinBody=float(lo_each), powerOnBody=bool(pow_body),
         showSupply=bool(show_sup), breakEvenRR=float(be_rr), minRiskPct=float(min_risk),
+        demandIntradayMIS=bool(dmis),
         maturityBars=int(mat_bars),
         monthlyRR=float(mrr), halfQty3=bool(half), traderType=str(ttype), bufferMode=str(bmode),
         bufAggrPct=float(b_aggr), bufDailyPct=float(b_daily), bufSwingPct=float(b_swing),
@@ -3166,6 +3207,7 @@ def _opt_apply(best: dict) -> None:
     ss["in_showsupply"] = str(best["side"]) == "both"
     ss["in_berr"] = float(best["be"])
     ss["in_minrisk"] = float(best.get("minrisk", 0.0))
+    ss["in_dmis"] = str(best.get("dmode", "CNC")) == "MIS"
     ss.pop("scan", None)
 
 
@@ -3183,6 +3225,7 @@ def _opt_pine_text(b: dict) -> str:
         f"Show supply zones                  = {'ON' if b['side'] == 'both' else 'OFF'}",
         f"Break-even at 1: (0 = off)         = {b['be']}",
         f"Min SL distance % of price         = {b.get('minrisk', 0.0)}",
+        f"Intraday TF पर Demand               = {'MIS (उसी दिन बंद)' if b.get('dmode') == 'MIS' else 'CNC (delivery)'}",
         f"सबसे अच्छा target                   = 1:{b['rr']:g}",
     ])
 
@@ -3218,13 +3261,15 @@ def optimizer_panel(inp: PineInputs, tb: dict, cap: float, rp: float, d0, d1, al
     if R is None or R.empty or not best:
         st.warning("कोई ट्रेड नहीं बना — ज़्यादा स्क्रिप्ट या TF चुनें।")
         return
-    cols_show = ["atr", "body", "li", "lo", "power", "maturity", "score", "trend", "side", "be", "minrisk", "rr",
-                 "IS_sig", "IS_winR", "IS_expR", "IS_totR", "OOS_sig", "OOS_winR", "OOS_expR", "OOS_totR",
+    cols_show = ["atr", "body", "li", "lo", "power", "maturity", "trend", "side", "be", "minrisk", "dmode", "rr",
+                 "IS_sig", "IS_winR", "IS_grossR", "IS_costR", "IS_expR", "IS_totR",
+                 "OOS_sig", "OOS_winR", "OOS_grossR", "OOS_costR", "OOS_expR", "OOS_totR",
                  "IS_trades", "IS_skipped", "IS_net", "OOS_trades", "OOS_skipped", "OOS_net", "OOS_max_dd"]
     st.markdown(f"**{O['n']} स्क्रिप्ट · {O['zones']} ज़ोन · न्यूनतम signal (IS): {meta['min_trades']:.0f}**")
     st.caption("sig = signal (हर ज़ोन का पहला टच) · winR = जीत % · expR = हर signal का औसत नतीजा R में (चार्ज के बाद; "
                "+0.30 = हर ट्रेड पर औसतन जोखिम का 30% मुनाफ़ा) · totR = कुल R · "
-               "trades/skipped/net = ₹ पूँजी के साथ असली portfolio (skipped = पैसे की कमी से छूटे)")
+               "grossR = चार्ज से पहले · costR = चार्ज R में · trades/skipped/net = ₹ पूँजी के साथ असली portfolio "
+               "(skipped = पैसे की कमी से छूटे)")
     base_rows = [dict(v, नाम=f"आपके अभी के नियम · 1:{k:g}") for k, v in meta["base"].items()]
     best_row = dict(best, नाम="★ सबसे अच्छा")
     cmp = pd.DataFrame(base_rows + [best_row])[["नाम"] + cols_show]

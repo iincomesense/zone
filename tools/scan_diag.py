@@ -19,15 +19,19 @@ print("frames", len(frames), round(time.time() - t0), flush=True)
 D = A.PineInputs().sanitized()
 M = A.MTF_CORE_MODES
 VARS = {"DEFAULT (स्क्रीनशॉट)": {}}
-steps = [("+ Max leg-out 3, 2 leg-out मान्य", dict(maxLegOut=3, allowTwoLegOut=True)),
-         ("+ 1-2-4 leg-out ≥ 1.5× boring", dict(legOutToBaseSizeMult=1.5)),
-         ("+ Leg-in body ≥ 1.25× boring", dict(legInBodyVsBase=1.25)),
-         ("+ MTF: not against", dict(coreMTF=M[1])),
-         ("+ Action/Wholesale बंद", dict(filterAction=False, filterWholesale=False)),
+steps = [("+ Volume 0, SL दूरी 0", dict(minVolRatio=0.0, minRiskPct=0.0)),
+         ("+ MTF Off, Action/Wholesale बंद", dict(coreMTF=M[0], filterAction=False, filterWholesale=False)),
          ("+ Edge 0, score 0", dict(minEdge=0, minScore=0)),
-         ("+ Opposite 1:3", dict(oppositeRR=3.0)),
-         ("+ Volume 0, SL दूरी 0", dict(minVolRatio=0.0, minRiskPct=0.0)),
-         ("+ MTF Off", dict(coreMTF=M[0]))]
+         ("+ Max leg-out 3, 2 leg-out", dict(maxLegOut=3, allowTwoLegOut=True)),
+         ("+ Leg-in body vs boring 0", dict(legInBodyVsBase=0.0)),
+         ("+ Leg-out vs leg-in 0", dict(legOutBodyVsLegIn=0.0)),
+         ("+ 1-2-4 leg-out 1.5×", dict(legOutToBaseSizeMult=1.5)),
+         ("+ Closing wick 1", dict(legInMaxCloseWick=1.0)),
+         ("+ Boring ≤ ATR×1.0", dict(boringAtrMult=1.0)),
+         ("+ Opposite बंद", dict(coreOpposite=False)),
+         ("+ Maturity बंद", dict(useMaturity=False)),
+         ("+ Covered leg-out बंद", dict(useCoveredLegOut=False)),
+         ("+ scanBars 3000", dict(scanBars=3000))]
 acc = {}
 for nm, ch in steps:
     acc = dict(acc, **ch)
@@ -35,6 +39,8 @@ for nm, ch in steps:
 singles = {"सिर्फ़ Max leg-out 3": dict(maxLegOut=3, allowTwoLegOut=True), "सिर्फ़ MTF not against": dict(coreMTF=M[1]),
            "सिर्फ़ Action/Wholesale बंद": dict(filterAction=False, filterWholesale=False),
            "सिर्फ़ leg-out 1.5× boring": dict(legOutToBaseSizeMult=1.5), "सिर्फ़ Edge 0": dict(minEdge=0)}
+singles = {"सिर्फ़ Volume 0, SL दूरी 0": dict(minVolRatio=0.0, minRiskPct=0.0),
+           "सिर्फ़ Volume 0, SL 0, MTF Off, Action/WS बंद, Edge 0": dict(minVolRatio=0.0, minRiskPct=0.0, coreMTF=M[0], filterAction=False, filterWholesale=False, minEdge=0)}
 VARS.update(singles)
 rows, rej_def = [], {}
 for name, ch in VARS.items():

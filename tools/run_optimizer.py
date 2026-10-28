@@ -112,6 +112,8 @@ def build_charts(SEL):
                             entry_i=pos.get(ej), exit_i=pos.get(xj), prox=round(prox, 2), dist=round(dist, 2),
                             target=round(float(t["target"]), 2), entry=round(float(t["entry"]), 2), exit=round(float(t["exit"]), 2),
                             reason=t["reason"], entry_time=str(t["entry_time"]), exit_time=str(t["exit_time"]),
+                            gap=bool(t["gap_entry"]), t1=round(prox + (2.5 if dem else -2.5) * abs(prox - dist), 2),
+                            nR5=round(float(getattr(r, "nR5", r.nR)), 2),
                             nR=round(float(r.nR), 2), edge=int(getattr(r, "f_edge", 0)), volratio=round(float(getattr(r, "f_volratio", 0) or 0), 2),
                             width=round(float(r.f_zone_pct), 2), lo_ratio=round(float(r.m_lo_ratio), 2), power=round(float(r.pow_rr), 2),
                             li_atr=round(float(r.m_in_atr), 2), lo_atr=round(float(r.m_out_atr), 2), base_tr=round(float(r.m_base_tr), 2),
@@ -127,7 +129,8 @@ if CHARTS:
 
 FULL = os.path.exists(_mode_f) and open(_mode_f).read().strip().startswith("full")
 if FULL:                                     # सारे F&O स्टॉक · सारे 13 TF · v25 नियम → हर ट्रेड का चार्ट
-    A.COLLECT_VARIANTS = [("base", 0.0, 0.0, 5.0, "rr")]
+    A.COLLECT_VARIANTS = [("base", 0.0, 0.0, 5.0, "rr"), ("rr2.5", 0.0, 0.0, 2.5, "rr")]
+    os.environ["COLLECT_ALL_ENTRIES"] = "1"
     I = A.PineInputs().sanitized()
     T = A.opt_collect(syms, frames, TFS, I, START, END, loose_all=True,
                       progress=lambda f, s: print(f"collect {f:.0%} {s}", flush=True) if int(f * 100) % 10 == 0 else None)
@@ -142,8 +145,16 @@ if FULL:                                     # सारे F&O स्टॉक 
     vr = T["f_volratio"].fillna(9.0)
     V = ((T.m_li_body >= .6) & (T.m_in_atr >= 1.0) & (T.m_li_closewick <= .3) & (T.m_cbli <= .5) & (T.m_base_tr <= .7)
          & (T.m_li_ratio >= 1.5) & (T.m_fo_body >= .6) & (T.m_out_atr >= 1.2) & (T.m_lo_minbody >= .5) & (T.m_lo_ratio >= 2.0)
-         & (T.pow_rr >= 2.0) & (T.m_room >= 3) & T.m_white.astype(bool) & (T.f_zone_pct >= .4) & (vr >= 1.5) & (T.f_edge >= 4)
-         & ~T.f_bz.astype(bool) & notag & T.m_form_range.astype(bool) & (T.away >= 3))
+         & (T.pow_rr >= 2.5) & (T.m_room >= 3) & T.m_white.astype(bool) & (T.f_zone_pct >= .4) & (vr >= 1.5) & (T.f_edge >= 4)
+         & ~T.f_bz.astype(bool) & notag & (T.m_form_dev <= 1e-9) & (T.away >= 3)
+         & (T.m_li_body_base >= 1.5) & (T.m_lo_li_body >= 1.0) & T.m_white_wick.astype(bool))
+    # आधी 1:2.5, आधी 1:5
+    _k = ["zid", "entry_time"]
+    _r25 = T[T["var"] == "rr2.5"].set_index(_k)["nR"].rename("nR25")
+    T = T.join(_r25, on=_k)
+    T["nR5"] = T["nR"]
+    T["nR"] = 0.5 * (T["nR5"] + T["nR25"])
+    V = V & (T["var"] == "base") & T["nR25"].notna()
     if os.environ.get("FULL_NOFILTER"):
         V = T["reason"].notna()
     SEL = T[V].copy()

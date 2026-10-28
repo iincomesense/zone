@@ -2330,10 +2330,10 @@ OPT_GRID = dict(
 )
 OPT_BASE = dict(atr=1.2, body=0.6, li=1.5, lo=2.5, power=3.0, maturity=3, score=0, trend="off",
                 side="both", be=0.0, minrisk=0.0, dmode="CNC", loc="off", htf="off", approach="any", volratio=0.0, edge=0)
-BACKTESTED_PRESET = dict(atr=1.0, body=0.6, li=1.5, lo=2.0, power=2.0, maturity=3, score=0, trend="not_against",
+BACKTESTED_PRESET = dict(atr=1.0, body=0.6, li=1.5, lo=2.0, power=2.5, maturity=3, score=0, trend="not_against",
                          side="both", be=0.0, minrisk=0.4, dmode="MIS", loc="off", htf="off", approach="gap", rr=5.0,
                          volratio=1.5, edge=4, atr_out=1.2, boatr=0.7, licw=0.3, opprr=3.0, form=True,
-                         formrng=True)
+                         formrng=False, formtol=0.0, libody=1.5, lobody=1.0, whitewick=True, t1rr=2.5)
 
 
 TREND_TO_CORE = {"off": "Off (score only)", "not_against": "Higher-TF not against",
@@ -2736,7 +2736,7 @@ def opt_pick(R: pd.DataFrame, top: int = 15) -> Optional[dict]:
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v25 · चार्ट review: Formation (leg-in range) + maturity 3 · 2026-10-28"
+APP_BUILD = "v26 · आपके नियम: leg-in body ≥1.5× boring · leg-out ≥ leg-in · white area wick · 15:15 candle ठीक · 2026-10-28"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -3675,15 +3675,13 @@ def _opt_pine_text(b: dict) -> str:
 
 
 def optimizer_panel(inp: PineInputs, tb: dict, cap: float, rp: float, d0, d1, alloc: float = 25.0) -> None:
-    st.markdown("**✅ बैकटेस्ट से पास नियम v25 (28-Oct-2026 · 222 स्टॉक · चार्ट review के बाद)**")
-    st.caption("Leg-in: body ≥60% · TR ≥ ATR×1.0 · closing wick ≤ 30% · Boring: TR ≤ ATR×0.7 · 1–3 candle · "
-               "Leg-in ≥ 1.5× boring · Leg-out: body ≥60% · TR ≥ ATR×1.2 · ≥ 2× boring · Power ≥ 1:2 · "
-               "Formation: DBR/RBD में leg-out की open leg-in की range के अंदर · Maturity 3 candle · "
-               "Opposite zone 1:3 के अंदर नहीं · White area · ज़ोन ≥0.4% · volume ≥1.5× · Edge ≥4 · "
-               "gap-open entry (SL के पार खुले तो नहीं) · MIS · 1:5। चार्ज के बाद, 2h·4h·1d, ₹25k / 0.5% जोखिम: "
-               "Jan-24→Jun-25 ≈ +₹6,400, Jul-25→Oct-26 ≈ +₹6,300 · 57 ट्रेड · जीत ~53%। सबसे अच्छा TF 4h; "
-               "1h पर घाटा। परखे पर फ़ायदा नहीं: SL buffer, leg-out ≥ leg-in ×1.25+, target leg-out के अंदर, CBLI size। "
-               "भविष्य की गारंटी नहीं।")
+    st.markdown("**✅ आपके चुने नियम v26 (28-Oct-2026 · 222 स्टॉक · साफ़ डेटा, 15:15 वाली candle ठीक)**")
+    st.caption("Leg-in: body ≥60% · TR ≥ ATR×1.0 · closing wick ≤30% · body ≥ 1.5× boring range · Boring: 1–3 · TR ≤ ATR×0.7 · "
+               "Leg-out: body ≥60% · TR ≥ ATR×1.2 · body ≥ leg-in body · ≥ 2× boring · Formation (DBR/RBD): open leg-in body के अंदर · "
+               "White area: leg-out की body और wick boring को पूरा न ढकें · Power ≥ 1:2.5 · Opposite 1:3 · Maturity 3 · "
+               "ज़ोन ≥0.4% · volume ≥1.5× · Edge ≥4 · बड़ा TF उल्टा नहीं · gap-open entry · target आधी 1:2.5, आधी 1:5। "
+               "2h·4h·1d, ₹25k / 0.5% जोखिम, चार्ज के बाद: Jan-24→Jun-25 +₹4,761, Jul-25→Oct-26 +₹1,625 · 28 ट्रेड (~1/माह) · "
+               "जीत ~61%। सामान्य limit order (दिन में कभी भी) इन्हीं नियमों पर: 312 ट्रेड, +₹3,308 / −₹1,996। गारंटी नहीं।")
     put(st, "button", "✅ ये नियम ⚙️ इनपुट में लगाएँ", on_click=_opt_apply, args=(BACKTESTED_PRESET,), key="preset_apply")
     st.divider()
     st.markdown("**🔧 Optimizer — असली डेटा पर सबसे अच्छे नियम (zone कम न हों + मुनाफ़ा)**")

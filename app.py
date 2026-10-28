@@ -1853,9 +1853,11 @@ def _bt_prep(df: pd.DataFrame, tf: str) -> dict:
     day = idx.normalize()
     intraday = TF_SECONDS.get(tf, 0) < 86400
     last_of_day = np.ones(n, dtype=bool)
+    first_of_day = np.ones(n, dtype=bool)
     if intraday and n > 1:
         last_of_day[:-1] = day[1:] != day[:-1]
-    return dict(idx=idx, o=df["open"].to_numpy(dtype="float64"), h=df["high"].to_numpy(dtype="float64"),
+        first_of_day[1:] = day[1:] != day[:-1]
+    return dict(fod=first_of_day, idx=idx, o=df["open"].to_numpy(dtype="float64"), h=df["high"].to_numpy(dtype="float64"),
                 l=df["low"].to_numpy(dtype="float64"), c=df["close"].to_numpy(dtype="float64"),
                 n=n, intraday=intraday, lod=last_of_day)
 
@@ -1888,8 +1890,9 @@ def _bt_sim_one(P: dict, z: dict, rr: float, maturity: int, be_rr: float, use_bu
         break
     if ej is None:
         return None
-    fill = min(prox, o[ej]) if dem else max(prox, o[ej])
-    open_first = (o[ej] <= prox) if dem else (o[ej] >= prox)
+    fod = P["fod"]          # open पर fill सिर्फ़ session की पहली candle (रात का gap) पर — बीच की candle में भाव लगातार चलता है
+    open_first = bool(fod[ej]) and ((o[ej] <= prox) if dem else (o[ej] >= prox))
+    fill = (min(prox, o[ej]) if dem else max(prox, o[ej])) if open_first else prox
     sl = sl0
     be_lvl = (fill + be_rr * risk_ps if dem else fill - be_rr * risk_ps) if be_rr > 0 else None
     exit_px = exit_j = None
@@ -1902,11 +1905,11 @@ def _bt_sim_one(P: dict, z: dict, rr: float, maturity: int, be_rr: float, use_bu
         first = k == ej
         if dem:
             if l[k] <= sl:
-                exit_px = fill if (first and fill <= sl) else (sl if first else min(o[k], sl))
+                exit_px = fill if (first and fill <= sl) else (sl if (first or not fod[k]) else min(o[k], sl))
                 exit_j, reason = k, ("BE" if sl != sl0 else "SL")
                 break
             if h[k] >= tgt and (not first or open_first):
-                exit_px = tgt if first else max(o[k], tgt)
+                exit_px = tgt if (first or not fod[k]) else max(o[k], tgt)
                 exit_j, reason = k, "Target"
                 break
             if be_lvl is not None and sl == sl0 and h[k] >= be_lvl and (not first or open_first):
@@ -1916,11 +1919,11 @@ def _bt_sim_one(P: dict, z: dict, rr: float, maturity: int, be_rr: float, use_bu
                 break
         else:
             if h[k] >= sl:
-                exit_px = fill if (first and fill >= sl) else (sl if first else max(o[k], sl))
+                exit_px = fill if (first and fill >= sl) else (sl if (first or not fod[k]) else max(o[k], sl))
                 exit_j, reason = k, ("BE" if sl != sl0 else "SL")
                 break
             if l[k] <= tgt and (not first or open_first):
-                exit_px = tgt if first else min(o[k], tgt)
+                exit_px = tgt if (first or not fod[k]) else min(o[k], tgt)
                 exit_j, reason = k, "Target"
                 break
             if be_lvl is not None and sl == sl0 and l[k] <= be_lvl and (not first or open_first):
@@ -2515,7 +2518,7 @@ def opt_pick(R: pd.DataFrame, top: int = 15) -> Optional[dict]:
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v17 · covered-leg-out fix · 2026-10-28"
+APP_BUILD = "v18 · realistic fills (gap only at session open) · 2026-10-28"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")

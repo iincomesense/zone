@@ -37,6 +37,8 @@ if COLLECT:                                  # हर पैरामीटर �
 if os.path.exists(_mode_f) and open(_mode_f).read().strip().startswith("full"):
     TFS = list(A.ALL_TFS)
     END = pd.Timestamp.now(tz=IST).normalize() + pd.Timedelta(hours=23, minutes=59)   # आज तक (पिछले 60 दिन भी)
+    if "small" in open(_mode_f).read():
+        TFS = ["3m", "5m", "10m", "15m", "30m", "75m"]
 CAP, RISK, ALLOC, KEEP = 25000.0, 0.5, 25.0, 80.0
 
 t0 = time.time()
@@ -157,6 +159,7 @@ if FULL:                                     # सारे F&O स्टॉक 
     V = V & (T["var"] == "base") & T["nR25"].notna()
     if os.environ.get("FULL_NOFILTER"):
         V = T["reason"].notna()
+    T.to_csv(os.path.join(OUT, "signals_full.csv.gz"), index=False, compression="gzip")
     SEL = T[V].copy()
     SEL.to_csv(os.path.join(OUT, "v25_trades.csv"), index=False)
     out, miss = build_charts(SEL)

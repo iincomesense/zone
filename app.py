@@ -83,7 +83,7 @@ except Exception:                                          # read-only FS (Strea
 # TF → (yahoo base interval, period, resample rule or None)
 # ---------------------------------------------------------------------------
 BASE_SPEC: Dict[str, Tuple[str, str]] = {
-    "1m": ("1m", "5d"),          # Yahoo: 1m sirf 7 din
+    "1m": ("1m", "7d"),          # Yahoo: 1m sirf 7 din
     "5m": ("5m", "60d"),
     "15m": ("15m", "60d"),
     "30m": ("30m", "60d"),

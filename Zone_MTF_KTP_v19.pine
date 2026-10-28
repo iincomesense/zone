@@ -1,5 +1,5 @@
 // This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
-// © iincomesense — "Zone MTF (KTP rules v18)"
+// © iincomesense — "Zone MTF (KTP rules v19)"
 // Demand/Supply zones per Dr. Ravi R. Kumar's KTP / Super Trader rules (user's Drive notes)
 // + institutional order-flow confluence (displacement, relative volume, liquidity sweep, imbalance).
 // v8: rules chosen step by step by the user —
@@ -9,6 +9,7 @@
 //     Score /12: follow-up (FU), break zone (BZ), swing break (SB) each +1; Strong = boring↔leg-out gap < leg-in.
 //     Tags: FU BZ SB Strong WS C+F (zone also on current-month future same day) · 6C✗ exit alert.
 //     Commodity mode applies automatically on commodity symbols.
+//     v19 defaults = Edge-score preset: loose core (ATR 1.0, leg-out 2×, power 1:2, no maturity) + gap-open entry + zone ≥0.4% + leg-out volume ≥1.5× boring + Edge ≥4/9, BZ removed.
 //     v17 defaults = backtested gap-open preset (28-Oct-2026, 222 NSE F&O stocks, realistic fills, charges,
 //         duplicates removed): trade only when the session OPENS inside the zone, exit same day, ATR×1.2,
 //         leg-out ≥3× boring, power ≥1:3, maturity 3, higher-TF not against, target 1:5.
@@ -21,7 +22,7 @@
 //     v11: Show-supply switch and Break-even (SL → entry at 1:x) — set these from the app Optimizer result.
 //     States: 1st proximal touch = Tested, 2nd touch = Broken; maturity = 3 candles. SL buffer 2% DATR; T1 1:3, T2 1:5.
 //@version=6
-indicator("Zone MTF (KTP rules v17)", shorttitle="Zone MTF KTP", overlay=true, max_bars_back=5000, max_boxes_count=500, max_labels_count=500, max_lines_count=60)
+indicator("Zone MTF (KTP rules v19)", shorttitle="Zone MTF KTP", overlay=true, max_bars_back=5000, max_boxes_count=500, max_labels_count=500, max_lines_count=60)
 
 // ============================================================ INPUTS
 G0 = "0 · Capital, risk, buffer (SETS)"
@@ -44,13 +45,13 @@ G1 = "1 · Strictness & core candle rules"
 modeIn = input.string("Standard (core mandatory)", "Strictness", options=["Standard (core mandatory)", "Strict (core + all notes rules)"], group=G1, tooltip="Standard: नीचे के CORE नियम अनिवार्य, नोट्स के बाकी नियम सिर्फ़ ग्रेडिंग (Rules x/5)। Strict: सभी नियम अनिवार्य (ज़ोन बहुत कम)।")
 atrPeriod = input.int(14, "ATR Period (course: 14)", minval=1, group=G1)
 filledMinBody = input.float(0.60, "Filled candle: min body % (Body > Wick)", minval=0, maxval=1, step=0.05, group=G1)
-legInAtrMult = input.float(1.2, "Leg-in: TR ≥ ATR ×", minval=0, step=0.05, group=G1)
-legOutAtrMult = input.float(1.2, "First leg-out: TR ≥ ATR ×", minval=0, step=0.05, group=G1)
+legInAtrMult = input.float(1.0, "Leg-in: TR ≥ ATR ×", minval=0, step=0.05, group=G1)
+legOutAtrMult = input.float(1.0, "First leg-out: TR ≥ ATR ×", minval=0, step=0.05, group=G1)
 boringAtrMult = input.float(1.0, "Boring: TR ≤ ATR ×", minval=0.1, step=0.05, group=G1)
 minBaseCountInput = input.int(1, "Min boring candles", minval=1, maxval=4, group=G1)
 maxBaseCountInput = input.int(3, "Max boring candles (>3 not good)", minval=1, maxval=4, group=G1)
 legInToBaseSizeMult = input.float(1.5, "1-2-4: Leg-in ≥ boring ×", minval=1, step=0.25, group=G1)
-legOutToBaseSizeMult = input.float(2.5, "1-2-4: Leg-out (body to body) ≥ boring ×", minval=1, step=0.25, group=G1)
+legOutToBaseSizeMult = input.float(2.0, "1-2-4: Leg-out (body to body) ≥ boring ×", minval=1, step=0.25, group=G1)
 legOutEachMinBody = input.float(0.50, "Leg-out 2/3: each candle min body % (wick < 50%)", minval=0, maxval=1, step=0.05, group=G1)
 maxLegOut = input.int(3, "Max leg-out candles counted", minval=1, maxval=3, group=G1)
 allowTwoLegOut = input.bool(true, "Allow exactly 2 leg-out candles", group=G1)
@@ -66,7 +67,7 @@ distalMode = input.string("Pattern lowest/highest (course)", "Distal (SL) line",
 GC = "1A · MANDATORY: Filled-Unfilled-Filled · 1-2-4 · TR vs ATR (always ON) + Power"
 corePower = input.bool(true, "MANDATORY: Power of leg-out", group=GC, tooltip="Entry = Proximal, SL = Distal। लेग-आउट कैंडल के अंदर ही कम से कम 1:3 रिवॉर्ड मिला हो; 1:5 मिले तो ★ Best")
 powerMode = input.string("All leg-outs (max 3)", "Power measured on", options=["First leg-out only", "All leg-outs (max 3)"], group=GC)
-powerMinRR = input.float(3.0, "Power: minimum reward 1:", minval=1, step=0.5, group=GC)
+powerMinRR = input.float(2.0, "Power: minimum reward 1:", minval=1, step=0.5, group=GC)
 powerBestRR = input.float(5.0, "Power: best (★) reward 1:", minval=1, step=0.5, group=GC)
 powerOnBody = input.bool(true, "Power measured to leg-out close (body)", group=GC)
 GF = "1B · Flexible rules (score) — tick to make mandatory"
@@ -84,6 +85,7 @@ supplyIntradayOnly = input.bool(false, "Supply only on intraday TF (MIS)", group
 gapEntryOnly = input.bool(true, "Entry only when session OPENS inside zone (gap-open)", group=GF, tooltip="बैकटेस्ट: दिन के बीच धीरे-धीरे ज़ोन में आए भाव पर घाटा; सिर्फ़ बाज़ार खुलते ही ज़ोन में gap वाले ट्रेड plus रहे")
 misExitAlert = input.bool(true, "Intraday: exit alert at 15:10 (MIS square-off)", group=GF)
 minRiskPct = input.float(0.4, "Min SL distance % of price (0 = off)", minval=0, step=0.1, group=GF, tooltip="बहुत पतले ज़ोन में चार्ज मुनाफ़ा खा जाते हैं")
+minEdge = input.int(4, "Edge score /9 minimum (0 = off; BZ zones removed)", minval=0, maxval=9, group=GF, tooltip="volume 1.5× · rel vol 1.2× · चौड़ाई ≥0.4% · pivot · बड़े TF का ज़ोन · notes 5/5 · FU · SB · gap ज़ोन। बैकटेस्ट: 4")
 minVolRatio = input.float(1.5, "Leg-out avg volume ÷ boring avg volume ≥ (0 = off)", minval=0, step=0.1, group=GF, tooltip="boring शांत + leg-out में भारी volume = संस्थाओं का pending order। बैकटेस्ट में 1.5 सबसे अच्छा")
 coreMTF = input.string("Higher-TF not against", "MTF analysis → mandatory", options=["Off (score only)", "Higher-TF not against", "Higher-TF in favour (strict)"], group=GF)
 
@@ -94,8 +96,8 @@ gapTolAtr = input.float(0.10, "Leg-in ↔ boring gap tolerance × ATR", minval=0
 legOutTooLong = input.float(4.0, "Flag ⚠ if leg-out > leg-in ×", minval=1, step=0.5, group=G2)
 useCoveredLegOut = input.bool(true, "Covered leg-out = trap (live)", group=G2)
 coverPct = input.float(0.50, "Covered leg-out: max % of first leg-out body", minval=0.1, maxval=1, step=0.05, group=G2)
-useMaturity = input.bool(true, "Zone maturity (early arrival = trap)", group=G2)
-maturityBars = input.int(3, "Maturity: candles after zone", minval=0, maxval=50, group=G2)
+useMaturity = input.bool(false, "Zone maturity (early arrival = trap)", group=G2)
+maturityBars = input.int(0, "Maturity: candles after zone", minval=0, maxval=50, group=G2)
 immatureWithTrend = input.bool(false, "Allow immature zone if Pulse/Trend in favour", group=G2)
 useTimeRule = input.bool(false, "Entry time rules (intraday)", group=G2, tooltip="Hourly: 1 बजे के बाद नहीं · Daily: 12:30 के बाद नहीं · Weekly: शुक्रवार 12:30 के बाद नहीं")
 maxTouches = input.int(3, "Max entries before zone is exhausted", minval=1, maxval=10, group=G2)
@@ -257,6 +259,8 @@ type Candidate
     int notesPass = 0
     int instScore = 0
     float volRatio = na
+    bool pivot = false
+    float relVolX = na
 
 // Bar 0 = LAST leg-out. fo = first leg-out, b0..bLast = boring, li = leg-in, pi = candle behind leg-in.
 f_candidate(int bc, int nOut) =>
@@ -441,6 +445,13 @@ f_candidate(int bc, int nOut) =>
         for k = b0 to bLast
             baseVolSum += nz(volume[k])
         c.volRatio := baseVolSum > 0 ? (outVolSum / (fo + 1)) / (baseVolSum / bc) : na
+        float lo20 = na
+        float hi20 = na
+        for k = li + 1 to li + 20
+            lo20 := na(lo20) ? low[k] : math.min(lo20, low[k])
+            hi20 := na(hi20) ? high[k] : math.max(hi20, high[k])
+        c.pivot := demand ? zoneLow <= lo20 : zoneHigh >= hi20
+        c.relVolX := not na(vol_sma[fo]) and vol_sma[fo] > 0 ? nz(volume[fo]) / vol_sma[fo] : na
         c.valid := true
         c.stage := 11
         c.baseCount := bc
@@ -888,7 +899,9 @@ if bar_index >= math.max(atrPeriod, maxBaseCount + maxLegOut + 3, sweepLen + 6, 
             score += baseBreaksOld ? 1 : 0                          // BZ: break zone
             score += swingBreak ? 1 : 0                             // SB: swing break
             score += actionOK ? 1 : 0                               // Pulse & trend
-            bool skip = (hideNoTrade and score < minScore) or (filterAction and not actionOK) or (filterWholesale and not wsOK) or (not showSupply and not c.demand) or (supplyIntradayOnly and not c.demand and not timeframe.isintraday) or (not na(curveLim) and (na(cHH) or cHH <= cLL or (c.demand ? (c.prox - cLL) / (cHH - cLL) > curveLim : (c.prox - cLL) / (cHH - cLL) < 1 - curveLim))) or (minRiskPct > 0 and c.prox != 0 and math.abs(c.prox - c.dist) / c.prox * 100 < minRiskPct) or (minVolRatio > 0 and not na(c.volRatio) and c.volRatio < minVolRatio)
+            float wPct = c.prox != 0 ? math.abs(c.prox - c.dist) / c.prox * 100 : 0.0
+            int edge = ((na(c.volRatio) or c.volRatio >= 1.5) ? 1 : 0) + ((not na(c.relVolX) and c.relVolX >= 1.2) ? 1 : 0) + (wPct >= 0.4 ? 1 : 0) + (c.pivot ? 1 : 0) + (f_mtf_ok(c.demand, c.prox, c.dist) ? 1 : 0) + (c.notesPass >= 5 ? 1 : 0) + (followUp ? 1 : 0) + (swingBreak ? 1 : 0) + ((c.gapOut or c.strongGap) ? 1 : 0)
+            bool skip = (minEdge > 0 and (edge < minEdge or baseBreaksOld)) or (hideNoTrade and score < minScore) or (filterAction and not actionOK) or (filterWholesale and not wsOK) or (not showSupply and not c.demand) or (supplyIntradayOnly and not c.demand and not timeframe.isintraday) or (not na(curveLim) and (na(cHH) or cHH <= cLL or (c.demand ? (c.prox - cLL) / (cHH - cLL) > curveLim : (c.prox - cLL) / (cHH - cLL) < 1 - curveLim))) or (minRiskPct > 0 and c.prox != 0 and math.abs(c.prox - c.dist) / c.prox * 100 < minRiskPct) or (minVolRatio > 0 and not na(c.volRatio) and c.volRatio < minVolRatio)
             if skip
                 break
             color zoneColor = c.demand ? color.green : color.red

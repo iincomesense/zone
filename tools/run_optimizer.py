@@ -63,7 +63,7 @@ def md(df):
         return "```\n" + df.to_string(index=False) + "\n```"
 
 
-keys = ["atr", "body", "li", "lo", "power", "maturity", "trend", "side", "be", "minrisk", "dmode", "loc", "htf", "approach", "rr", "volratio"]
+keys = ["atr", "body", "li", "lo", "power", "maturity", "trend", "side", "be", "minrisk", "dmode", "loc", "htf", "approach", "rr", "volratio", "edge"]
 stats = ["IS_sig", "IS_winR", "IS_grossR", "IS_costR", "IS_expR", "IS_totR", "OOS_sig", "OOS_winR",
          "OOS_grossR", "OOS_costR", "OOS_expR", "OOS_totR", "IS_trades", "IS_skipped", "IS_net",
          "OOS_trades", "OOS_skipped", "OOS_net", "OOS_max_dd"]
@@ -85,13 +85,13 @@ lines += ["", f"## positive in BOTH periods: {len(pos)} combos", pos.sort_values
 P = A.BACKTESTED_PRESET if hasattr(A, "BACKTESTED_PRESET") else None
 if P is not None:
     q = R.copy()
-    for k in ("atr", "body", "li", "maturity", "score", "side", "be", "minrisk", "dmode", "loc", "rr", "volratio"):
+    for k in ("atr", "body", "li", "maturity", "score", "side", "be", "minrisk", "dmode", "loc", "rr", "volratio", "edge", "lo", "power"):
         q = q[q[k] == P[k]]
-    q = q[q["lo"].isin([2.5, 3.0]) & q["power"].isin([2.0, 3.0]) & q["trend"].isin(["not_against", "in_favour"])]
+    q = q[q["trend"].isin(["not_against", "in_favour", "off"])]
     q = q.sort_values(["approach", "htf", "trend"])
     lines += ["", "## preset + neighbours (htf off/on)", q[keys + stats].round(3).pipe(md)]
 lines += ["", "## marginal effect of each option (mean over combos with IS_sig>=30)"]
-for k in ["approach", "volratio", "htf", "trend", "side", "dmode", "loc", "minrisk", "maturity", "rr", "lo", "power", "atr"]:
+for k in ["approach", "volratio", "edge", "htf", "trend", "side", "dmode", "loc", "minrisk", "maturity", "rr", "lo", "power", "atr"]:
     g = R[R["IS_sig"] >= 30].groupby(k)[["IS_sig", "IS_grossR", "IS_expR", "OOS_sig", "OOS_grossR", "OOS_expR"]].mean().round(3).reset_index()
     lines += ["", f"### {k}", md(g)]
 pos2 = R[(R["IS_expR"] > 0) & (R["OOS_expR"] > 0) & (R["IS_sig"] >= 60) & (R["OOS_sig"] >= 40)]

@@ -763,7 +763,8 @@ class PineInputs:
     showSupply: bool = True
     breakEvenRR: float = 0.0
     minRiskPct: float = 0.0
-    minVolRatio: float = 0.0      # leg-out का औसत volume ÷ boring का औसत volume (pending order का सबूत) · 0 = बंद
+    minVolRatio: float = 0.0
+    minEdge: int = 0              # Edge score /9 कम से कम (0 = बंद) · BZ ज़ोन हटते हैं      # leg-out का औसत volume ÷ boring का औसत volume (pending order का सबूत) · 0 = बंद
     demandIntradayMIS: bool = False
     curveMode: str = "off"
     htfZoneReq: bool = False
@@ -1229,6 +1230,24 @@ def _bar_incomplete(S: _S, tf: str) -> bool:
         return bool(market_open_now() and S.t[-1] + sec * 1000 > now_ms)
     except Exception:                                          # noqa: BLE001
         return False
+
+
+def edge_score(z: dict, htf: bool = False) -> int:
+    """Edge score /9 — बैकटेस्ट में फ़ायदे वाले संकेत गिनो (pending order के सबूत):
+    volume 1.5× · rel volume 1.2× · चौड़ाई ≥0.4% · pivot · बड़े TF का ज़ोन · notes 5/5 · FU · SB · gap ज़ोन"""
+    vr, rv = z.get("f_volratio", np.nan), z.get("f_relvol", np.nan)
+    w = abs(z["prox"] - z["dist"]) / z["prox"] * 100.0 if z.get("prox") else 0.0
+    return int((not np.isfinite(vr)) or vr >= 1.5) + int(np.isfinite(rv) and rv >= 1.2) + int(w >= 0.4) \
+        + int(bool(z.get("f_pivot"))) + int(bool(htf)) + int(int(z.get("notes_pass", 0)) >= 5) \
+        + int(bool(z.get("follow"))) + int(bool(z.get("swing_break"))) \
+        + int(bool(z.get("f_gapout")) or bool(z.get("f_strong")))
+
+
+def edge_ok(z: dict, I: "PineInputs", htf: bool = False) -> bool:
+    """minEdge > 0 हो तो: score ≥ minEdge और BZ (पुराना ज़ोन तोड़कर बना) नहीं — BZ बैकटेस्ट में घाटे वाला"""
+    if I.minEdge <= 0:
+        return True
+    return edge_score(z, htf) >= I.minEdge and not bool(z.get("base_break"))
 
 
 def engine(df: pd.DataFrame, I: PineInputs, tf: str, htf_daily: Optional[pd.DataFrame] = None,
@@ -1808,12 +1827,15 @@ def scan_symbol(symbol: str,
                 continue
             if I.minVolRatio > 0 and np.isfinite(z.get("f_volratio", np.nan)) and z["f_volratio"] < I.minVolRatio:
                 continue
+            z["edge"] = edge_score(z, z["htf_conf"])
+            if not edge_ok(z, I, z["htf_conf"]):
+                continue
             if I.filterAction and not act_ok:
                 continue
             if I.filterWholesale and not ws_ok:
                 continue
             z["cf"] = (dem, datetime.fromtimestamp(z["time"] / 1000, IST).date()) in fut_days.get(tf, set())
-            extra_tags = [t for t, on in (("WS", ws_ok), ("C+F", z["cf"]), ("HTF", z["htf_conf"]),
+            extra_tags = [t for t, on in (("WS", ws_ok), ("C+F", z["cf"]), ("HTF", z["htf_conf"]), (f"E{z['edge']}", True),
                                           ("Discount" if dem else "Premium", curve_ok("half", dem, z["loc"])),
                                           ("6C✗ exit", z.get("six") == -1 and z["state"] == STATE_TRIG)) if on]
             z["tags"] = " ".join([t for t in [z.get("tags", "")] + extra_tags if t])
@@ -2093,6 +2115,8 @@ def bt_collect(symbols: Sequence[str], frames_all: Dict[str, Dict[str, pd.DataFr
                 zs = [z for z in zs if z["prox"] and abs(z["prox"] - z["dist"]) / z["prox"] * 100.0 >= Is.minRiskPct]
             if Is.minVolRatio > 0:
                 zs = [z for z in zs if not (np.isfinite(z.get("f_volratio", np.nan)) and z["f_volratio"] < Is.minVolRatio)]
+            if Is.minEdge > 0:
+                zs = [z for z in zs if edge_ok(z, Is)]
             if Is.supplyIntradayOnly and TF_SECONDS.get(tf, 0) >= 86400:
                 zs = [z for z in zs if z["demand"]]
             cs = curve_series(fr, tf) if Is.curveMode != "off" else None
@@ -2237,16 +2261,17 @@ OPT_GRID = dict(
     be=[0.0],                       # (break-even से फ़र्क नहीं मिला)
     minrisk=[0.0, 0.4],             # SL की दूरी भाव का कम से कम % (पतले ज़ोन में चार्ज R खा जाते हैं)
     dmode=["CNC", "MIS"],           # intraday TF पर Demand: CNC (कई दिन) या MIS (उसी दिन, कम चार्ज)
-    loc=["off", "half", "third"],   # Curve: DZ discount में / SZ premium में
+    loc=["off", "half"],            # Curve: DZ discount में / SZ premium में
+    edge=[0, 4],                    # Edge score /9 ≥ (BZ ज़ोन हटाकर)
     htf=["off", "on"],              # Zone-in-zone: ट्रेंड TF का जीवित ज़ोन साथ हो
     approach=["any", "clean", "gap"],  # clean = लौटते समय leg-out 50% नहीं ढका; gap = open ही ज़ोन में
     rr=[3.0, 5.0],
 )
 OPT_BASE = dict(atr=1.2, body=0.6, li=1.5, lo=2.5, power=3.0, maturity=3, score=0, trend="off",
-                side="both", be=0.0, minrisk=0.0, dmode="CNC", loc="off", htf="off", approach="any", volratio=0.0)
-BACKTESTED_PRESET = dict(atr=1.2, body=0.6, li=1.5, lo=2.5, power=3.0, maturity=3, score=0, trend="not_against",
+                side="both", be=0.0, minrisk=0.0, dmode="CNC", loc="off", htf="off", approach="any", volratio=0.0, edge=0)
+BACKTESTED_PRESET = dict(atr=1.0, body=0.6, li=1.5, lo=2.0, power=2.0, maturity=0, score=0, trend="not_against",
                          side="both", be=0.0, minrisk=0.4, dmode="MIS", loc="off", htf="off", approach="gap", rr=5.0,
-                         volratio=1.5)
+                         volratio=1.5, edge=4)
 
 
 TREND_TO_CORE = {"off": "Off (score only)", "not_against": "Higher-TF not against",
@@ -2360,6 +2385,7 @@ def opt_collect(symbols: Sequence[str], frames_all: Dict[str, Dict[str, pd.DataF
                             hp = htf_conf(pspans, bool(z["demand"]), max(z["prox"], z["dist"]),
                                           min(z["prox"], z["dist"]), zborn)
                             rows.append(dict(base, rr=rr, maturity=mat, be=be, dmode=dm, loc=lv, htf_conf=hc, htf_par=hp,
+                                             f_edge=edge_score(z, hp),
                                              away=int(t["ej"]) - int(z["created_bar"]),
                                              intra=intra, cov_before=t["cov_before"], gap_entry=t["gap_entry"],
                                              entry_time=t["entry_time"], exit_time=t["exit_time"],
@@ -2478,7 +2504,9 @@ def opt_run(T: pd.DataFrame, capital: float, risk_pct: float, split: pd.Timestam
     r_cost = _charges_vec(cnc, buy, sell, xt) / R0
     r_net = r_gross - r_cost
     keys = ["atr", "body", "li", "lo", "power", "maturity", "score", "trend", "side", "be", "minrisk", "dmode",
-            "loc", "htf", "approach", "rr", "volratio"]
+            "loc", "htf", "approach", "rr", "volratio", "edge"]
+    edg = T["f_edge"].to_numpy(dtype=float) if "f_edge" in T else np.full(len(T), 9.0)
+    bzv = T["f_bz"].to_numpy(dtype=bool) if "f_bz" in T else np.zeros(len(T), dtype=bool)
     vrat = np.nan_to_num(T["f_volratio"].to_numpy(dtype=float), nan=99.0) if "f_volratio" in T else np.full(len(T), 99.0)
     covb = T["cov_before"].to_numpy(dtype=bool)
     gape = T["gap_entry"].to_numpy(dtype=bool)
@@ -2508,6 +2536,8 @@ def opt_run(T: pd.DataFrame, capital: float, risk_pct: float, split: pd.Timestam
              & (A["rr"] == p["rr"]) & (A["maturity"] == p["maturity"]) & (A["be"] == p["be"])
              & (risk_pct_px >= p["minrisk"]) & ((dmode == p["dmode"]) | (dmode == "ANY"))
              & (vrat >= p["volratio"]))
+        if p["edge"] > 0:
+            m &= (edg >= p["edge"]) & ~bzv
         if p["side"] == "demand":
             m &= lg
         elif p["side"] == "dem_intra_sup":
@@ -2594,7 +2624,7 @@ def opt_pick(R: pd.DataFrame, top: int = 15) -> Optional[dict]:
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v21 · gap-open + zone ≥0.4% + volume 1.5× preset · 2026-10-28"
+APP_BUILD = "v22 · Edge score preset (gap-open · volume · चौड़ाई · pivot · HTF · FU · SB) · 2026-10-28"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -2873,6 +2903,9 @@ def pine_panel(slot=None):
             min_vol = f11.number_input("Leg-out volume ÷ boring volume ≥ (0 = बंद)", 0.0, 10.0, D.minVolRatio, 0.1,
                                        key="in_volratio",
                                        help="boring शांत + leg-out में भारी volume = संस्थाओं का ऑर्डर। बैकटेस्ट: 1.5 सबसे अच्छा")
+            min_edge = f11.number_input("Edge score /9 कम से कम (0 = बंद)", 0, 9, D.minEdge, 1, key="in_edge",
+                                        help="volume 1.5× · rel vol 1.2× · चौड़ाई ≥0.4% · pivot · बड़े TF का ज़ोन · notes 5/5 · "
+                                             "FU · SB · gap ज़ोन — जितने हों उतने अंक। BZ ज़ोन हट जाते हैं। बैकटेस्ट: 4")
             show_sup = f9.checkbox("Supply ज़ोन भी दिखाएँ/ट्रेड करें", D.showSupply, key="in_showsupply")
             be_rr = f10.number_input("Break-even: 1: पर SL entry पर (0 = बंद)", 0.0, 10.0, D.breakEvenRR, 0.5, key="in_berr")
         with t2:
@@ -2957,7 +2990,7 @@ def pine_panel(slot=None):
     inp = PineInputs(
         accountCapital=float(cap), riskPct=float(risk), targetRR=float(rr), hourlyRR=float(hrr),
         target2RR=float(t2rr), legOutEachMinBody=float(lo_each), powerOnBody=bool(pow_body),
-        showSupply=bool(show_sup), breakEvenRR=float(be_rr), minRiskPct=float(min_risk), minVolRatio=float(min_vol),
+        showSupply=bool(show_sup), breakEvenRR=float(be_rr), minRiskPct=float(min_risk), minVolRatio=float(min_vol), minEdge=int(min_edge),
         demandIntradayMIS=bool(dmis), curveMode=str(curve), htfZoneReq=bool(htfz),
         supplyIntradayOnly=bool(sup_intra), entryApproach=str(appr),
         maturityBars=int(mat_bars),
@@ -3464,6 +3497,7 @@ def _opt_apply(best: dict) -> None:
     ss["in_berr"] = float(best["be"])
     ss["in_minrisk"] = float(best.get("minrisk", 0.0))
     ss["in_volratio"] = float(best.get("volratio", 0.0))
+    ss["in_edge"] = int(best.get("edge", 0))
     ss["in_dmis"] = str(best.get("dmode", "CNC")) == "MIS"
     ss["in_curve"] = str(best.get("loc", "off"))
     ss["in_htfz"] = str(best.get("htf", "off")) == "on"
@@ -3489,6 +3523,7 @@ def _opt_pine_text(b: dict) -> str:
         f"Break-even at 1: (0 = off)         = {b['be']}",
         f"Min SL distance % of price         = {b.get('minrisk', 0.0)}",
         f"Min leg-out/boring volume ratio    = {b.get('volratio', 0.0)}",
+        f"Min Edge score (/9, no BZ)         = {b.get('edge', 0)}",
         f"Intraday TF पर Demand               = {'MIS (उसी दिन बंद)' if b.get('dmode') == 'MIS' else 'CNC (delivery)'}",
         f"Curve (Location)                   = {CURVE_LABEL.get(str(b.get('loc', 'off')))}",
         f"Zone-in-zone (HTF ज़ोन ज़रूरी)        = {'ON' if b.get('htf') == 'on' else 'OFF'}",
@@ -3538,7 +3573,7 @@ def optimizer_panel(inp: PineInputs, tb: dict, cap: float, rp: float, d0, d1, al
     if R is None or R.empty or not best:
         st.warning("कोई ट्रेड नहीं बना — ज़्यादा स्क्रिप्ट या TF चुनें।")
         return
-    cols_show = ["atr", "body", "lo", "power", "maturity", "trend", "side", "be", "minrisk", "volratio", "dmode", "loc", "htf", "rr",
+    cols_show = ["atr", "body", "lo", "power", "maturity", "trend", "side", "be", "minrisk", "volratio", "edge", "dmode", "loc", "htf", "rr",
                  "IS_sig", "IS_winR", "IS_grossR", "IS_costR", "IS_expR", "IS_totR",
                  "OOS_sig", "OOS_winR", "OOS_grossR", "OOS_costR", "OOS_expR", "OOS_totR",
                  "IS_trades", "IS_skipped", "IS_net", "OOS_trades", "OOS_skipped", "OOS_net", "OOS_max_dd"]

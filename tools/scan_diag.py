@@ -18,19 +18,24 @@ frames = A.load_frames(syms, list(dict.fromkeys(TFS + ["75m", "1d", "1w", "1M"])
 print("frames", len(frames), round(time.time() - t0), flush=True)
 D = A.PineInputs().sanitized()
 M = A.MTF_CORE_MODES
-VARS = {
-    "DEFAULT (स्क्रीनशॉट)": {},
-    "MTF: Off": dict(coreMTF=M[0]), "MTF: not against": dict(coreMTF=M[1]),
-    "Action फ़िल्टर बंद": dict(filterAction=False), "Wholesale फ़िल्टर बंद": dict(filterWholesale=False),
-    "Min score 0": dict(minScore=0), "Edge 0": dict(minEdge=0), "Volume 0": dict(minVolRatio=0.0),
-    "SL दूरी 0": dict(minRiskPct=0.0), "Leg-in body vs boring 0": dict(legInBodyVsBase=0.0),
-    "Leg-out vs leg-in 0": dict(legOutBodyVsLegIn=0.0), "Leg-out body 0.65": dict(legOutMinBody=0.65),
-    "Leg-in wick 0.5": dict(legInMaxWick=0.5), "Closing wick 1": dict(legInMaxCloseWick=1.0),
-    "Opposite 1:3": dict(oppositeRR=3.0), "Opposite बंद": dict(coreOpposite=False),
-    "Maturity बंद": dict(useMaturity=False),
-    "Action+Wholesale+MTF बंद": dict(filterAction=False, filterWholesale=False, coreMTF=M[0]),
-    "ऊपर वाले + Edge 0 + score 0": dict(filterAction=False, filterWholesale=False, coreMTF=M[0], minEdge=0, minScore=0),
-}
+VARS = {"DEFAULT (स्क्रीनशॉट)": {}}
+steps = [("+ Max leg-out 3, 2 leg-out मान्य", dict(maxLegOut=3, allowTwoLegOut=True)),
+         ("+ 1-2-4 leg-out ≥ 1.5× boring", dict(legOutToBaseSizeMult=1.5)),
+         ("+ Leg-in body ≥ 1.25× boring", dict(legInBodyVsBase=1.25)),
+         ("+ MTF: not against", dict(coreMTF=M[1])),
+         ("+ Action/Wholesale बंद", dict(filterAction=False, filterWholesale=False)),
+         ("+ Edge 0, score 0", dict(minEdge=0, minScore=0)),
+         ("+ Opposite 1:3", dict(oppositeRR=3.0)),
+         ("+ Volume 0, SL दूरी 0", dict(minVolRatio=0.0, minRiskPct=0.0)),
+         ("+ MTF Off", dict(coreMTF=M[0]))]
+acc = {}
+for nm, ch in steps:
+    acc = dict(acc, **ch)
+    VARS[nm] = dict(acc)
+singles = {"सिर्फ़ Max leg-out 3": dict(maxLegOut=3, allowTwoLegOut=True), "सिर्फ़ MTF not against": dict(coreMTF=M[1]),
+           "सिर्फ़ Action/Wholesale बंद": dict(filterAction=False, filterWholesale=False),
+           "सिर्फ़ leg-out 1.5× boring": dict(legOutToBaseSizeMult=1.5), "सिर्फ़ Edge 0": dict(minEdge=0)}
+VARS.update(singles)
 rows, rej_def = [], {}
 for name, ch in VARS.items():
     I = replace(D, **ch).sanitized()

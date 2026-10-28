@@ -2245,7 +2245,7 @@ def opt_collect(symbols: Sequence[str], frames_all: Dict[str, Dict[str, pd.DataF
             act = htf_action_series(fr, tf, Is)
             intra = P["intraday"]
             cs = curve_series(fr, tf)
-            spans = htf_zone_spans(fr, tf, I)
+            spans = htf_zone_spans(fr, tf, replace(I, commodityMode=Is.commodityMode))
             for zid, z in enumerate(zs):
                 if z.get("room_tf") is not None and z["room_tf"] < Is.oppositeRR:
                     continue                                   # आपका अनिवार्य opposite-zone नियम

@@ -1,5 +1,5 @@
 // This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
-// © iincomesense — "Zone MTF (KTP rules v12)"
+// © iincomesense — "Zone MTF (KTP rules v13)"
 // Demand/Supply zones per Dr. Ravi R. Kumar's KTP / Super Trader rules (user's Drive notes)
 // + institutional order-flow confluence (displacement, relative volume, liquidity sweep, imbalance).
 // v8: rules chosen step by step by the user —
@@ -9,11 +9,12 @@
 //     Score /12: follow-up (FU), break zone (BZ), swing break (SB) each +1; Strong = boring↔leg-out gap < leg-in.
 //     Tags: FU BZ SB Strong WS C+F (zone also on current-month future same day) · 6C✗ exit alert.
 //     Commodity mode applies automatically on commodity symbols.
+//     v13: Curve/location (DZ in discount, SZ in premium of trend-TF 50-bar range), supply only on intraday TF.
 //     v12: Min SL distance % of price (thin zones lose to charges).
 //     v11: Show-supply switch and Break-even (SL → entry at 1:x) — set these from the app Optimizer result.
 //     States: 1st proximal touch = Tested, 2nd touch = Broken; maturity = 3 candles. SL buffer 2% DATR; T1 1:3, T2 1:5.
 //@version=6
-indicator("Zone MTF (KTP rules v12)", shorttitle="Zone MTF KTP", overlay=true, max_bars_back=5000, max_boxes_count=500, max_labels_count=500, max_lines_count=60)
+indicator("Zone MTF (KTP rules v13)", shorttitle="Zone MTF KTP", overlay=true, max_bars_back=5000, max_boxes_count=500, max_labels_count=500, max_lines_count=60)
 
 // ============================================================ INPUTS
 G0 = "0 · Capital, risk, buffer (SETS)"
@@ -71,6 +72,8 @@ playRR = input.float(10.0, "Playground: clear up to 1:", minval=1, step=0.5, gro
 oppUseMTF = input.bool(true, "Opposite/playground: include other-TF zones", group=GF)
 showSupply = input.bool(true, "Show / trade supply zones", group=GF)
 breakEvenRR = input.float(0.0, "Break-even: move SL to entry at 1: (0 = off)", minval=0, step=0.5, group=GF)
+curveModeIn = input.string("Off", "Curve (Location)", options=["Off", "Half (50%)", "Third (33%)"], group=GF, tooltip="DZ सिर्फ़ ट्रेंड TF के 50-candle दायरे के निचले हिस्से (discount) में, SZ ऊपरी हिस्से (premium) में")
+supplyIntradayOnly = input.bool(false, "Supply only on intraday TF (MIS)", group=GF)
 minRiskPct = input.float(0.0, "Min SL distance % of price (0 = off)", minval=0, step=0.1, group=GF, tooltip="बहुत पतले ज़ोन में चार्ज मुनाफ़ा खा जाते हैं")
 coreMTF = input.string("Off (score only)", "MTF analysis → mandatory", options=["Off (score only)", "Higher-TF not against", "Higher-TF in favour (strict)"], group=GF)
 
@@ -208,6 +211,8 @@ string trendTF = trendTfIn == "Auto (25×)" ? f_trend_tf(chartSec) : trendTfIn
 string wsTF = ttype == 2 ? "D" : trendTF
 [tC, tO, tE20, tE20p, tAtr] = request.security(syminfo.tickerid, trendTF, [close[1], open[1], ta.ema(close, emaFast)[1], ta.ema(close, emaFast)[7], ta.rma(true_range(), atrPeriod)[1]], lookahead=barmerge.lookahead_on)
 [wC, wO, wE20, wAtr] = request.security(syminfo.tickerid, wsTF, [close[1], open[1], ta.ema(close, emaFast)[1], ta.rma(true_range(), atrPeriod)[1]], lookahead=barmerge.lookahead_on)
+[cHH, cLL] = request.security(syminfo.tickerid, trendTF, [ta.highest(high, 50)[1], ta.lowest(low, 50)[1]], lookahead=barmerge.lookahead_on)
+float curveLim = curveModeIn == "Half (50%)" ? 0.5 : curveModeIn == "Third (33%)" ? 1.0 / 3.0 : na
 bool pulsePos = tC > tO and tC > tE20 and (ttype != 2 or (wC > wO and wC > wE20))
 bool pulseNeg = tC < tO and tC < tE20 and (ttype != 2 or (wC < wO and wC < wE20))
 float trendSlope = tAtr > 0 ? (tE20 - tE20p) / tAtr : 0.0
@@ -864,7 +869,7 @@ if bar_index >= math.max(atrPeriod, maxBaseCount + maxLegOut + 3, sweepLen + 6, 
             score += baseBreaksOld ? 1 : 0                          // BZ: break zone
             score += swingBreak ? 1 : 0                             // SB: swing break
             score += actionOK ? 1 : 0                               // Pulse & trend
-            bool skip = (hideNoTrade and score < minScore) or (filterAction and not actionOK) or (filterWholesale and not wsOK) or (not showSupply and not c.demand) or (minRiskPct > 0 and c.prox != 0 and math.abs(c.prox - c.dist) / c.prox * 100 < minRiskPct)
+            bool skip = (hideNoTrade and score < minScore) or (filterAction and not actionOK) or (filterWholesale and not wsOK) or (not showSupply and not c.demand) or (supplyIntradayOnly and not c.demand and not timeframe.isintraday) or (not na(curveLim) and (na(cHH) or cHH <= cLL or (c.demand ? (c.prox - cLL) / (cHH - cLL) > curveLim : (c.prox - cLL) / (cHH - cLL) < 1 - curveLim))) or (minRiskPct > 0 and c.prox != 0 and math.abs(c.prox - c.dist) / c.prox * 100 < minRiskPct)
             if skip
                 break
             color zoneColor = c.demand ? color.green : color.red

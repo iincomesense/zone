@@ -1945,7 +1945,8 @@ def _bt_zone_trades(df: pd.DataFrame, zones: List[dict], tf: str, symbol: str, I
         if t is None:
             continue
         t.update(symbol=symbol, tf=tf, pattern=z["pattern"], score=int(z.get("score_base", 0)),
-                 tags=z.get("tags", ""), ztop=max(z["prox"], z["dist"]), zbot=min(z["prox"], z["dist"]))
+                 tags=z.get("tags", ""), ztop=max(z["prox"], z["dist"]), zbot=min(z["prox"], z["dist"]),
+                 zborn=pd.Timestamp(int(z["time"]) + TF_SECONDS.get(tf, 0) * 1000, unit="ms", tz="UTC").tz_convert(IST))
         out.append(t)
     return out
 
@@ -2049,7 +2050,7 @@ def bt_collect(symbols: Sequence[str], frames_all: Dict[str, Dict[str, pd.DataFr
                 if Is.curveMode != "off":
                     tl = [t for t in tl if curve_ok(Is.curveMode, t["long"], loc_at(cs, t["entry_time"], t["entry"]))]
                 if Is.htfZoneReq:
-                    tl = [t for t in tl if htf_conf(spans, t["long"], t["ztop"], t["zbot"], t["entry_time"])]
+                    tl = [t for t in tl if htf_conf(spans, t["long"], t["ztop"], t["zbot"], t["zborn"])]
                 out[rr].extend(tl)
         if progress:
             progress((i + 1) / max(1, len(syms)), sym)
@@ -2258,6 +2259,7 @@ def opt_collect(symbols: Sequence[str], frames_all: Dict[str, Dict[str, pd.DataF
                             pow_rr=z["pow_rr"], score_base=int(z["score_base"]),
                             room_pt=int(z.get("room_tf") is None or z["room_tf"] >= 10 or z["xrr"] >= 10))
                 modes = (("CNC", False), ("MIS", True)) if (intra and z["demand"]) else (("ANY", False),)
+                zborn = pd.Timestamp(int(z["time"]) + TF_SECONDS.get(tf, 0) * 1000, unit="ms", tz="UTC").tz_convert(IST)
                 for rr in OPT_GRID["rr"]:
                     for mat in OPT_GRID["maturity"]:
                         for be in OPT_GRID["be"]:
@@ -2268,7 +2270,7 @@ def opt_collect(symbols: Sequence[str], frames_all: Dict[str, Dict[str, pd.DataF
                             al, ash = _act_at(act, t["entry_time"])
                             lv = loc_at(cs, t["entry_time"], t["entry"])
                             hc = htf_conf(spans, bool(z["demand"]), max(z["prox"], z["dist"]),
-                                          min(z["prox"], z["dist"]), t["entry_time"])
+                                          min(z["prox"], z["dist"]), zborn)
                             rows.append(dict(base, rr=rr, maturity=mat, be=be, dmode=dm, loc=lv, htf_conf=hc,
                                              intra=intra,
                                              entry_time=t["entry_time"], exit_time=t["exit_time"],
@@ -2487,7 +2489,7 @@ def opt_pick(R: pd.DataFrame, top: int = 15) -> Optional[dict]:
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v15 · Curve location · Zone-in-zone · intraday supply · 2026-10-28"
+APP_BUILD = "v16 · backtested preset · HTF fix · 2026-10-28"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -3332,6 +3334,10 @@ def backtest_panel(inp: PineInputs, tb: dict) -> None:
             stretch(st.dataframe, show.round(2), hide_index=True, height=360)
 
 
+BACKTESTED_PRESET = dict(atr=1.2, body=0.6, li=1.5, lo=3.0, power=2.0, maturity=0, score=0, trend="in_favour",
+                         side="demand", be=0.0, minrisk=0.0, dmode="MIS", loc="off", htf="off", rr=5.0)
+
+
 def _opt_apply(best: dict) -> None:
     """Optimizer के सबसे अच्छे नियम ⚙️ इनपुट में डाल दो (on_click callback)।"""
     ss = st.session_state
@@ -3379,6 +3385,12 @@ def _opt_pine_text(b: dict) -> str:
 
 
 def optimizer_panel(inp: PineInputs, tb: dict, cap: float, rp: float, d0, d1, alloc: float = 25.0) -> None:
+    st.markdown("**✅ बैकटेस्ट से पास नियम (28-Oct-2026 · 222 स्टॉक · Jan-2024 से Oct-2026)**")
+    st.caption("Demand सिर्फ़ · 1h/2h/4h ज़ोन पर MIS (उसी दिन बंद) · ट्रेंड TF का Pulse+Trend साथ · leg-out ≥ 3× boring · "
+               "Power ≥ 1:2 · target 1:5 — दोनों अवधियों में plus: Jan-24→Jun-25 +10.7% (DD −8.8%), Jul-25→Oct-26 +14.4% "
+               "(DD −5.6%), चार्ज के बाद, ₹25k पर। 2025 कैलेंडर साल घाटे में रहा — गारंटी नहीं।")
+    put(st, "button", "✅ ये नियम ⚙️ इनपुट में लगाएँ", on_click=_opt_apply, args=(BACKTESTED_PRESET,), key="preset_apply")
+    st.divider()
     st.markdown("**🔧 Optimizer — असली डेटा पर सबसे अच्छे नियम (zone कम न हों + मुनाफ़ा)**")
     st.caption("ढीले नियमों से एक बार ज़ोन बनते हैं, फिर ~4,600 संयोजन चार्ज और पूँजी-सीमा के साथ चलते हैं। "
                "In-sample पर चुने जाते हैं, बाद के अनदेखे (Out-of-sample) समय पर परखे जाते हैं। "

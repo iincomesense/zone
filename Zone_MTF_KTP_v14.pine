@@ -1,5 +1,5 @@
 // This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
-// © iincomesense — "Zone MTF (KTP rules v13)"
+// © iincomesense — "Zone MTF (KTP rules v14)"
 // Demand/Supply zones per Dr. Ravi R. Kumar's KTP / Super Trader rules (user's Drive notes)
 // + institutional order-flow confluence (displacement, relative volume, liquidity sweep, imbalance).
 // v8: rules chosen step by step by the user —
@@ -9,12 +9,14 @@
 //     Score /12: follow-up (FU), break zone (BZ), swing break (SB) each +1; Strong = boring↔leg-out gap < leg-in.
 //     Tags: FU BZ SB Strong WS C+F (zone also on current-month future same day) · 6C✗ exit alert.
 //     Commodity mode applies automatically on commodity symbols.
+//     v14 defaults = backtested preset (28-Oct-2026, 222 NSE F&O stocks, Jan-2024→Oct-2026): demand only,
+//         higher-TF Pulse+Trend in favour, leg-out ≥3× boring, power ≥1:2, maturity 0, exit same day (MIS) on intraday TF.
 //     v13: Curve/location (DZ in discount, SZ in premium of trend-TF 50-bar range), supply only on intraday TF.
 //     v12: Min SL distance % of price (thin zones lose to charges).
 //     v11: Show-supply switch and Break-even (SL → entry at 1:x) — set these from the app Optimizer result.
 //     States: 1st proximal touch = Tested, 2nd touch = Broken; maturity = 3 candles. SL buffer 2% DATR; T1 1:3, T2 1:5.
 //@version=6
-indicator("Zone MTF (KTP rules v13)", shorttitle="Zone MTF KTP", overlay=true, max_bars_back=5000, max_boxes_count=500, max_labels_count=500, max_lines_count=60)
+indicator("Zone MTF (KTP rules v14)", shorttitle="Zone MTF KTP", overlay=true, max_bars_back=5000, max_boxes_count=500, max_labels_count=500, max_lines_count=60)
 
 // ============================================================ INPUTS
 G0 = "0 · Capital, risk, buffer (SETS)"
@@ -43,7 +45,7 @@ boringAtrMult = input.float(1.0, "Boring: TR ≤ ATR ×", minval=0.1, step=0.05,
 minBaseCountInput = input.int(1, "Min boring candles", minval=1, maxval=4, group=G1)
 maxBaseCountInput = input.int(3, "Max boring candles (>3 not good)", minval=1, maxval=4, group=G1)
 legInToBaseSizeMult = input.float(1.5, "1-2-4: Leg-in ≥ boring ×", minval=1, step=0.25, group=G1)
-legOutToBaseSizeMult = input.float(2.5, "1-2-4: Leg-out (body to body) ≥ boring ×", minval=1, step=0.25, group=G1)
+legOutToBaseSizeMult = input.float(3.0, "1-2-4: Leg-out (body to body) ≥ boring ×", minval=1, step=0.25, group=G1)
 legOutEachMinBody = input.float(0.50, "Leg-out 2/3: each candle min body % (wick < 50%)", minval=0, maxval=1, step=0.05, group=G1)
 maxLegOut = input.int(3, "Max leg-out candles counted", minval=1, maxval=3, group=G1)
 allowTwoLegOut = input.bool(true, "Allow exactly 2 leg-out candles", group=G1)
@@ -59,7 +61,7 @@ distalMode = input.string("Pattern lowest/highest (course)", "Distal (SL) line",
 GC = "1A · MANDATORY: Filled-Unfilled-Filled · 1-2-4 · TR vs ATR (always ON) + Power"
 corePower = input.bool(true, "MANDATORY: Power of leg-out", group=GC, tooltip="Entry = Proximal, SL = Distal। लेग-आउट कैंडल के अंदर ही कम से कम 1:3 रिवॉर्ड मिला हो; 1:5 मिले तो ★ Best")
 powerMode = input.string("All leg-outs (max 3)", "Power measured on", options=["First leg-out only", "All leg-outs (max 3)"], group=GC)
-powerMinRR = input.float(3.0, "Power: minimum reward 1:", minval=1, step=0.5, group=GC)
+powerMinRR = input.float(2.0, "Power: minimum reward 1:", minval=1, step=0.5, group=GC)
 powerBestRR = input.float(5.0, "Power: best (★) reward 1:", minval=1, step=0.5, group=GC)
 powerOnBody = input.bool(true, "Power measured to leg-out close (body)", group=GC)
 GF = "1B · Flexible rules (score) — tick to make mandatory"
@@ -70,12 +72,13 @@ oppositeRR = input.float(5.0, "Opposite zone: not within 1:", minval=1, step=0.5
 corePlayground = input.bool(false, "Clear playground → mandatory", group=GF)
 playRR = input.float(10.0, "Playground: clear up to 1:", minval=1, step=0.5, group=GF)
 oppUseMTF = input.bool(true, "Opposite/playground: include other-TF zones", group=GF)
-showSupply = input.bool(true, "Show / trade supply zones", group=GF)
+showSupply = input.bool(false, "Show / trade supply zones", group=GF)
 breakEvenRR = input.float(0.0, "Break-even: move SL to entry at 1: (0 = off)", minval=0, step=0.5, group=GF)
 curveModeIn = input.string("Off", "Curve (Location)", options=["Off", "Half (50%)", "Third (33%)"], group=GF, tooltip="DZ सिर्फ़ ट्रेंड TF के 50-candle दायरे के निचले हिस्से (discount) में, SZ ऊपरी हिस्से (premium) में")
 supplyIntradayOnly = input.bool(false, "Supply only on intraday TF (MIS)", group=GF)
+misExitAlert = input.bool(true, "Intraday: exit alert at 15:10 (MIS square-off)", group=GF)
 minRiskPct = input.float(0.0, "Min SL distance % of price (0 = off)", minval=0, step=0.1, group=GF, tooltip="बहुत पतले ज़ोन में चार्ज मुनाफ़ा खा जाते हैं")
-coreMTF = input.string("Off (score only)", "MTF analysis → mandatory", options=["Off (score only)", "Higher-TF not against", "Higher-TF in favour (strict)"], group=GF)
+coreMTF = input.string("Higher-TF in favour (strict)", "MTF analysis → mandatory", options=["Off (score only)", "Higher-TF not against", "Higher-TF in favour (strict)"], group=GF)
 
 G2 = "2 · Note rules (grading; mandatory in Strict)"
 legInMaxWick = input.float(0.20, "Leg-in: max total wick %", minval=0, maxval=0.5, step=0.05, group=G2, tooltip="Rule 10: लेग-इन की wick मिलाकर 20% से ज़्यादा नहीं")
@@ -85,7 +88,7 @@ legOutTooLong = input.float(4.0, "Flag ⚠ if leg-out > leg-in ×", minval=1, st
 useCoveredLegOut = input.bool(true, "Covered leg-out = trap (live)", group=G2)
 coverPct = input.float(0.50, "Covered leg-out: max % of first leg-out body", minval=0.1, maxval=1, step=0.05, group=G2)
 useMaturity = input.bool(true, "Zone maturity (early arrival = trap)", group=G2)
-maturityBars = input.int(3, "Maturity: candles after zone", minval=0, maxval=50, group=G2)
+maturityBars = input.int(0, "Maturity: candles after zone", minval=0, maxval=50, group=G2)
 immatureWithTrend = input.bool(false, "Allow immature zone if Pulse/Trend in favour", group=G2)
 useTimeRule = input.bool(false, "Entry time rules (intraday)", group=G2, tooltip="Hourly: 1 बजे के बाद नहीं · Daily: 12:30 के बाद नहीं · Weekly: शुक्रवार 12:30 के बाद नहीं")
 maxTouches = input.int(3, "Max entries before zone is exhausted", minval=1, maxval=10, group=G2)
@@ -635,6 +638,7 @@ type Zone
     string tags = ""
     bool cf = false
     bool beDone = false
+    bool misExit = false
     float coverVal
     int qty
     bool isDemand
@@ -959,6 +963,11 @@ if array.size(active_zones) > 0
                     consecSL := 0
                     if z.sixState == 0
                         z.sixState := bar_index - z.entryBar + 1 <= 6 ? 1 : -1
+                if misExitAlert and timeframe.isintraday and not z.misExit and f_tod(time) >= 15 * 60 + 10
+                    z.misExit := true
+                    z.tags := z.tags + " MIS-exit"
+                    if enableAlerts
+                        alert(syminfo.ticker + " · " + z.patternType + " intraday square-off — EXIT now", alert.freq_once_per_bar_close)
                 if breakEvenRR > 0 and not z.beDone and (z.isDemand ? high >= z.entryVal + breakEvenRR * math.abs(z.entryVal - z.slVal) : low <= z.entryVal - breakEvenRR * math.abs(z.entryVal - z.slVal))
                     z.beDone := true
                     z.slVal := z.entryVal

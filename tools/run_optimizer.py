@@ -80,6 +80,14 @@ lines += ["", "## best", "- " + json.dumps({k: (round(v, 3) if isinstance(v, flo
 lines += ["", "## top 25 feasible by IS totR", R[R["feasible"]].head(25)[keys + stats].round(3).pipe(md)]
 pos = R[R["feasible"] & (R["IS_expR"] > 0) & (R["OOS_expR"] > 0)]
 lines += ["", f"## positive in BOTH periods: {len(pos)} combos", pos.sort_values("OOS_totR", ascending=False).head(25)[keys + stats].round(3).pipe(md) if len(pos) else "none"]
+# backtested preset and its HTF / neighbour variants
+P = A.BACKTESTED_PRESET if hasattr(A, "BACKTESTED_PRESET") else None
+if P is not None:
+    q = R.copy()
+    for k in ("atr", "body", "li", "maturity", "score", "side", "be", "minrisk", "dmode", "loc", "rr"):
+        q = q[q[k] == P[k]]
+    q = q[q["lo"].isin([2.5, 3.0]) & q["power"].isin([2.0, 3.0]) & q["trend"].isin(["not_against", "in_favour"])]
+    lines += ["", "## preset + neighbours (htf off/on)", q[keys + stats].round(3).pipe(md)]
 lines += ["", f"runtime {round(time.time() - t0)} s"]
 open(os.path.join(OUT, "summary.md"), "w", encoding="utf-8").write("\n".join(lines))
 print("\n".join(lines[:40]), flush=True)

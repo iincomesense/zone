@@ -2269,9 +2269,9 @@ def top_bar():
                            key="in_tfs", label_visibility="collapsed")
     side = c[2].selectbox("पक्ष", ["All", "Demand", "Supply"], key="in_side",
                           label_visibility="collapsed")
-    status = c[3].selectbox("स्थिति", ["All"] + ALL_STATES, key="in_status",
+    status = c[3].selectbox("स्थिति", ["All"] + ALL_STATES, index=1, key="in_status",
                             label_visibility="collapsed")
-    band = c[4].selectbox("रेंज", BANDS, index=1, key="in_band",
+    band = c[4].selectbox("रेंज", BANDS, index=0, key="in_band",
                           label_visibility="collapsed")
     sym_txt = c[5].text_input("स्क्रिप्ट", key="in_symtxt", label_visibility="collapsed",
                               placeholder="RELIANCE, SBIN…")

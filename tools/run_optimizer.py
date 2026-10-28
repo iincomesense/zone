@@ -12,7 +12,7 @@ import pandas as pd
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
-src = open(os.path.join(ROOT, "app.py"), encoding="utf-8").read()
+src = open(os.path.join(ROOT, "tools", "backtest_engine.py"), encoding="utf-8").read()   # बैकटेस्ट इंजन (app.py अब सिर्फ़ स्कैनर)
 cut = src.index("APP_BUILD = ")
 mod = types.ModuleType("appcore")
 mod.__file__ = os.path.join(ROOT, "app.py")

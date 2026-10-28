@@ -1,5 +1,5 @@
 // This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
-// © iincomesense — "Zone MTF (KTP rules v22)"
+// © iincomesense — "Zone MTF (KTP rules v23)"
 // Demand/Supply zones per Dr. Ravi R. Kumar's KTP / Super Trader rules (user's Drive notes)
 // + institutional order-flow confluence (displacement, relative volume, liquidity sweep, imbalance).
 // v8: rules chosen step by step by the user —
@@ -9,6 +9,7 @@
 //     Score /12: follow-up (FU), break zone (BZ), swing break (SB) each +1; Strong = boring↔leg-out gap < leg-in.
 //     Tags: FU BZ SB Strong WS C+F (zone also on current-month future same day) · 6C✗ exit alert.
 //     Commodity mode applies automatically on commodity symbols.
+//     v23 defaults = your app screenshot settings (28-Oct-2026): boring TR ≤ 0.9 ATR, max boring 4, 1 leg-out, CBLI/formation/white area off, power off (min 1:2 first leg-out), opposite 1:6, HTF in favour, vol 1.1×, leg-out body 70%, leg-in body ≥1.75× boring, score 6, action + wholesale only.
 //     v22 defaults = your rules: leg-in body ≥ 1.5× boring range, first leg-out body ≥ leg-in body, white-area wick, formation inside leg-in body (DBR/RBD), power 1:2.5, T1 1:2.5 / T2 1:5, 15:15 stub not boring.
 //     v21 defaults = chart review: formation on leg-in range (DBR/RBD), maturity 3 candles.
 //     v20 defaults = every leg-in/boring/leg-out parameter swept: boring TR ≤ 0.7 ATR, leg-in closing wick ≤ 30%, leg-out TR ≥ 1.2 ATR, opposite 1:3, formation off.
@@ -25,14 +26,14 @@
 //     v11: Show-supply switch and Break-even (SL → entry at 1:x) — set these from the app Optimizer result.
 //     States: 1st proximal touch = Tested, 2nd touch = Broken; maturity = 3 candles. SL buffer 2% DATR; T1 1:3, T2 1:5.
 //@version=6
-indicator("Zone MTF (KTP rules v22)", shorttitle="Zone MTF KTP", overlay=true, max_bars_back=5000, max_boxes_count=500, max_labels_count=500, max_lines_count=60)
+indicator("Zone MTF (KTP rules v23)", shorttitle="Zone MTF KTP", overlay=true, max_bars_back=5000, max_boxes_count=500, max_labels_count=500, max_lines_count=60)
 
 // ============================================================ INPUTS
 G0 = "0 · Capital, risk, buffer (SETS)"
 accountCapital = input.float(25000.0, "Account Capital (₹)", minval=1, group=G0)
 riskPct = input.float(0.5, "Risk % per trade", minval=0.01, step=0.05, group=G0, tooltip="कोर्स: हर ट्रेड में पूँजी का अधिकतम 0.5%")
-targetRR = input.float(2.5, "Target 1 RR (Daily / Weekly)", minval=1, step=0.5, group=G0, tooltip="कोर्स: 1:5 से कम ट्रेड नहीं")
-hourlyRR = input.float(2.5, "Hourly: first target RR", minval=1, step=0.5, group=G0, tooltip="आवरली ट्रेड: पहले 1:3, फिर 1:5")
+targetRR = input.float(3.0, "Target 1 RR (Daily / Weekly)", minval=1, step=0.5, group=G0, tooltip="कोर्स: 1:5 से कम ट्रेड नहीं")
+hourlyRR = input.float(3.0, "Hourly: first target RR", minval=1, step=0.5, group=G0, tooltip="आवरली ट्रेड: पहले 1:3, फिर 1:5")
 monthlyRR = input.float(2.5, "Monthly / Positional: first target RR", minval=1, step=0.5, group=G0)
 target2RR = input.float(5.0, "Target 2 RR (all)", minval=1, step=0.5, group=G0)
 halfQty3 = input.bool(true, "3+ boring candles → half quantity", group=G0)
@@ -50,63 +51,63 @@ atrPeriod = input.int(14, "ATR Period (course: 14)", minval=1, group=G1)
 filledMinBody = input.float(0.60, "Filled candle: min body % (Body > Wick)", minval=0, maxval=1, step=0.05, group=G1)
 legInAtrMult = input.float(1.0, "Leg-in: TR ≥ ATR ×", minval=0, step=0.05, group=G1)
 legOutAtrMult = input.float(1.2, "First leg-out: TR ≥ ATR ×", minval=0, step=0.05, group=G1)
-boringAtrMult = input.float(0.7, "Boring: TR ≤ ATR ×", minval=0.1, step=0.05, group=G1)
+boringAtrMult = input.float(0.9, "Boring: TR ≤ ATR ×", minval=0.1, step=0.05, group=G1)
 legInMaxCloseWick = input.float(0.3, "Leg-in: closing wick ≤ range × (1 = off)", minval=0, maxval=1, step=0.05, group=G1, tooltip="बैकटेस्ट: 0.3")
 minBaseCountInput = input.int(1, "Min boring candles", minval=1, maxval=4, group=G1)
-maxBaseCountInput = input.int(3, "Max boring candles (>3 not good)", minval=1, maxval=4, group=G1)
+maxBaseCountInput = input.int(4, "Max boring candles (>3 not good)", minval=1, maxval=4, group=G1)
 legInToBaseSizeMult = input.float(1.5, "1-2-4: Leg-in ≥ boring ×", minval=1, step=0.25, group=G1)
 legOutToBaseSizeMult = input.float(2.0, "1-2-4: Leg-out (body to body) ≥ boring ×", minval=1, step=0.25, group=G1)
 legOutEachMinBody = input.float(0.50, "Leg-out 2/3: each candle min body % (wick < 50%)", minval=0, maxval=1, step=0.05, group=G1)
-maxLegOut = input.int(3, "Max leg-out candles counted", minval=1, maxval=3, group=G1)
-allowTwoLegOut = input.bool(true, "Allow exactly 2 leg-out candles", group=G1)
-legOutJoinTolAtr = input.float(0.25, "Leg-out 2/3: |open − prev close| ≤ ATR ×", minval=0, step=0.05, group=G1)
-useCBLI = input.bool(true, "CBLI (candle behind leg-in)", group=G1)
+maxLegOut = input.int(1, "Max leg-out candles counted", minval=1, maxval=3, group=G1)
+allowTwoLegOut = input.bool(false, "Allow exactly 2 leg-out candles", group=G1)
+legOutJoinTolAtr = input.float(0.55, "Leg-out 2/3: |open − prev close| ≤ ATR ×", minval=0, step=0.05, group=G1)
+useCBLI = input.bool(false, "CBLI (candle behind leg-in)", group=G1)
 cbliMode = input.string("Covers >50% (notes)", "CBLI rule", options=["Covers >50% (notes)", "Body size >50% (lecture)", "Either (strict)"], group=G1)
-cbliMaxPct = input.float(0.50, "CBLI limit", minval=0, maxval=2, step=0.05, group=G1)
-useFormation = input.bool(true, "Formation of leg-out (DBR/RBD)", group=G1)
+cbliMaxPct = input.float(1.0, "CBLI limit", minval=0, maxval=2, step=0.05, group=G1)
+useFormation = input.bool(false, "Formation of leg-out (DBR/RBD)", group=G1)
 formationTolAtr = input.float(0.0, "Formation tolerance × ATR", minval=0, step=0.05, group=G1)
-formationRange = input.bool(false, "Formation: leg-out open within leg-in RANGE (high–low)", group=G1, tooltip="बैकटेस्ट (चार्ट review): बेहतर")
+formationRange = input.bool(true, "Formation: leg-out open within leg-in RANGE (high–low)", group=G1, tooltip="बैकटेस्ट (चार्ट review): बेहतर")
 proxMode = input.string("Boring wick (wick-to-wick)", "Proximal (entry) line", options=["Boring wick (wick-to-wick)", "Boring body (precise)"], group=G1)
 distalMode = input.string("Pattern lowest/highest (course)", "Distal (SL) line", options=["Pattern lowest/highest (course)", "Boring only"], group=G1)
 
 GC = "1A · MANDATORY: Filled-Unfilled-Filled · 1-2-4 · TR vs ATR (always ON) + Power"
-corePower = input.bool(true, "MANDATORY: Power of leg-out", group=GC, tooltip="Entry = Proximal, SL = Distal। लेग-आउट कैंडल के अंदर ही कम से कम 1:3 रिवॉर्ड मिला हो; 1:5 मिले तो ★ Best")
-powerMode = input.string("All leg-outs (max 3)", "Power measured on", options=["First leg-out only", "All leg-outs (max 3)"], group=GC)
-powerMinRR = input.float(2.5, "Power: minimum reward 1:", minval=1, step=0.5, group=GC)
+corePower = input.bool(false, "MANDATORY: Power of leg-out", group=GC, tooltip="Entry = Proximal, SL = Distal। लेग-आउट कैंडल के अंदर ही कम से कम 1:3 रिवॉर्ड मिला हो; 1:5 मिले तो ★ Best")
+powerMode = input.string("First leg-out only", "Power measured on", options=["First leg-out only", "All leg-outs (max 3)"], group=GC)
+powerMinRR = input.float(2.0, "Power: minimum reward 1:", minval=1, step=0.5, group=GC)
 powerBestRR = input.float(5.0, "Power: best (★) reward 1:", minval=1, step=0.5, group=GC)
 powerOnBody = input.bool(true, "Power measured to leg-out close (body)", group=GC)
 GF = "1B · Flexible rules (score) — tick to make mandatory"
-useWhiteArea = input.bool(true, "White area → mandatory", group=GF, tooltip="बंद = सिर्फ़ स्कोर/लेबल में; चालू = बिना white area ज़ोन नहीं बनेगा")
+useWhiteArea = input.bool(false, "White area → mandatory", group=GF, tooltip="बंद = सिर्फ़ स्कोर/लेबल में; चालू = बिना white area ज़ोन नहीं बनेगा")
 coreFresh = input.bool(true, "Fresh zone only (covered leg-out kills zone, 1st touch)", group=GF)
 coreOpposite = input.bool(true, "No opposite zone before target → mandatory", group=GF)
-oppositeRR = input.float(3.0, "Opposite zone: not within 1:", minval=1, step=0.5, group=GF)
+oppositeRR = input.float(6.0, "Opposite zone: not within 1:", minval=1, step=0.5, group=GF)
 corePlayground = input.bool(false, "Clear playground → mandatory", group=GF)
-playRR = input.float(10.0, "Playground: clear up to 1:", minval=1, step=0.5, group=GF)
-oppUseMTF = input.bool(true, "Opposite/playground: include other-TF zones", group=GF)
+playRR = input.float(6.0, "Playground: clear up to 1:", minval=1, step=0.5, group=GF)
+oppUseMTF = input.bool(false, "Opposite/playground: include other-TF zones", group=GF)
 showSupply = input.bool(true, "Show / trade supply zones", group=GF)
 breakEvenRR = input.float(0.0, "Break-even: move SL to entry at 1: (0 = off)", minval=0, step=0.5, group=GF)
 curveModeIn = input.string("Off", "Curve (Location)", options=["Off", "Half (50%)", "Third (33%)"], group=GF, tooltip="DZ सिर्फ़ ट्रेंड TF के 50-candle दायरे के निचले हिस्से (discount) में, SZ ऊपरी हिस्से (premium) में")
 supplyIntradayOnly = input.bool(false, "Supply only on intraday TF (MIS)", group=GF)
-gapEntryOnly = input.bool(true, "Entry only when session OPENS inside zone (gap-open)", group=GF, tooltip="बैकटेस्ट: दिन के बीच धीरे-धीरे ज़ोन में आए भाव पर घाटा; सिर्फ़ बाज़ार खुलते ही ज़ोन में gap वाले ट्रेड plus रहे")
+gapEntryOnly = input.bool(false, "Entry only when session OPENS inside zone (gap-open)", group=GF, tooltip="बैकटेस्ट: दिन के बीच धीरे-धीरे ज़ोन में आए भाव पर घाटा; सिर्फ़ बाज़ार खुलते ही ज़ोन में gap वाले ट्रेड plus रहे")
 misExitAlert = input.bool(true, "Intraday: exit alert at 15:10 (MIS square-off)", group=GF)
 minRiskPct = input.float(0.4, "Min SL distance % of price (0 = off)", minval=0, step=0.1, group=GF, tooltip="बहुत पतले ज़ोन में चार्ज मुनाफ़ा खा जाते हैं")
 minEdge = input.int(4, "Edge score /9 minimum (0 = off; BZ zones removed)", minval=0, maxval=9, group=GF, tooltip="volume 1.5× · rel vol 1.2× · चौड़ाई ≥0.4% · pivot · बड़े TF का ज़ोन · notes 5/5 · FU · SB · gap ज़ोन। बैकटेस्ट: 4")
-minVolRatio = input.float(1.5, "Leg-out avg volume ÷ boring avg volume ≥ (0 = off)", minval=0, step=0.1, group=GF, tooltip="boring शांत + leg-out में भारी volume = संस्थाओं का pending order। बैकटेस्ट में 1.5 सबसे अच्छा")
-coreMTF = input.string("Higher-TF not against", "MTF analysis → mandatory", options=["Off (score only)", "Higher-TF not against", "Higher-TF in favour (strict)"], group=GF)
+minVolRatio = input.float(1.1, "Leg-out avg volume ÷ boring avg volume ≥ (0 = off)", minval=0, step=0.1, group=GF, tooltip="boring शांत + leg-out में भारी volume = संस्थाओं का pending order। बैकटेस्ट में 1.5 सबसे अच्छा")
+coreMTF = input.string("Higher-TF in favour (strict)", "MTF analysis → mandatory", options=["Off (score only)", "Higher-TF not against", "Higher-TF in favour (strict)"], group=GF)
 
 G2 = "2 · Note rules (grading; mandatory in Strict)"
-legInMaxWick = input.float(0.20, "Leg-in: max total wick %", minval=0, maxval=0.5, step=0.05, group=G2, tooltip="Rule 10: लेग-इन की wick मिलाकर 20% से ज़्यादा नहीं")
-legOutMinBody = input.float(0.65, "First leg-out: min body % (65:35)", minval=0, maxval=1, step=0.05, group=G2)
-gapTolAtr = input.float(0.10, "Leg-in ↔ boring gap tolerance × ATR", minval=0, step=0.05, group=G2)
-legOutTooLong = input.float(4.0, "Flag ⚠ if leg-out > leg-in ×", minval=1, step=0.5, group=G2)
-legInBodyVsBase = input.float(1.5, "Leg-in body ≥ boring range × (0 = off)", minval=0, step=0.25, group=G1)
+legInMaxWick = input.float(0.30, "Leg-in: max total wick %", minval=0, maxval=0.5, step=0.05, group=G2, tooltip="Rule 10: लेग-इन की wick मिलाकर 20% से ज़्यादा नहीं")
+legOutMinBody = input.float(0.70, "First leg-out: min body % (65:35)", minval=0, maxval=1, step=0.05, group=G2)
+gapTolAtr = input.float(0.30, "Leg-in ↔ boring gap tolerance × ATR", minval=0, step=0.05, group=G2)
+legOutTooLong = input.float(2.0, "Flag ⚠ if leg-out > leg-in ×", minval=1, step=0.5, group=G2)
+legInBodyVsBase = input.float(1.75, "Leg-in body ≥ boring range × (0 = off)", minval=0, step=0.25, group=G1)
 legOutBodyVsLegIn = input.float(1.0, "First leg-out body ≥ leg-in body × (0 = off)", minval=0, step=0.25, group=G1)
-whiteWick = input.bool(true, "White area: leg-out wick must not cover the whole boring", group=G1)
+whiteWick = input.bool(false, "White area: leg-out wick must not cover the whole boring", group=G1)
 useCoveredLegOut = input.bool(true, "Covered leg-out = trap (live)", group=G2)
-coverPct = input.float(0.50, "Covered leg-out: max % of first leg-out body", minval=0.1, maxval=1, step=0.05, group=G2)
+coverPct = input.float(0.70, "Covered leg-out: max % of first leg-out body", minval=0.1, maxval=1, step=0.05, group=G2)
 useMaturity = input.bool(true, "Zone maturity (early arrival = trap)", group=G2)
 maturityBars = input.int(3, "Maturity: candles after zone", minval=0, maxval=50, group=G2)
-immatureWithTrend = input.bool(false, "Allow immature zone if Pulse/Trend in favour", group=G2)
+immatureWithTrend = input.bool(true, "Allow immature zone if Pulse/Trend in favour", group=G2)
 useTimeRule = input.bool(false, "Entry time rules (intraday)", group=G2, tooltip="Hourly: 1 बजे के बाद नहीं · Daily: 12:30 के बाद नहीं · Weekly: शुक्रवार 12:30 के बाद नहीं")
 maxTouches = input.int(3, "Max entries before zone is exhausted", minval=1, maxval=10, group=G2)
 meltingReversalOnly = input.bool(true, "Re-entry only on DBR/RBD (melting meter)", group=G2)
@@ -115,20 +116,20 @@ plusBuffer = input.bool(true, "Plus-shaped boring → buffer on entry too", grou
 commodityMode = input.bool(true, "Commodity mode (auto on commodity symbols)", group=G2, tooltip="2 लेग-आउट मान्य, white area/गैप नियम ढीले, ज़ोन बनते ही परिपक्व — सिर्फ़ commodity symbol पर")
 
 G3 = "3 · Institutional confluence"
-dispMult = input.float(1.5, "Displacement: leg-out TR ≥ ATR ×", minval=1, step=0.1, group=G3, tooltip="संस्थागत ऑर्डर का निशान: लेग-आउट सामान्य रेंज से बहुत बड़ी")
+dispMult = input.float(2.0, "Displacement: leg-out TR ≥ ATR ×", minval=1, step=0.1, group=G3, tooltip="संस्थागत ऑर्डर का निशान: लेग-आउट सामान्य रेंज से बहुत बड़ी")
 volLen = input.int(20, "Relative volume SMA length", minval=1, group=G3)
 relVolMult = input.float(1.5, "Relative volume: leg-out vol ≥ SMA ×", minval=1, step=0.1, group=G3)
-sweepLen = input.int(10, "Liquidity sweep lookback (bars)", minval=2, group=G3, tooltip="ज़ोन बनने से पहले पिछले Low/High के स्टॉप-लॉस साफ़ करना (stop hunt)")
+sweepLen = input.int(25, "Liquidity sweep lookback (bars)", minval=2, group=G3, tooltip="ज़ोन बनने से पहले पिछले Low/High के स्टॉप-लॉस साफ़ करना (stop hunt)")
 
 G4 = "4 · Score · Pulse · Trend"
 minScore = input.int(6, "Min score to trade (below = NO TRADE)", minval=0, maxval=12, group=G4)
-greatScore = input.int(8, "Great trade score", minval=0, maxval=12, group=G4)
+greatScore = input.int(6, "Great trade score", minval=0, maxval=12, group=G4)
 hideNoTrade = input.bool(false, "Hide NO-TRADE zones", group=G4)
 trendTfIn = input.string("Auto (25×)", "Pulse/Trend timeframe", options=["Auto (25×)", "15", "60", "75", "D", "W", "M"], group=G4)
 emaFast = input.int(20, "EMA (pulse & trend)", minval=1, group=G4)
 trendThr = input.float(0.5, "7-candle rule: sideways band (× ATR)", minval=0, step=0.1, group=G4)
-filterAction = input.bool(false, "Show only zones in Action direction", group=G4)
-filterWholesale = input.bool(false, "Show only wholesale zones (Close ∓ ATR)", group=G4)
+filterAction = input.bool(true, "Show only zones in Action direction", group=G4)
+filterWholesale = input.bool(true, "Show only wholesale zones (Close ∓ ATR)", group=G4)
 
 G5 = "5 · Display & alerts"
 labelMode = input.string("Compact", "Zone label", options=["Compact", "Detailed", "Off"], group=G5, tooltip="Compact: छोटा लेबल; पूरी जानकारी लेबल पर टैप/होवर करने पर")

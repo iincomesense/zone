@@ -802,8 +802,8 @@ class PineInputs:
     # ---- 0 · Capital, risk, buffer (SETS) ----
     accountCapital: float = 25000.0
     riskPct: float = 0.5
-    targetRR: float = 2.5
-    hourlyRR: float = 2.5
+    targetRR: float = 3.0
+    hourlyRR: float = 3.0
     monthlyRR: float = 2.5
     target2RR: float = 5.0
     halfQty3: bool = True
@@ -821,63 +821,63 @@ class PineInputs:
     filledMinBody: float = 0.60
     legInAtrMult: float = 1.0
     legOutAtrMult: float = 1.2
-    boringAtrMult: float = 0.7
+    boringAtrMult: float = 0.9
     minBaseCountInput: int = 1
-    maxBaseCountInput: int = 3
+    maxBaseCountInput: int = 4
     legInToBaseSizeMult: float = 1.5
     legOutToBaseSizeMult: float = 2.0
     legOutEachMinBody: float = 0.50
-    maxLegOut: int = 3
-    allowTwoLegOut: bool = True
-    legOutJoinTolAtr: float = 0.25
-    useCBLI: bool = True
+    maxLegOut: int = 1
+    allowTwoLegOut: bool = False
+    legOutJoinTolAtr: float = 0.55
+    useCBLI: bool = False
     cbliMode: str = "Covers >50% (notes)"
-    cbliMaxPct: float = 0.50
-    useFormation: bool = True
+    cbliMaxPct: float = 1.0
+    useFormation: bool = False
     formationTolAtr: float = 0.0
-    formationRange: bool = False     # True = leg-out की open leg-in की पूरी range (high–low) के अंदर हो · बैकटेस्ट: बेहतर
+    formationRange: bool = True   # True = leg-out की open leg-in की पूरी range (high–low) के अंदर हो · बैकटेस्ट: बेहतर
     proxMode: str = "Boring wick (wick-to-wick)"
     distalMode: str = "Pattern lowest/highest (course)"
     # ---- 1A · MANDATORY: Power of leg-out ----
-    corePower: bool = True
-    powerMode: str = "All leg-outs (max 3)"
-    powerMinRR: float = 2.5
+    corePower: bool = False
+    powerMode: str = "First leg-out only"
+    powerMinRR: float = 2.0
     powerBestRR: float = 5.0
     powerOnBody: bool = True
     # ---- 1B · Flexible rules (score) ----
-    useWhiteArea: bool = True
+    useWhiteArea: bool = False
     coreFresh: bool = True
     coreOpposite: bool = True
-    oppositeRR: float = 3.0
+    oppositeRR: float = 6.0
     corePlayground: bool = False
-    playRR: float = 10.0
-    oppUseMTF: bool = True
-    coreMTF: str = "Higher-TF not against"
+    playRR: float = 6.0
+    oppUseMTF: bool = False
+    coreMTF: str = "Higher-TF in favour (strict)"
     showSupply: bool = True
     breakEvenRR: float = 0.0
     minRiskPct: float = 0.4
-    minVolRatio: float = 1.5
+    minVolRatio: float = 1.1
     minEdge: int = 4              # Edge score /9 कम से कम (0 = बंद) · BZ ज़ोन हटते हैं      # leg-out का औसत volume ÷ boring का औसत volume (pending order का सबूत) · 0 = बंद
-    demandIntradayMIS: bool = True
+    demandIntradayMIS: bool = False
     curveMode: str = "off"
     htfZoneReq: bool = False
     supplyIntradayOnly: bool = False
     entryApproach: str = "gap"     # any · clean · gap (सिर्फ़ session खुलते ही ज़ोन में gap)
     # ---- 2 · Note rules (grading; mandatory in Strict) ----
-    legInMaxWick: float = 0.20
+    legInMaxWick: float = 0.30
     legInMaxCloseWick: float = 0.3   # leg-in की closing wick ÷ range ≤ (1 = बंद) · बैकटेस्ट: 0.3
-    legOutMinBody: float = 0.65
-    gapTolAtr: float = 0.10
-    legOutTooLong: float = 4.0
-    legInBodyVsBase: float = 1.5     # leg-in की body ≥ boring range (high–low) × (0 = बंद) · आपका नियम: 1.5
+    legOutMinBody: float = 0.70
+    gapTolAtr: float = 0.30
+    legOutTooLong: float = 2.0
+    legInBodyVsBase: float = 1.75   # leg-in की body ≥ boring range (high–low) × (0 = बंद) · आपका नियम: 1.5
     legOutBodyVsLegIn: float = 1.0   # पहली leg-out की body ≥ leg-in body × (0 = बंद) · आपका नियम: 1.5
-    whiteWick: bool = True          # leg-out की wick boring की पूरी range न ढके (Demand: leg-out low > boring low)
+    whiteWick: bool = False   # leg-out की wick boring की पूरी range न ढके (Demand: leg-out low > boring low)
     useCoveredLegOut: bool = True
-    coverPct: float = 0.50
+    coverPct: float = 0.70
     coverBars: int = 1              # covered leg-out सिर्फ़ ज़ोन बनने के बाद की इतनी candles में जाँचें
     useMaturity: bool = True
     maturityBars: int = 3
-    immatureWithTrend: bool = False
+    immatureWithTrend: bool = True
     useTimeRule: bool = False
     maxTouches: int = 3
     meltingReversalOnly: bool = True
@@ -885,19 +885,17 @@ class PineInputs:
     plusBuffer: bool = True
     commodityMode: bool = True      # सिर्फ़ commodity symbols पर अपने-आप
     # ---- 3 · Institutional confluence ----
-    dispMult: float = 1.5
+    dispMult: float = 2.0
     volLen: int = 20
     relVolMult: float = 1.5
-    sweepLen: int = 10
-    # ---- 4 · Score · Pulse · Trend ----
+    sweepLen: int = 25   # ---- 4 · Score · Pulse · Trend ----
     minScore: int = 6
-    greatScore: int = 8
+    greatScore: int = 6
     hideNoTrade: bool = False
     emaFast: int = 20
     trendThr: float = 0.5
-    filterAction: bool = False
-    filterWholesale: bool = False
-    # ---- 6/7 · MTF / swings ----
+    filterAction: bool = True
+    filterWholesale: bool = True   # ---- 6/7 · MTF / swings ----
     showMTF: bool = True
     filterDistantMTF: bool = True
     mtfNearPct: float = 8.0
@@ -1997,301 +1995,8 @@ def _last_close(frames: Dict[str, pd.DataFrame], tfs: Sequence[str]) -> float:
 
 
 
-# ═══════════════════════════════════════════════════════════════════════
-#  भाग 3b · BACKTEST — वास्तविक नियमों के साथ
-#   • Entry: Proximal पर LIMIT (gap में open पर भरेगा — बेहतर भाव)
-#   • SL: Distal (SL-M — gap में open पर, यानी बदतर भाव)
-#   • Target: 1:3 या 1:5 LIMIT — SL के साथ OCO
-#   • Demand = Long CNC (delivery) · Supply = Short MIS (उसी दिन square-off)
-#   • एक ही candle में SL और Target दोनों → SL (सावधान/कंज़र्वेटिव मान्यता)
-#   • Entry वाली candle पर Target तभी गिना जब open ही entry के पार खुला हो
-#   • सिर्फ़ पहला टच (Fresh → Tested) · maturity से पहले टच = trap, कोई ट्रेड नहीं
-#   • Covered leg-out पहले हो गया तो ज़ोन ख़त्म
-#   • चार्ज: Zerodha जैसा discount broker + सरकारी (STT, exchange, SEBI, stamp, GST, DP)
-# ═══════════════════════════════════════════════════════════════════════
-BT_DEFAULT_START = "2024-01-01"
-BT_DEFAULT_END = "2026-10-01"
 COVER_BARS = 1            # covered leg-out: सिर्फ़ ज़ोन के ठीक बाद की candle
 MIS_MARGIN = 0.20          # SEBI: intraday पर कम से कम 20% margin (5×)
-DP_CHARGE = 15.34          # CDSL ₹13.5 + 18% GST — हर scrip, हर बिक्री वाले दिन
-
-
-def india_charges(kind: str, buy_val: float, sell_val: float, when: pd.Timestamp) -> Dict[str, float]:
-    """kind = 'CNC' या 'MIS'। रुपयों में पूरा ब्रेकअप।"""
-    turnover = buy_val + sell_val
-    exch_rate = 0.0000322 if when < pd.Timestamp("2024-10-01", tz=IST) else 0.0000297
-    if kind == "CNC":
-        brokerage = 0.0
-        stt = 0.001 * turnover
-        stamp = 0.00015 * buy_val
-        dp = DP_CHARGE
-    else:
-        brokerage = min(20.0, 0.0003 * buy_val) + min(20.0, 0.0003 * sell_val)
-        stt = 0.00025 * sell_val
-        stamp = 0.00003 * buy_val
-        dp = 0.0
-    exch = exch_rate * turnover
-    sebi = turnover * 10.0 / 1e7
-    gst = 0.18 * (brokerage + exch + sebi)
-    total = brokerage + stt + stamp + exch + sebi + gst + dp
-    return dict(brokerage=brokerage, stt=stt, stamp=stamp, exchange=exch, sebi=sebi, gst=gst,
-                dp=dp, total=total)
-
-
-def _bt_prep(df: pd.DataFrame, tf: str) -> dict:
-    idx = pd.DatetimeIndex(df.index)
-    idx = idx.tz_localize(IST) if idx.tz is None else idx.tz_convert(IST)
-    n = len(df)
-    day = idx.normalize()
-    intraday = TF_SECONDS.get(tf, 0) < 86400
-    last_of_day = np.ones(n, dtype=bool)
-    first_of_day = np.ones(n, dtype=bool)
-    if intraday and n > 1:
-        last_of_day[:-1] = day[1:] != day[:-1]
-        first_of_day[1:] = day[1:] != day[:-1]
-    return dict(fod=first_of_day, idx=idx, o=df["open"].to_numpy(dtype="float64"), h=df["high"].to_numpy(dtype="float64"),
-                l=df["low"].to_numpy(dtype="float64"), c=df["close"].to_numpy(dtype="float64"),
-                n=n, intraday=intraday, lod=last_of_day)
-
-
-def _bt_sim_one(P: dict, z: dict, rr: float, maturity: int, be_rr: float, use_buffer: bool,
-                start: pd.Timestamp, end: pd.Timestamp, long_mis: bool = False,
-                tgt_px: Optional[float] = None) -> Optional[dict]:
-    """एक ज़ोन का एक ट्रेड (प्रति शेयर)। be_rr > 0 → price 1:be_rr पहुँचे तो SL = entry।"""
-    idx, o, h, l, c, n = P["idx"], P["o"], P["h"], P["l"], P["c"], P["n"]
-    dem = bool(z["demand"])
-    prox = float(z["prox"])
-    sl0 = float(z["sl"]) if use_buffer else float(z["dist"])
-    risk_ps = abs(prox - sl0)
-    if risk_ps <= 0:
-        return None
-    tgt = prox + rr * risk_ps if dem else prox - rr * risk_ps
-    if tgt_px is not None:
-        if (tgt_px <= prox) if dem else (tgt_px >= prox):
-            return None
-        tgt = float(tgt_px)
-    cb = int(z["created_bar"])
-    ej = None
-    cov_before = False
-    for j in range(cb + 1, n):
-        touch = (l[j] <= prox) if dem else (h[j] >= prox)
-        if not touch:
-            if (min(o[j], c[j]) < z["cover"]) if dem else (max(o[j], c[j]) > z["cover"]):
-                cov_before = True
-            if cov_before and j - cb <= COVER_BARS:
-                return None                                  # ज़ोन बनते ही अगली candle ने leg-out ढका → trap
-            continue
-        if j - cb < maturity or idx[j] < start or idx[j] > end:
-            return None                                      # immature trap / अवधि के बाहर
-        ej = j
-        break
-    if ej is None:
-        return None
-    fod = P["fod"]          # open पर fill सिर्फ़ session की पहली candle (रात का gap) पर — बीच की candle में भाव लगातार चलता है
-    open_first = bool(fod[ej]) and ((o[ej] <= prox) if dem else (o[ej] >= prox))
-    if open_first and ((o[ej] <= sl0) if dem else (o[ej] >= sl0)):
-        return None          # बाज़ार SL (distal) के भी पार खुला = ज़ोन टूटा, कोई ट्रेड नहीं (order cancel)
-    fill = (min(prox, o[ej]) if dem else max(prox, o[ej])) if open_first else prox
-    sl = sl0
-    be_lvl = (fill + be_rr * risk_ps if dem else fill - be_rr * risk_ps) if be_rr > 0 else None
-    exit_px = exit_j = None
-    reason = ""
-    for k in range(ej, n):
-        if idx[k] > end:
-            kk = max(ej, k - 1)
-            exit_px, exit_j, reason = c[kk], kk, "Period end"
-            break
-        first = k == ej
-        if dem:
-            if l[k] <= sl:
-                exit_px = fill if (first and fill <= sl) else (sl if (first or not fod[k]) else min(o[k], sl))
-                exit_j, reason = k, ("BE" if sl != sl0 else "SL")
-                break
-            if h[k] >= tgt and (not first or open_first):
-                exit_px = tgt if (first or not fod[k]) else max(o[k], tgt)
-                exit_j, reason = k, "Target"
-                break
-            if be_lvl is not None and sl == sl0 and h[k] >= be_lvl and (not first or open_first):
-                sl = fill
-            if long_mis and P["lod"][k]:                       # intraday long: उसी दिन बंद
-                exit_px, exit_j, reason = c[k], k, "MIS square-off"
-                break
-        else:
-            if h[k] >= sl:
-                exit_px = fill if (first and fill >= sl) else (sl if (first or not fod[k]) else max(o[k], sl))
-                exit_j, reason = k, ("BE" if sl != sl0 else "SL")
-                break
-            if l[k] <= tgt and (not first or open_first):
-                exit_px = tgt if (first or not fod[k]) else min(o[k], tgt)
-                exit_j, reason = k, "Target"
-                break
-            if be_lvl is not None and sl == sl0 and l[k] <= be_lvl and (not first or open_first):
-                sl = fill
-            if (not P["intraday"]) or P["lod"][k]:
-                exit_px, exit_j, reason = c[k], k, "MIS square-off"
-                break
-    if exit_px is None:
-        exit_px, exit_j, reason = c[n - 1], n - 1, "Open (last price)"
-    return dict(ej=int(ej), cov_before=bool(cov_before), gap_entry=bool(open_first),
-                entry_time=idx[ej], exit_time=idx[exit_j], entry=float(fill), sl=float(sl0),
-                target=float(tgt), exit=float(exit_px), risk_ps=float(abs(fill - sl0)) or risk_ps,
-                reason=reason, long=dem, kind="CNC" if (dem and not long_mis) else "MIS",
-                side=("Long MIS" if long_mis else "Long CNC") if dem else "Short MIS")
-
-
-def _bt_zone_trades(df: pd.DataFrame, zones: List[dict], tf: str, symbol: str, I: PineInputs,
-                    rr: float, use_buffer: bool, start: pd.Timestamp, end: pd.Timestamp,
-                    maturity: Optional[int] = None, be_rr: float = 0.0) -> List[dict]:
-    """हर ज़ोन का (qty के बिना) संभावित ट्रेड — प्रति शेयर भाव के साथ।"""
-    P = _bt_prep(df, tf)
-    long_mis = bool(I.demandIntradayMIS and P["intraday"])
-    mat = I.maturityBars if maturity is None else maturity
-    out: List[dict] = []
-    for z in zones:
-        if I.coreOpposite and z.get("room_tf") is not None and z["room_tf"] < I.oppositeRR:
-            continue
-        t = _bt_sim_one(P, z, rr, mat, be_rr, use_buffer, start, end, long_mis=long_mis)
-        if t is None:
-            continue
-        t.update(symbol=symbol, tf=tf, pattern=z["pattern"], score=int(z.get("score_base", 0)),
-                 tags=z.get("tags", ""), ztop=max(z["prox"], z["dist"]), zbot=min(z["prox"], z["dist"]),
-                 zborn=pd.Timestamp(int(z["time"]) + TF_SECONDS.get(tf, 0) * 1000, unit="ms", tz="UTC").tz_convert(IST))
-        out.append(t)
-    return out
-
-
-def bt_portfolio(trades: List[dict], capital: float, risk_pct: float,
-                 max_alloc: float = 25.0) -> Tuple[pd.DataFrame, pd.DataFrame, dict]:
-    """पूँजी की सीमा में qty लगाकर, समय के क्रम में सारे ट्रेड चलाओ।"""
-    import heapq
-    trades = sorted(trades, key=lambda t: (t["entry_time"], t["exit_time"]))
-    cash = float(capital)
-    equity = float(capital)
-    open_heap: list = []
-    rows, skipped = [], 0
-    seq = 0
-
-    def release(upto):
-        nonlocal cash, equity
-        while open_heap and open_heap[0][0] <= upto:
-            _, _, blocked, net = heapq.heappop(open_heap)
-            cash += blocked + net
-            equity += net
-
-    seen = set()
-    for t in trades:
-        key = (t.get("symbol"), t["long"], pd.Timestamp(t["entry_time"]).date())
-        if key in seen:                 # एक ही स्टॉक, दिन, दिशा — अलग TF के ज़ोन = एक ही ट्रेड
-            continue
-        seen.add(key)
-        release(t["entry_time"])
-        risk_amt = equity * risk_pct / 100.0
-        rps = max(t["risk_ps"], 1e-9)
-        qty = int(math.floor(risk_amt / rps))
-        per = t["entry"] * (1.0 if t["kind"] == "CNC" else MIS_MARGIN)
-        qty = min(qty, int(math.floor(cash / per)) if per > 0 else 0,
-                  int(math.floor(equity * max_alloc / 100.0 / per)) if per > 0 else 0)
-        if qty < 1:
-            skipped += 1
-            continue
-        if t["long"]:
-            buy_val, sell_val = qty * t["entry"], qty * t["exit"]
-        else:
-            sell_val, buy_val = qty * t["entry"], qty * t["exit"]
-        gross = sell_val - buy_val
-        ch = india_charges(t["kind"], buy_val, sell_val, t["exit_time"])
-        net = gross - ch["total"]
-        blocked = qty * per
-        cash -= blocked
-        seq += 1
-        heapq.heappush(open_heap, (t["exit_time"], seq, blocked, net))
-        rows.append(dict(t, qty=qty, gross=gross, charges=ch["total"], net=net,
-                         stt=ch["stt"], brokerage=ch["brokerage"], gst=ch["gst"],
-                         stamp=ch["stamp"], exchange=ch["exchange"], dp=ch["dp"],
-                         equity_at_entry=equity))
-    release(pd.Timestamp.max.tz_localize(IST))
-    tdf = pd.DataFrame(rows)
-    if tdf.empty:
-        return tdf, pd.DataFrame(), dict(trades=0, skipped=skipped, final=capital)
-    curve = tdf.sort_values("exit_time")[["exit_time", "net"]].copy()
-    curve["equity"] = capital + curve["net"].cumsum()
-    peak = curve["equity"].cummax().clip(lower=capital)      # शुरुआती पूँजी भी peak
-    dd = ((curve["equity"] - peak) / peak * 100.0).min()
-    wins = (tdf["net"] > 0).sum()
-    gross_win = tdf.loc[tdf["net"] > 0, "net"].sum()
-    gross_loss = -tdf.loc[tdf["net"] <= 0, "net"].sum()
-    summ = dict(trades=len(tdf), skipped=skipped, wins=int(wins),
-                win_pct=wins / len(tdf) * 100.0,
-                gross=tdf["gross"].sum(), charges=tdf["charges"].sum(), net=tdf["net"].sum(),
-                final=capital + tdf["net"].sum(), max_dd=float(dd),
-                profit_factor=(gross_win / gross_loss) if gross_loss > 0 else float("inf"),
-                targets=int((tdf["reason"] == "Target").sum()), sls=int((tdf["reason"] == "SL").sum()),
-                squareoff=int((tdf["reason"] == "MIS square-off").sum()))
-    return tdf, curve, summ
-
-
-def bt_collect(symbols: Sequence[str], frames_all: Dict[str, Dict[str, pd.DataFrame]],
-               tfs: Sequence[str], I: PineInputs, rrs: Sequence[float], use_buffer: bool,
-               start: pd.Timestamp, end: pd.Timestamp, progress=None) -> Tuple[Dict[float, List[dict]], pd.DataFrame]:
-    """हर symbol × TF पर इंजन चलाकर संभावित ट्रेड।  लौटाता है ({rr: trades}, TF-अवधि तालिका)"""
-    Ib = replace(I.sanitized(), scanBars=10 ** 7, maxStored=10 ** 7)
-    out: Dict[float, List[dict]] = {rr: [] for rr in rrs}
-    cover: Dict[str, list] = {}
-    syms = [s for s in symbols if s in frames_all]
-    for i, sym in enumerate(syms):
-        fr = frames_all[sym]
-        Is = replace(Ib, commodityMode=bool(Ib.commodityMode and sym.upper() in COMMODITY_SYMBOLS))
-        for tf in tfs:
-            df = fr.get(tf)
-            if df is None or len(df) < 40:
-                continue
-            try:
-                zs = engine(df, Is, tf, htf_daily=fr.get("1d"), return_all=True)
-            except Exception:                              # noqa: BLE001
-                continue
-            first, last = pd.Timestamp(df.index[0]), pd.Timestamp(df.index[-1])
-            cover.setdefault(tf, []).append((first, last))
-            if not Is.showSupply:
-                zs = [z for z in zs if z["demand"]]
-            if Is.minRiskPct > 0:
-                zs = [z for z in zs if z["prox"] and abs(z["prox"] - z["dist"]) / z["prox"] * 100.0 >= Is.minRiskPct]
-            if Is.minVolRatio > 0:
-                zs = [z for z in zs if not (np.isfinite(z.get("f_volratio", np.nan)) and z["f_volratio"] < Is.minVolRatio)]
-            if Is.minEdge > 0:
-                zs = [z for z in zs if edge_ok(z, Is)]
-            if Is.supplyIntradayOnly and TF_SECONDS.get(tf, 0) >= 86400:
-                zs = [z for z in zs if z["demand"]]
-            cs = curve_series(fr, tf) if Is.curveMode != "off" else None
-            spans = htf_zone_spans(fr, tf, Is) if Is.htfZoneReq else None
-            for rr in rrs:
-                tl = _bt_zone_trades(df, zs, tf, sym, Is, rr, use_buffer, start, end, be_rr=Is.breakEvenRR)
-                if Is.curveMode != "off":
-                    tl = [t for t in tl if curve_ok(Is.curveMode, t["long"], loc_at(cs, t["entry_time"], t["entry"]))]
-                if Is.htfZoneReq:
-                    tl = [t for t in tl if htf_conf(spans, t["long"], t["ztop"], t["zbot"], t["zborn"])]
-                if Is.entryApproach == "gap":
-                    tl = [t for t in tl if t["gap_entry"]]
-                elif Is.entryApproach == "clean":
-                    tl = [t for t in tl if not t["cov_before"]]
-                out[rr].extend(tl)
-        if progress:
-            progress((i + 1) / max(1, len(syms)), sym)
-    def _ist(ts):
-        ts = pd.Timestamp(ts)
-        return ts.tz_localize(IST) if ts.tzinfo is None else ts.tz_convert(IST)
-
-    rows = []
-    for tf in tfs:
-        spans = cover.get(tf) or []
-        if not spans:
-            rows.append({"TF": tf, "बैकटेस्ट शुरू": "—", "बैकटेस्ट अंत": "—", "स्क्रिप्ट": 0})
-            continue
-        f0 = max(min(_ist(a) for a, _ in spans), start)
-        f1 = min(max(_ist(b) for _, b in spans), end)
-        rows.append({"TF": tf, "बैकटेस्ट शुरू": f"{f0:%d-%b-%Y}", "बैकटेस्ट अंत": f"{f1:%d-%b-%Y}",
-                     "स्क्रिप्ट": len(spans)})
-    return out, pd.DataFrame(rows)
-
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -2340,39 +2045,6 @@ def curve_ok(mode: str, demand: bool, loc: float) -> bool:
     return loc <= lim if demand else loc >= 1.0 - lim
 
 
-OPT_DIAG: Dict[str, int] = {}
-PARENT_TF = {"1h": "1d", "2h": "1d", "4h": "1w", "1d": "1w", "75m": "1d", "125m": "1d", "15m": "1h", "30m": "1d"}
-
-
-def htf_zone_spans(frames: Dict[str, pd.DataFrame], tf: str, I: PineInputs, htf: Optional[str] = None) -> Optional[dict]:
-    """ट्रेंड TF (या दिया गया बड़ा TF) के सभी ज़ोन: कब से (candle पूरी होने पर) कब तक जीवित, कहाँ।"""
-    htf = htf or trend_tf(tf)
-    df = frames.get(htf)
-    if df is None or len(df) < 40 or htf == tf:
-        return None
-    try:
-        zs = engine(df, replace(I.sanitized(), scanBars=10 ** 7, maxStored=10 ** 7), htf,
-                    htf_daily=frames.get("1d"), return_all=True)
-    except Exception:                                          # noqa: BLE001
-        return None
-    if not zs:
-        return None
-    sec = TF_SECONDS.get(htf, 0) * 1000
-    S = _S(df)
-    lo_, hi_ = S.l, S.h
-    t1 = []
-    for z in zs:                                   # HTF ज़ोन तब तक मान्य जब तक distal न टूटे
-        cb = int(z["created_bar"])
-        brk = (np.flatnonzero(lo_[cb + 1:] <= z["dist"]) if z["demand"]
-               else np.flatnonzero(hi_[cb + 1:] >= z["dist"]))
-        t1.append(int(S.t[cb + 1 + brk[0]]) if len(brk) else 2 ** 62)
-    return dict(dem=np.array([z["demand"] for z in zs]),
-                top=np.array([max(z["prox"], z["dist"]) for z in zs]),
-                bot=np.array([min(z["prox"], z["dist"]) for z in zs]),
-                t0=np.array([z["time"] + sec for z in zs], dtype="int64"),
-                t1=np.array(t1, dtype="int64"))
-
-
 def htf_conf(spans: Optional[dict], demand: bool, top: float, bot: float, ts: pd.Timestamp) -> bool:
     if spans is None:
         return False
@@ -2383,565 +2055,10 @@ def htf_conf(spans: Optional[dict], demand: bool, top: float, bot: float, ts: pd
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  भाग 3c · OPTIMIZER — असली डेटा पर नियमों के हज़ारों संयोजन
-#   • एक बार ढीले नियमों से इंजन चलता है, हर ज़ोन के आँकड़े रखे जाते हैं
-#   • हर संयोजन = उन आँकड़ों पर फ़िल्टर + पूँजी-सीमा वाला portfolio (चार्ज सहित)
-#   • In-sample (शुरू → split) पर चुनो, Out-of-sample (split → अंत) पर परखो
-#   • ट्रेड की गिनती baseline (आपके अभी के नियम) से तय % से कम नहीं होने दी जाती
-# ═══════════════════════════════════════════════════════════════════════
-OPT_GRID = dict(
-    atr=[1.0, 1.2],                 # leg-in और leg-out: TR ≥ ATR ×
-    body=[0.6],                     # filled candle body ≥ (0.5/0.6 में फ़र्क नहीं मिला)
-    li=[1.5],                       # 1-2-4: leg-in ≥ boring ×
-    lo=[2.0, 2.5, 3.0],             # 1-2-4: leg-out (body) ≥ boring ×
-    power=[2.0, 3.0],               # power of leg-out ≥ 1:x
-    maturity=[0, 3],                # candles
-    score=[0],                      # (score 7 पिछले रन में कभी नहीं चुना गया)
-    trend=["off", "not_against", "in_favour"],
-    side=["both", "demand"],
-    volratio=[0.0, 1.5],            # leg-out volume ÷ boring volume ≥ (pending order का सबूत)
-    be=[0.0],                       # (break-even से फ़र्क नहीं मिला)
-    minrisk=[0.0, 0.4],             # SL की दूरी भाव का कम से कम % (पतले ज़ोन में चार्ज R खा जाते हैं)
-    dmode=["CNC", "MIS"],           # intraday TF पर Demand: CNC (कई दिन) या MIS (उसी दिन, कम चार्ज)
-    loc=["off", "half"],            # Curve: DZ discount में / SZ premium में
-    edge=[0, 4],                    # Edge score /9 ≥ (BZ ज़ोन हटाकर)
-    htf=["off", "on"],              # Zone-in-zone: ट्रेंड TF का जीवित ज़ोन साथ हो
-    approach=["any", "clean", "gap"],  # clean = लौटते समय leg-out 50% नहीं ढका; gap = open ही ज़ोन में
-    rr=[3.0, 5.0],
-)
-OPT_BASE = dict(atr=1.2, body=0.6, li=1.5, lo=2.5, power=3.0, maturity=3, score=0, trend="off",
-                side="both", be=0.0, minrisk=0.0, dmode="CNC", loc="off", htf="off", approach="any", volratio=0.0, edge=0)
-BACKTESTED_PRESET = dict(atr=1.0, body=0.6, li=1.5, lo=2.0, power=2.5, maturity=3, score=0, trend="not_against",
-                         side="both", be=0.0, minrisk=0.4, dmode="MIS", loc="off", htf="off", approach="gap", rr=5.0,
-                         volratio=1.5, edge=4, atr_out=1.2, boatr=0.7, licw=0.3, opprr=3.0, form=True,
-                         formrng=False, formtol=0.0, libody=1.5, lobody=1.0, whitewick=True, t1rr=2.5)
-
-
-TREND_TO_CORE = {"off": "Off (score only)", "not_against": "Higher-TF not against",
-                 "in_favour": "Higher-TF in favour (strict)"}
-
-
-def htf_action_series(frames: Dict[str, pd.DataFrame], tf: str, I: PineInputs) -> Optional[pd.DataFrame]:
-    """हर समय पर (बिना भविष्य देखे) ट्रेंड TF का Action — पिछली पूरी candle से।"""
-    tt = trader_type(tf, I)
-
-    def stats(df):
-        if df is None or len(df) < max(I.emaFast, I.atrPeriod) + 9:
-            return None
-        cl = df["close"].astype("float64")
-        e = cl.ewm(span=I.emaFast, adjust=False).mean()
-        atr = pd.Series(_rma(_true_range(df["high"].to_numpy(dtype="float64"),
-                                         df["low"].to_numpy(dtype="float64"), cl.to_numpy()), I.atrPeriod),
-                        index=df.index)
-        slope = (e - e.shift(6)) / atr
-        pp = (cl > df["open"]) & (cl > e)
-        pn = (cl < df["open"]) & (cl < e)
-        out = pd.DataFrame({"pp": pp, "pn": pn, "up": slope > I.trendThr, "dn": slope < -I.trendThr})
-        out = out.shift(1).fillna(False).astype(bool)        # सिर्फ़ पूरी हो चुकी candle
-        ix = pd.DatetimeIndex(out.index)
-        out.index = ix.tz_localize(IST) if ix.tz is None else ix.tz_convert(IST)
-        return out
-
-    t = stats(frames.get(trend_tf(tf)))
-    if t is None:
-        return None
-    res = pd.DataFrame({"long": t["pp"] & t["up"], "short": t["pn"] & t["dn"]}, index=t.index)
-    if tt == 2:
-        d = stats(frames.get("1d"))
-        if d is not None:
-            dd = d.reindex(res.index, method="ffill").fillna(False).astype(bool)
-            res["long"] &= dd["pp"]
-            res["short"] &= dd["pn"]
-    return res
-
-
-def _act_at(series: Optional[pd.DataFrame], ts: pd.Timestamp) -> Tuple[bool, bool]:
-    if series is None or series.empty:
-        return False, False
-    pos = series.index.searchsorted(ts, side="right") - 1
-    if pos < 0:
-        return False, False
-    row = series.iloc[pos]
-    return bool(row["long"]), bool(row["short"])
-
-
-# collect में हर ज़ोन पर ये रूप: (नाम, SL buffer ×ATR, entry buffer ×ATR, rr, target)
-COLLECT_VARIANTS = [
-    ("base", 0.0, 0.0, 5.0, "rr"), ("rr3", 0.0, 0.0, 3.0, "rr"), ("rr2.5", 0.0, 0.0, 2.5, "rr"),
-    ("sl0.1", 0.1, 0.0, 5.0, "rr"), ("sl0.25", 0.25, 0.0, 5.0, "rr"), ("sl0.5", 0.5, 0.0, 5.0, "rr"),
-    ("en0.1", 0.0, 0.1, 5.0, "rr"), ("en0.25", 0.0, 0.25, 5.0, "rr"), ("sl0.25en0.1", 0.25, 0.1, 5.0, "rr"),
-    ("sl0.25rr3", 0.25, 0.0, 3.0, "rr"),
-    ("tgt_lo1", 0.0, 0.0, 5.0, "lo1"), ("tgt_loall", 0.0, 0.0, 5.0, "loall"),
-    ("sl0.25tgt_loall", 0.25, 0.0, 5.0, "loall"),
-]
-
-
-def opt_loose_inputs(I: PineInputs, loose_all: bool = False) -> PineInputs:
-    """Optimizer/collect के ढीले नियम (चार्ट बनाते समय भी यही)।"""
-    I = replace(I, legInBodyVsBase=0.0, legOutBodyVsLegIn=0.0, whiteWick=False, legInMaxCloseWick=1.0, minRiskPct=0.0,
-                minVolRatio=0.0, minEdge=0, entryApproach="any", coreMTF=MTF_CORE_MODES[0], boringAtrMult=max(I.boringAtrMult, 1.0),
-                formationTolAtr=0.10, powerMinRR=min(I.powerMinRR, 2.0), oppositeRR=5.0)
-    loose = replace(I.sanitized(), scanBars=10 ** 7, maxStored=10 ** 7,
-                    legInAtrMult=min(OPT_GRID["atr"]), legOutAtrMult=min(OPT_GRID["atr"]),
-                    filledMinBody=min(OPT_GRID["body"]), legInToBaseSizeMult=min(OPT_GRID["li"]),
-                    legOutToBaseSizeMult=min(OPT_GRID["lo"]), powerMinRR=min(OPT_GRID["power"]))
-    if loose_all:
-        loose = replace(loose, filledMinBody=0.4, legInAtrMult=0.8, legOutAtrMult=0.8, boringAtrMult=1.3,
-                        legInToBaseSizeMult=1.0, legOutToBaseSizeMult=1.5, legOutEachMinBody=0.3, powerMinRR=1.5,
-                        useCBLI=False, useWhiteArea=False, useFormation=False)
-    return loose
-
-
-def opt_collect(symbols: Sequence[str], frames_all: Dict[str, Dict[str, pd.DataFrame]], tfs: Sequence[str],
-                I: PineInputs, start: pd.Timestamp, end: pd.Timestamp, use_buffer: bool = False,
-                progress=None, loose_all: bool = False) -> pd.DataFrame:
-    """ढीले नियमों से सारे ज़ोन + हर (rr, maturity, BE) का ट्रेड — एक बड़ी तालिका।
-    loose_all = हर नियम बहुत ढीला (हर पैरामीटर को बाद में अलग-अलग परखने के लिए)"""
-    loose = opt_loose_inputs(I, loose_all)
-    rows = []
-    syms = [s for s in symbols if s in frames_all]
-    for i, sym in enumerate(syms):
-        fr = frames_all[sym]
-        Is = replace(loose, commodityMode=bool(loose.commodityMode and sym.upper() in COMMODITY_SYMBOLS))
-        for tf in tfs:
-            df = fr.get(tf)
-            if df is None or len(df) < 40:
-                continue
-            try:
-                zs = engine(df, Is, tf, htf_daily=fr.get("1d"), return_all=True)
-            except Exception:                                  # noqa: BLE001
-                continue
-            if not zs:
-                continue
-            P = _bt_prep(df, tf)
-            act = htf_action_series(fr, tf, Is)
-            intra = P["intraday"]
-            cs = curve_series(fr, tf)
-            spans = htf_zone_spans(fr, tf, replace(I, commodityMode=Is.commodityMode))
-            pspans = htf_zone_spans(fr, tf, replace(Is, legInAtrMult=0.8, legOutAtrMult=0.8, filledMinBody=0.5,
-                                                    legInToBaseSizeMult=1.0, legOutToBaseSizeMult=1.5, powerMinRR=1.0,
-                                                    useWhiteArea=False, useFormation=False),
-                                    htf=PARENT_TF.get(tf))       # बड़े TF का ज़ोन — ढीले नियम से (कोर्स जैसा मोटा मार्किंग)
-            OPT_DIAG[tf] = OPT_DIAG.get(tf, 0) + (0 if pspans is None else len(pspans["dem"]))
-            for zid, z in enumerate(zs):
-                if (not loose_all) and z.get("room_tf") is not None and z["room_tf"] < Is.oppositeRR:
-                    continue                                   # आपका अनिवार्य opposite-zone नियम
-                base = dict(symbol=sym, tf=tf, zid=f"{sym}|{tf}|{zid}", long=bool(z["demand"]),
-                            m_in_atr=z["m_in_atr"], m_out_atr=z["m_out_atr"], m_li_body=z["m_li_body"],
-                            m_fo_body=z["m_fo_body"], m_li_ratio=z["m_li_ratio"], m_lo_ratio=z["m_lo_ratio"],
-                            pow_rr=z["pow_rr"], score_base=int(z["score_base"]),
-                            f_pivot=z["f_pivot"], f_gapout=z["f_gapout"], f_fvg=z["f_fvg"], f_sweep=z["f_sweep"],
-                            f_disp=z["f_disp"], f_relvol=z["f_relvol"], f_volratio=z["f_volratio"], f_strong=z["f_strong"],
-                            f_basebars=int(z["base_count"]), f_nout=int(z["leg_outs"]), f_fu=bool(z.get("follow")),
-                            f_bz=bool(z.get("base_break")), f_sb=bool(z.get("swing_break")),
-                            f_zone_pct=abs(z["prox"] - z["dist"]) / z["prox"] * 100.0 if z["prox"] else float("nan"),
-                            room_pt=int(z.get("room_tf") is None or z["room_tf"] >= 10 or z["xrr"] >= 10),
-                            m_room=float(z["room_tf"]) if z.get("room_tf") is not None else 99.0,
-                            **z.get("fx", {}))
-                modes = (("CNC", False), ("MIS", True)) if (intra and z["demand"]) else (("ANY", False),)
-                if loose_all and intra and z["demand"]:
-                    modes = (("MIS", True),)
-                zborn = pd.Timestamp(int(z["time"]) + TF_SECONDS.get(tf, 0) * 1000, unit="ms", tz="UTC").tz_convert(IST)
-                if loose_all:
-                    _a = float(z.get("atr_c") or 0.0)
-                    _sg = 1.0 if z["demand"] else -1.0
-                    for vn, sbuf, ebuf, vrr, tmode in COLLECT_VARIANTS:
-                        zv = dict(z, prox=z["prox"] + _sg * ebuf * _a, dist=z["dist"] - _sg * sbuf * _a)
-                        tp = (z["pow_first_px"] if tmode == "lo1" else z["pow_all_px"] if tmode == "loall" else None)
-                        lmis = bool(intra and z["demand"])
-                        t = _bt_sim_one(P, zv, vrr, 0, 0.0, False, start, end, long_mis=lmis, tgt_px=tp)
-                        if t is None or (not t["gap_entry"] and not os.environ.get("COLLECT_ALL_ENTRIES")):
-                            continue
-                        al, ash = _act_at(act, t["entry_time"])
-                        hp = htf_conf(pspans, bool(z["demand"]), max(z["prox"], z["dist"]),
-                                      min(z["prox"], z["dist"]), zborn)
-                        _risk0 = abs(zv["prox"] - zv["dist"])
-                        rows.append(dict(base, var=vn, rr=vrr, maturity=0, be=0.0, dmode="MIS" if lmis else "ANY",
-                                         loc=np.nan, htf_conf=False, htf_par=hp, f_edge=edge_score(z, hp),
-                                         away=int(t["ej"]) - int(z["created_bar"]), intra=intra,
-                                         cov_before=t["cov_before"], gap_entry=bool(t["gap_entry"]),
-                                         entry_time=t["entry_time"], exit_time=t["exit_time"], entry=t["entry"],
-                                         exit=t["exit"], risk_ps=t["risk_ps"], risk0=_risk0, target=t["target"],
-                                         prox_v=zv["prox"], sl_v=zv["dist"],
-                                         m_pow1_rr=abs(z["pow_first_px"] - z["prox"]) / abs(z["prox"] - z["dist"]),
-                                         m_powall_rr=abs(z["pow_all_px"] - z["prox"]) / abs(z["prox"] - z["dist"]),
-                                         reason=t["reason"], act_long=al, act_short=ash))
-                    continue
-                for rr in OPT_GRID["rr"]:
-                    for mat in ([0] if loose_all else OPT_GRID["maturity"]):
-                        for be in OPT_GRID["be"]:
-                          for dm, lmis in modes:
-                            t = _bt_sim_one(P, z, rr, mat, be, use_buffer, start, end, long_mis=lmis)
-                            if t is None:
-                                continue
-                            al, ash = _act_at(act, t["entry_time"])
-                            lv = loc_at(cs, t["entry_time"], t["entry"])
-                            hc = htf_conf(spans, bool(z["demand"]), max(z["prox"], z["dist"]),
-                                          min(z["prox"], z["dist"]), zborn)
-                            hp = htf_conf(pspans, bool(z["demand"]), max(z["prox"], z["dist"]),
-                                          min(z["prox"], z["dist"]), zborn)
-                            rows.append(dict(base, rr=rr, maturity=mat, be=be, dmode=dm, loc=lv, htf_conf=hc, htf_par=hp,
-                                             f_edge=edge_score(z, hp),
-                                             away=int(t["ej"]) - int(z["created_bar"]),
-                                             intra=intra, cov_before=t["cov_before"], gap_entry=t["gap_entry"],
-                                             entry_time=t["entry_time"], exit_time=t["exit_time"],
-                                             entry=t["entry"], exit=t["exit"], risk_ps=t["risk_ps"],
-                                             reason=t["reason"], act_long=al, act_short=ash))
-        if progress:
-            progress((i + 1) / max(1, len(syms)), sym)
-    return pd.DataFrame(rows)
-
-
-def _fast_portfolio(et, xt, entry, exitp, rps, is_long, capital: float, risk_pct: float,
-                    max_alloc: float = 25.0, is_cnc=None) -> dict:
-    """bt_portfolio जैसा ही, पर तेज़ (arrays)। et/xt = int64 ns, पहले से entry के क्रम में।"""
-    import heapq
-    cash = equity = peak = float(capital)
-    max_dd = 0.0
-    heap: list = []
-    n_tr = wins = skipped = 0
-    net_sum = gw = gl = 0.0
-    oct24 = pd.Timestamp("2024-10-01", tz=IST).value
-    if is_cnc is None:
-        is_cnc = is_long
-    for i in range(len(et)):
-        while heap and heap[0][0] <= et[i]:
-            _, _, blk, nt = heapq.heappop(heap)
-            cash += blk + nt
-            equity += nt
-            peak = max(peak, equity)
-            max_dd = min(max_dd, (equity - peak) / peak * 100.0)
-        qty = int(equity * risk_pct / 100.0 / max(rps[i], 1e-9))
-        per = entry[i] if is_cnc[i] else entry[i] * MIS_MARGIN
-        qty = min(qty, int(cash / per) if per > 0 else 0, int(equity * max_alloc / 100.0 / per) if per > 0 else 0)
-        if qty < 1:
-            skipped += 1
-            continue
-        if is_long[i]:
-            buy, sell = qty * entry[i], qty * exitp[i]
-        else:
-            sell, buy = qty * entry[i], qty * exitp[i]
-        turn = buy + sell
-        ex = turn * (0.0000322 if xt[i] < oct24 else 0.0000297)
-        if is_cnc[i]:
-            brk, stt, stamp, dp = 0.0, 0.001 * turn, 0.00015 * buy, DP_CHARGE
-        else:
-            brk = min(20.0, 0.0003 * buy) + min(20.0, 0.0003 * sell)
-            stt, stamp, dp = 0.00025 * sell, 0.00003 * buy, 0.0
-        sebi = turn * 1e-6
-        ch = brk + stt + stamp + ex + sebi + 0.18 * (brk + ex + sebi) + dp
-        nt = sell - buy - ch
-        blk = qty * per
-        cash -= blk
-        heapq.heappush(heap, (xt[i], i, blk, nt))
-        n_tr += 1
-        net_sum += nt
-        if nt > 0:
-            wins += 1
-            gw += nt
-        else:
-            gl -= nt
-    while heap:
-        _, _, blk, nt = heapq.heappop(heap)
-        equity += nt
-        peak = max(peak, equity)
-        max_dd = min(max_dd, (equity - peak) / peak * 100.0)
-    return dict(trades=n_tr, wins=wins, skipped=skipped, net=net_sum,
-                ret=net_sum / capital * 100.0, win_pct=(wins / n_tr * 100.0) if n_tr else 0.0,
-                max_dd=max_dd, pf=(gw / gl) if gl > 0 else (99.0 if gw > 0 else 0.0))
-
-
-def _charges_vec(lg, buy, sell, xt_ns):
-    oct24 = pd.Timestamp("2024-10-01", tz=IST).value
-    turn = buy + sell
-    ex = turn * np.where(xt_ns < oct24, 0.0000322, 0.0000297)
-    brk = np.where(lg, 0.0, np.minimum(20.0, 0.0003 * buy) + np.minimum(20.0, 0.0003 * sell))
-    stt = np.where(lg, 0.001 * turn, 0.00025 * sell)
-    stamp = np.where(lg, 0.00015 * buy, 0.00003 * buy)
-    dp = np.where(lg, DP_CHARGE, 0.0)
-    sebi = turn * 1e-6
-    return brk + stt + stamp + ex + sebi + 0.18 * (brk + ex + sebi) + dp
-
-
-def _r_stats(r: np.ndarray) -> dict:
-    n = len(r)
-    if n == 0:
-        return dict(sig=0, winR=0.0, expR=0.0, totR=0.0, pfR=0.0)
-    gw, gl = r[r > 0].sum(), -r[r <= 0].sum()
-    return dict(sig=n, winR=float((r > 0).mean() * 100.0), expR=float(r.mean()), totR=float(r.sum()),
-                pfR=float(gw / gl) if gl > 0 else (99.0 if gw > 0 else 0.0))
-
-
-def opt_run(T: pd.DataFrame, capital: float, risk_pct: float, split: pd.Timestamp,
-            keep_pct: float = 80.0, progress=None, max_alloc: float = 25.0) -> Tuple[pd.DataFrame, dict]:
-    """सारे संयोजन चलाओ। लौटाता है (नतीजे की तालिका, baseline)।"""
-    import itertools
-    if T is None or T.empty:
-        return pd.DataFrame(), {}
-    T = T.sort_values("entry_time").reset_index(drop=True)
-    et = T["entry_time"].map(lambda x: x.value).to_numpy()
-    xt = T["exit_time"].map(lambda x: x.value).to_numpy()
-    en, ex, rp = T["entry"].to_numpy(), T["exit"].to_numpy(), T["risk_ps"].to_numpy()
-    lg = T["long"].to_numpy()
-    dmode = T["dmode"].to_numpy()
-    cnc = lg & (dmode != "MIS")
-    is_mask = et < split.value
-    # हर signal का नतीजा R में (चार्ज के बाद) — पूँजी की कमी से स्वतंत्र, सारे ज़ोन गिने जाते हैं
-    R0 = capital * risk_pct / 100.0
-    per_unit = np.where(cnc, en, en * MIS_MARGIN)
-    qn = np.floor(np.minimum(R0 / np.maximum(rp, 1e-9), capital * max_alloc / 100.0 / np.maximum(per_unit, 1e-9)))
-    qn = np.maximum(qn, 1.0)
-    # ज़ोन की चौड़ाई (proximal–distal) — लाइव स्कैनर वाला ही नाप; gap-open entry पर SL छोटा हो जाता है, उसे नहीं गिनते
-    risk_pct_px = (T["f_zone_pct"].to_numpy(dtype=float) if "f_zone_pct" in T else rp / np.maximum(en, 1e-9) * 100.0)
-    risk_pct_px = np.nan_to_num(risk_pct_px, nan=0.0)
-    buy = np.where(lg, qn * en, qn * ex)
-    sell = np.where(lg, qn * ex, qn * en)
-    r_gross = (sell - buy) / R0
-    r_cost = _charges_vec(cnc, buy, sell, xt) / R0
-    r_net = r_gross - r_cost
-    keys = ["atr", "body", "li", "lo", "power", "maturity", "score", "trend", "side", "be", "minrisk", "dmode",
-            "loc", "htf", "approach", "rr", "volratio", "edge"]
-    edg = T["f_edge"].to_numpy(dtype=float) if "f_edge" in T else np.full(len(T), 9.0)
-    bzv = T["f_bz"].to_numpy(dtype=bool) if "f_bz" in T else np.zeros(len(T), dtype=bool)
-    vrat = np.nan_to_num(T["f_volratio"].to_numpy(dtype=float), nan=99.0) if "f_volratio" in T else np.full(len(T), 99.0)
-    covb = T["cov_before"].to_numpy(dtype=bool)
-    gape = T["gap_entry"].to_numpy(dtype=bool)
-    locv = T["loc"].to_numpy(dtype="float64")
-    hconf = T["htf_par" if "htf_par" in T else "htf_conf"].to_numpy(dtype=bool)   # बड़े TF के ज़ोन के अंदर
-    intra = T["intra"].to_numpy(dtype=bool)
-    loc_ok = {}
-    for mode, lim in CURVE_MODES.items():
-        if lim is None:
-            loc_ok[mode] = np.ones(len(T), dtype=bool)
-        else:
-            fin = np.isfinite(locv)
-            loc_ok[mode] = fin & np.where(lg, locv <= lim, locv >= 1.0 - lim)
-    combos = list(itertools.product(*[OPT_GRID[k] for k in keys]))
-    out = []
-    A = {k: T[k].to_numpy() for k in ("m_in_atr", "m_out_atr", "m_li_body", "m_fo_body", "m_li_ratio",
-                                      "m_lo_ratio", "pow_rr", "rr", "maturity", "be")}
-    act_with = np.where(lg, T["act_long"], T["act_short"]).astype(bool)
-    act_against = np.where(lg, T["act_short"], T["act_long"]).astype(bool)
-    score_act = T["score_base"].to_numpy() + T["room_pt"].to_numpy() + act_with.astype(int)
-    for ci, vals in enumerate(combos):
-        p = dict(zip(keys, vals))
-        m = ((A["m_in_atr"] >= p["atr"]) & (A["m_out_atr"] >= p["atr"])
-             & (A["m_li_body"] >= p["body"]) & (A["m_fo_body"] >= p["body"])
-             & (A["m_li_ratio"] >= p["li"]) & (A["m_lo_ratio"] >= p["lo"])
-             & (A["pow_rr"] >= p["power"]) & (score_act >= p["score"])
-             & (A["rr"] == p["rr"]) & (A["maturity"] == p["maturity"]) & (A["be"] == p["be"])
-             & (risk_pct_px >= p["minrisk"]) & ((dmode == p["dmode"]) | (dmode == "ANY"))
-             & (vrat >= p["volratio"]))
-        if p["edge"] > 0:
-            m &= (edg >= p["edge"]) & ~bzv
-        if p["side"] == "demand":
-            m &= lg
-        elif p["side"] == "dem_intra_sup":
-            m &= lg | intra
-        m &= loc_ok[p["loc"]]
-        if p["htf"] == "on":
-            m &= hconf
-        if p["approach"] == "clean":
-            m &= ~covb
-        elif p["approach"] == "gap":
-            m &= gape
-        if p["trend"] == "not_against":
-            m &= ~act_against
-        elif p["trend"] == "in_favour":
-            m &= act_with
-        row = dict(p)
-        for tag, pm in (("IS", m & is_mask), ("OOS", m & ~is_mask)):
-            ii = np.flatnonzero(pm)
-            for k, v in _r_stats(r_net[ii]).items():
-                row[f"{tag}_{k}"] = v
-            row[f"{tag}_grossR"] = float(r_gross[ii].mean()) if len(ii) else 0.0
-            row[f"{tag}_costR"] = float(r_cost[ii].mean()) if len(ii) else 0.0
-            row[f"_{tag}_idx"] = ii
-        out.append(row)
-        if progress and ci % 50 == 0:
-            progress(ci / len(combos))
-    R = pd.DataFrame(out)
-
-    def _port(i):                                       # ₹ portfolio — सिर्फ़ ज़रूरी पंक्तियों के लिए
-        for tag in ("IS", "OOS"):
-            ii = R.at[i, f"_{tag}_idx"]
-            pr = _fast_portfolio(et[ii], xt[ii], en[ii], ex[ii], rp[ii], lg[ii], capital, risk_pct, max_alloc, cnc[ii])
-            for k in ("trades", "skipped", "win_pct", "net", "ret", "max_dd", "pf"):
-                R.at[i, f"{tag}_{k}"] = pr[k]
-    for tag in ("IS", "OOS"):
-        for k in ("trades", "skipped", "win_pct", "net", "ret", "max_dd", "pf"):
-            R[f"{tag}_{k}"] = np.nan
-    base = {}
-    for rr in OPT_GRID["rr"]:
-        q = R
-        for k, v in OPT_BASE.items():
-            q = q[q[k] == v]
-        q = q[q["rr"] == rr]
-        if len(q):
-            base[rr] = q.iloc[0].to_dict()
-    min_tr = keep_pct / 100.0 * max([b["IS_sig"] for b in base.values()] or [0])
-    R["feasible"] = R["IS_sig"] >= min_tr
-    R = R.sort_values(["feasible", "IS_totR"], ascending=[False, False]).reset_index(drop=True)
-    top_idx = list(R.index[R["feasible"]][:60])
-    for i in top_idx:
-        _port(i)
-    for rr, b in base.items():                          # baseline का ₹ portfolio भी
-        q = R
-        for k, v in OPT_BASE.items():
-            q = q[q[k] == v]
-        q = q[q["rr"] == rr]
-        if len(q):
-            _port(q.index[0])
-            base[rr] = R.loc[q.index[0]].to_dict()
-    qp = R                                              # backtested preset (हर rr) का ₹ portfolio भी
-    for k, v in BACKTESTED_PRESET.items():
-        if k != "rr" and k in qp:
-            qp = qp[qp[k] == v]
-    for i in qp.index:
-        _port(i)
-    R = R.drop(columns=["_IS_idx", "_OOS_idx"])
-    for b in base.values():
-        b.pop("_IS_idx", None)
-        b.pop("_OOS_idx", None)
-    return R, dict(base=base, min_trades=min_tr)
-
-
-def opt_pick(R: pd.DataFrame, top: int = 15) -> Optional[dict]:
-    """In-sample के top में से वह जो Out-of-sample में भी सबसे अच्छा (दोनों में मुनाफ़ा)।"""
-    if R is None or R.empty:
-        return None
-    cand = R[R["feasible"]].head(top)
-    good = cand[(cand["IS_expR"] > 0) & (cand["OOS_expR"] > 0)]
-    pick = (good if len(good) else cand).sort_values("OOS_totR", ascending=False)
-    return pick.iloc[0].to_dict() if len(pick) else None
-
-
-# ═══════════════════════════════════════════════════════════════════════
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-# ═══════════════════════════════════════════════════════════════════════
-#  भाग 3d · तुरंत बैकटेस्ट — इनपुट बदलते ही ज़ोन संख्या और जीत %
-#   data/bt_zones.csv.gz = 222 F&O स्टॉक, 1h–1d, Jan-2024 से Oct-2026, बहुत ढीले नियमों से बने
-#   हर ज़ोन के नाप (body, ATR, 1-2-4, power…) और उसका नतीजा (1:2.5, 1:3, 1:5) — चार्ज के बाद
-# ═══════════════════════════════════════════════════════════════════════
-QBT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "bt_zones.csv.gz")
-QBT_SPLIT_MS = int(pd.Timestamp("2025-07-01", tz=IST).value // 10 ** 6)
-QBT_FLOOR = dict(filledMinBody=0.4, legInAtrMult=0.8, legOutAtrMult=0.8, legInToBaseSizeMult=1.0,
-                 legOutToBaseSizeMult=1.5, powerMinRR=1.5, legOutEachMinBody=0.3)
-QBT_CEIL = dict(boringAtrMult=1.3)
-
-
-def qbt_load() -> Optional[pd.DataFrame]:
-    try:
-        return pd.read_csv(QBT_FILE, low_memory=False, dtype={"rc5": str, "rc25": str, "rc3": str}, keep_default_na=True)
-    except Exception:                                          # noqa: BLE001
-        return None
-
-
-def _qbt_rr_col(rr: float) -> str:
-    return min((("25", 2.5), ("3", 3.0), ("5", 5.0)), key=lambda t: abs(t[1] - rr))[0]
-
-
-def _qbt_R(d: pd.DataFrame, rr: float) -> Tuple[pd.Series, pd.Series]:
-    """rr के सबसे पास वाला नतीजा; जहाँ वह न हो (छोटे TF में 1:3 नहीं) वहाँ अगला पास वाला।"""
-    order = sorted((("25", 2.5), ("3", 3.0), ("5", 5.0)), key=lambda t: abs(t[1] - rr))
-    R = pd.Series(np.nan, index=d.index)
-    rc = pd.Series("", index=d.index, dtype=object)
-    for c, _ in order:
-        miss = R.isna()
-        R[miss] = d.loc[miss, "nR" + c]
-        rc[miss] = d.loc[miss, "rc" + c]
-    return R, rc
-
-
-QBT_PERIOD = {"3m": ("7 दिन", 0.25), "5m": ("60 दिन", 2.0), "10m": ("60 दिन", 2.0), "15m": ("60 दिन", 2.0),
-              "30m": ("60 दिन", 2.0), "75m": ("60 दिन", 2.0)}
-
-
-def qbt_run(Z: pd.DataFrame, I: "PineInputs", tfs: Sequence[str], entry: Optional[str] = None) -> Tuple[pd.DataFrame, dict]:
-    """इनपुट के हिसाब से ज़ोन छानो → हर TF की गिनती, जीत %, ₹ (आधी T1, आधी T2)।"""
-    m = np.ones(len(Z), dtype=bool)
-    g = lambda c: Z[c].to_numpy()
-    m &= (g("m_li_body") >= I.filledMinBody - 1e-9) & (g("m_fo_body") >= I.filledMinBody - 1e-9)
-    m &= (g("m_in_atr") >= I.legInAtrMult - 1e-9) & (g("m_out_atr") >= I.legOutAtrMult - 1e-9)
-    m &= g("m_base_tr") <= I.boringAtrMult + 1e-9
-    m &= (g("m_li_ratio") >= I.legInToBaseSizeMult - 1e-9) & (g("m_lo_ratio") >= I.legOutToBaseSizeMult - 1e-9)
-    m &= g("m_lo_minbody") >= I.legOutEachMinBody - 1e-9
-    m &= (g("f_basebars") >= I.minBaseCountInput) & (g("f_basebars") <= I.maxBaseCountInput)
-    m &= g("f_nout") <= I.maxLegOut
-    if not I.allowTwoLegOut:
-        m &= g("f_nout") != 2
-    if I.corePower:
-        m &= g("pow_rr") >= I.powerMinRR - 1e-9
-    if I.coreOpposite:
-        m &= g("m_room") >= I.oppositeRR - 1e-9
-    if I.useWhiteArea:
-        m &= g("m_white") == 1
-    if I.whiteWick:
-        m &= g("m_white_wick") == 1
-    if I.useFormation:
-        m &= (g("m_form_range") == 1) if I.formationRange else (g("m_form_dev") <= I.formationTolAtr + 1e-9)
-    if I.useCBLI:
-        m &= g("m_cbli") <= I.cbliMaxPct + 1e-9
-    if I.legInMaxCloseWick < 1.0:
-        m &= g("m_li_closewick") <= I.legInMaxCloseWick + 1e-9
-    if I.legInBodyVsBase > 0:
-        m &= g("m_li_body_base") >= I.legInBodyVsBase - 1e-9
-    if I.legOutBodyVsLegIn > 0:
-        m &= g("m_lo_li_body") >= I.legOutBodyVsLegIn - 1e-9
-    if I.strict:
-        m &= g("f_notes") >= 5
-    if I.minRiskPct > 0:
-        m &= g("f_zone_pct") >= I.minRiskPct - 1e-9
-    if I.minVolRatio > 0:
-        vr = g("f_volratio")
-        m &= ~(np.isfinite(vr) & (vr < I.minVolRatio))
-    if I.minEdge > 0:
-        m &= (g("f_edge") >= I.minEdge) & (g("f_bz") == 0)
-    if I.coreMTF != MTF_CORE_MODES[0]:
-        m &= g("notag") == 1
-    if I.useMaturity and I.maturityBars > 0:
-        m &= g("away") >= I.maturityBars
-    if not I.showSupply:
-        m &= g("long") == 1
-    ent = entry or I.entryApproach
-    if ent == "gap":
-        m &= g("gap_entry") == 1
-    elif ent == "clean":
-        m &= g("cov_before") == 0
-    m &= Z["tf"].isin(list(tfs)).to_numpy()
-    d = Z[m].copy()
-    r1, _ = _qbt_R(d, I.targetRR)
-    r2, rc2 = _qbt_R(d, I.target2RR)
-    d["R"] = 0.5 * (r1 + r2) if abs(I.targetRR - I.target2RR) > 1e-9 else r2
-    d["res"] = rc2
-    d["day"] = (d["et"] // 86400000).astype("int64")
-    d = d.sort_values("tf").drop_duplicates(["symbol", "day", "long"])     # एक स्टॉक-दिन-दिशा = एक ट्रेड
-    per_R = float(I.accountCapital) * float(I.riskPct) / 100.0
-    rows = []
-    order = [t for t in ALL_TFS if t in set(d["tf"]) or t in tfs]
-    for tf in order + ["कुल"]:
-        x = d if tf == "कुल" else d[d["tf"] == tf]
-        if tf != "कुल" and tf not in Z["tf"].unique():
-            rows.append({"TF": tf, "ट्रेड": None, "टिप्पणी": "इस TF का लंबा डेटा नहीं (Yahoo)"})
-            continue
-        n = len(x)
-        isx, oos = x[x["et"] < QBT_SPLIT_MS], x[x["et"] >= QBT_SPLIT_MS]
-        per, months = QBT_PERIOD.get(tf, ("Jan-24→Oct-26", 34.0))
-        rows.append({"TF": tf, "डेटा": per if tf != "कुल" else "", "ट्रेड": n, "Target": int((x["res"] == "T").sum()), "SL": int((x["res"] == "S").sum()),
-                     "दिन-अंत": int((x["res"] == "O").sum()),
-                     "जीत %": round(float((x["R"] > 0).mean() * 100), 1) if n else 0.0,
-                     "₹ कुल": round(float(x["R"].sum() * per_R)),
-                     "₹ Jan-24→Jun-25": round(float(isx["R"].sum() * per_R)),
-                     "₹ Jul-25→Oct-26": round(float(oos["R"].sum() * per_R)),
-                     "ट्रेड/माह": round(n / months, 1) if tf != "कुल" else None})
-    tot = rows[-1]
-    floor = [k for k, v in QBT_FLOOR.items() if getattr(I, k) < v - 1e-9] + [k for k, v in QBT_CEIL.items() if getattr(I, k) > v + 1e-9]
-    return pd.DataFrame(rows), dict(total=tot, floor=floor, per_R=per_R)
-
-
-APP_BUILD = "v29 · बैकटेस्ट तालिका में 3m–75m (Yahoo 60 दिन) भी · 2026-10-28"
+APP_BUILD = "v30 · सिर्फ़ ज़ोन स्कैनर · आपकी स्क्रीनशॉट वाली सेटिंग default · 2026-10-28"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -3148,7 +2265,7 @@ def preset_loose():
 def top_bar():
     c = cols([1.5, 2.0, .8, .85, 1.05, 1.15, .95])
     uni = c[0].selectbox("यूनिवर्स", UNIVERSES, key="in_uni", label_visibility="collapsed")
-    tfs = c[1].multiselect("TF", list(ALL_TFS), default=["2h", "4h", "1d"],
+    tfs = c[1].multiselect("TF", list(ALL_TFS), default=list(ALL_TFS),
                            key="in_tfs", label_visibility="collapsed")
     side = c[2].selectbox("पक्ष", ["All", "Demand", "Supply"], key="in_side",
                           label_visibility="collapsed")
@@ -3219,11 +2336,7 @@ def pine_panel(slot=None):
                                   index=list(CURVE_MODES).index(D.curveMode), format_func=lambda k: CURVE_LABEL[k],
                                   key="in_curve")
             htfz = f13.checkbox("Zone-in-zone: ट्रेंड TF का ज़ोन साथ हो", D.htfZoneReq, key="in_htfz")
-            appr = st.selectbox("Entry का तरीका", ["any", "clean", "gap"],
-                                index=["any", "clean", "gap"].index(D.entryApproach),
-                                format_func=lambda k: {"any": "कोई भी टच", "clean": "साफ़ वापसी (leg-out 50% न ढका)",
-                                                       "gap": "सिर्फ़ gap-open (बाज़ार खुलते ही ज़ोन में)"}[k],
-                                key="in_appr")
+            appr = D.entryApproach
             sup_intra = f14.checkbox("Supply सिर्फ़ intraday TF पर (MIS)", D.supplyIntradayOnly, key="in_supintra",
                                      help="₹25k में Daily/Weekly short संभव नहीं — MIS उसी दिन बंद होता है")
             min_risk = f11.number_input("SL की दूरी भाव का कम से कम %", 0.0, 10.0, D.minRiskPct, 0.1, key="in_minrisk",
@@ -3465,10 +2578,19 @@ def _scan_all(symbols, inp, opts):
 # ---------------------------------------------------------------------------
 # 4 · TradingView लिंक + शीट
 # ---------------------------------------------------------------------------
+def _tv_sym(sym: str) -> str:
+    """TradingView NSE नाम: & और - की जगह _ (M&M → NSE:M_M, BAJAJ-AUTO → NSE:BAJAJ_AUTO)।"""
+    sym = str(sym)
+    if sym.startswith("NSE:"):
+        ex, s2 = sym.split(":", 1)
+        return ex + ":" + s2.replace("&", "_").replace("-", "_")
+    return sym
+
+
 def tv_url(symbol: str, tf: str) -> str:
     from urllib.parse import quote
-    sym = sym_meta(symbol)["cash"] or f"NSE:{symbol}"
-    return f"https://www.tradingview.com/chart/?symbol={quote(str(sym))}&interval={TV_TF.get(str(tf), '15')}"
+    sym = _tv_sym(sym_meta(symbol)["cash"] or f"NSE:{symbol}")
+    return f"https://www.tradingview.com/chart/?symbol={quote(sym)}&interval={TV_TF.get(str(tf), '15')}"
 
 
 def fut_url(symbol: str, tf: str) -> str:
@@ -3476,7 +2598,7 @@ def fut_url(symbol: str, tf: str) -> str:
     sym = sym_meta(symbol)["fut"]
     if not sym:
         return tv_url(symbol, tf)
-    return f"https://www.tradingview.com/chart/?symbol={quote(str(sym))}&interval={TV_TF.get(str(tf), '15')}"
+    return f"https://www.tradingview.com/chart/?symbol={quote(_tv_sym(sym))}&interval={TV_TF.get(str(tf), '15')}"
 
 
 def _lerp(c1, c2, t):
@@ -3710,249 +2832,6 @@ def mtf_panel(snap: dict, tfs, peers):
     return pd.DataFrame(rows)
 
 
-def _bt_summary_table(summ: Dict[float, dict], capital: float) -> pd.DataFrame:
-    rows = []
-    for rr, s in summ.items():
-        if not s.get("trades"):
-            rows.append({"Target": f"1:{rr:g}", "ट्रेड": 0})
-            continue
-        rows.append({
-            "Target": f"1:{rr:g}", "ट्रेड": s["trades"], "जीते": s["wins"], "जीत %": round(s["win_pct"], 1),
-            "Target लगे": s["targets"], "SL लगे": s["sls"], "MIS square-off": s["squareoff"],
-            "Gross ₹": round(s["gross"], 0), "चार्ज ₹": round(s["charges"], 0), "Net ₹": round(s["net"], 0),
-            "अंतिम पूँजी ₹": round(s["final"], 0), "रिटर्न %": round((s["final"] / capital - 1) * 100, 1),
-            "Max drawdown %": round(s["max_dd"], 1),
-            "Profit factor": round(s["profit_factor"], 2) if np.isfinite(s["profit_factor"]) else "∞",
-            "पैसे की कमी से छूटे": s["skipped"],
-        })
-    return pd.DataFrame(rows)
-
-
-def _bt_group(tdf: pd.DataFrame, by: str) -> pd.DataFrame:
-    if tdf.empty:
-        return pd.DataFrame()
-    g = tdf.groupby(by)
-    out = pd.DataFrame({
-        "ट्रेड": g.size(), "जीत %": g["net"].apply(lambda x: round((x > 0).mean() * 100, 1)),
-        "Net ₹": g["net"].sum().round(0), "चार्ज ₹": g["charges"].sum().round(0),
-    }).reset_index()
-    if by == "tf":
-        out["_k"] = out["tf"].map(lambda t: TF_SECONDS.get(str(t), 0))
-        out = out.sort_values("_k").drop(columns="_k")
-    return out
-
-
-def backtest_panel(inp: PineInputs, tb: dict) -> None:
-    st.caption("Entry = Proximal (limit) · SL = Distal · Target 1:3 और 1:5 (OCO) · Demand = Long CNC, "
-               "Supply = Short MIS (उसी दिन बंद) · Zerodha जैसे चार्ज + STT, exchange, SEBI, stamp, GST, DP · "
-               "एक candle में SL और target दोनों = SL माना।")
-    c1, c2, c3, c4, c5 = cols([1, 1, 1, 1, 1.2])
-    d0 = c1.date_input("शुरू", pd.Timestamp(BT_DEFAULT_START).date(), key="bt_start")
-    d1 = c2.date_input("अंत", pd.Timestamp(BT_DEFAULT_END).date(), key="bt_end")
-    cap = c3.number_input("पूँजी ₹", 1000.0, 1e9, 25000.0, 1000.0, key="bt_cap")
-    rp = c4.number_input("जोखिम % / ट्रेड", 0.05, 10.0, float(inp.riskPct), 0.05, key="bt_risk")
-    buf = c5.checkbox("SL पर DATR buffer भी", False, key="bt_buf")
-    alloc = c5.number_input("एक ट्रेड में अधिकतम पूँजी %", 5.0, 100.0, 25.0, 5.0, key="bt_alloc",
-                            help="कोर्स: एक साथ अधिकतम 4 live ट्रेड → 25%")
-    tfs = st.multiselect("Time frames", list(ALL_TFS), default=list(ALL_TFS), key="bt_tfs")
-    st.caption("Yahoo सीमा: Daily/Weekly/Monthly पूरा · 1h–6h ~730 दिन · 3m–75m ~60 दिन — हर TF की असली अवधि नीचे दिखेगी।")
-    go = put(st, "button", "▶️ Backtest चलाएँ", type="primary", key="bt_go")
-    if go:
-        syms = pick_symbols(tb)
-        if not syms:
-            st.error("कोई स्क्रिप्ट नहीं।")
-            return
-        start = pd.Timestamp(d0).tz_localize(IST)
-        end = pd.Timestamp(d1).tz_localize(IST) + pd.Timedelta(hours=23, minutes=59)
-        need = list(dict.fromkeys(list(tfs) + ["1d"]))
-        with st.spinner(f"{len(syms)} स्क्रिप्ट का डेटा ला रहे हैं…"):
-            frames_all = cached_frames(tuple(syms), tuple(need))
-        bar = st.progress(0.0, text="इंजन चल रहा है…")
-        trades, cov = bt_collect(syms, frames_all, tfs, inp, (3.0, 5.0), bool(buf), start, end,
-                                 progress=lambda f, s: bar.progress(min(1.0, f), text=f"{s} …"))
-        bar.empty()
-        res = {}
-        for rr, tl in trades.items():
-            tdf, curve, summ = bt_portfolio(tl, float(cap), float(rp), float(alloc))
-            res[rr] = (tdf, curve, summ)
-        st.session_state["bt"] = dict(res=res, cov=cov, cap=float(cap), n=len(syms))
-    st.divider()
-    optimizer_panel(inp, tb, cap, rp, d0, d1, alloc)
-    st.divider()
-    bt = st.session_state.get("bt")
-    if not bt:
-        return
-    res, cap = bt["res"], bt["cap"]
-    st.markdown(f"**नतीजा — {bt['n']} स्क्रिप्ट · शुरुआती पूँजी ₹{cap:,.0f}**")
-    stretch(st.dataframe, _bt_summary_table({rr: v[2] for rr, v in res.items()}, cap), hide_index=True)
-    st.markdown("**हर TF की असली अवधि (Yahoo डेटा)**")
-    stretch(st.dataframe, bt["cov"], hide_index=True)
-    for rr, (tdf, curve, summ) in res.items():
-        with st.expander(f"Target 1:{rr:g} — विवरण", expanded=False):
-            if tdf.empty:
-                st.info("कोई ट्रेड नहीं।")
-                continue
-            st.markdown("**पूँजी का ग्राफ़ (net, चार्ज के बाद)**")
-            st.line_chart(curve.set_index("exit_time")["equity"])
-            a, b = st.columns(2)
-            a.markdown("**TF के हिसाब से**")
-            stretch(a.dataframe, _bt_group(tdf, "tf"), hide_index=True)
-            b.markdown("**Demand (CNC) / Supply (MIS)**")
-            stretch(b.dataframe, _bt_group(tdf, "side"), hide_index=True)
-            tdf2 = tdf.copy()
-            tdf2["साल"] = tdf2["entry_time"].dt.year
-            a2, b2 = st.columns(2)
-            a2.markdown("**साल के हिसाब से**")
-            stretch(a2.dataframe, _bt_group(tdf2, "साल"), hide_index=True)
-            b2.markdown("**Score के हिसाब से**")
-            stretch(b2.dataframe, _bt_group(tdf2, "score"), hide_index=True)
-            ch = tdf[["brokerage", "stt", "exchange", "stamp", "gst", "dp"]].sum()
-            st.markdown("**चार्ज का ब्रेकअप (₹)** — " + " · ".join(f"{k}: {v:,.0f}" for k, v in ch.items()))
-            show = tdf[["symbol", "tf", "side", "pattern", "score", "entry_time", "entry", "sl", "target",
-                        "exit_time", "exit", "reason", "qty", "gross", "charges", "net"]].copy()
-            show["entry_time"] = show["entry_time"].dt.strftime("%d-%b-%Y %H:%M")
-            show["exit_time"] = show["exit_time"].dt.strftime("%d-%b-%Y %H:%M")
-            put(st, "download_button", f"⬇️ सारे ट्रेड CSV (1:{rr:g})",
-                show.to_csv(index=False).encode("utf-8-sig"),
-                file_name=f"backtest_1to{rr:g}_{datetime.now(IST):%Y%m%d}.csv", mime="text/csv",
-                key=f"bt_dl_{rr}")
-            stretch(st.dataframe, show.round(2), hide_index=True, height=360)
-
-
-def _opt_apply(best: dict) -> None:
-    """Optimizer के सबसे अच्छे नियम ⚙️ इनपुट में डाल दो (on_click callback)।"""
-    ss = st.session_state
-    ss["in_liatr"] = float(best["atr"])
-    ss["in_loatr"] = float(best["atr"])
-    ss["in_filled"] = float(best["body"])
-    ss["in_libase"] = float(best["li"])
-    ss["in_lobase"] = float(best["lo"])
-    ss["in_powermin"] = float(best["power"])
-    ss["in_matbars"] = int(best["maturity"])
-    ss["in_minscore"] = int(best["score"]) if int(best["score"]) > 0 else PineInputs().minScore
-    ss["in_hident"] = bool(int(best["score"]) > 0)
-    ss["in_coremtf"] = TREND_TO_CORE.get(str(best["trend"]), MTF_CORE_MODES[0])
-    ss["in_showsupply"] = str(best["side"]) == "both"
-    ss["in_berr"] = float(best["be"])
-    ss["in_minrisk"] = float(best.get("minrisk", 0.0))
-    ss["in_volratio"] = float(best.get("volratio", 0.0))
-    ss["in_edge"] = int(best.get("edge", 0))
-    if "atr_out" in best:
-        ss["in_loatr"] = float(best["atr_out"])
-    ss["in_boatr"] = float(best.get("boatr", PineInputs().boringAtrMult))
-    ss["in_licw"] = float(best.get("licw", 1.0))
-    if "opprr" in best:
-        ss["in_opp"] = True
-        ss["in_opprr"] = float(best["opprr"])
-    if "form" in best:
-        ss["in_form"] = bool(best["form"])
-    ss["in_formrng"] = bool(best.get("formrng", False))
-    if "formtol" in best:
-        ss["in_formtol"] = float(best["formtol"])
-    ss["in_libb"] = float(best.get("libody", 0.0))
-    ss["in_lobl"] = float(best.get("lobody", 0.0))
-    ss["in_wwick"] = bool(best.get("whitewick", False))
-    if "t1rr" in best:
-        ss["in_rr"] = ss["in_hrr"] = ss["in_mrr"] = float(best["t1rr"])
-    ss["in_maturity"] = int(best.get("maturity", 0)) > 0
-    ss["in_dmis"] = str(best.get("dmode", "CNC")) == "MIS"
-    ss["in_curve"] = str(best.get("loc", "off"))
-    ss["in_htfz"] = str(best.get("htf", "off")) == "on"
-    ss["in_showsupply"] = str(best["side"]) != "demand"
-    ss["in_supintra"] = str(best["side"]) == "dem_intra_sup"
-    ss["in_appr"] = str(best.get("approach", "any"))
-    ss["in_t2rr"] = float(best.get("rr", 5.0))
-    ss.pop("scan", None)
-
-
-def _opt_pine_text(b: dict) -> str:
-    return "\n".join([
-        f"Leg-in: TR ≥ ATR ×                 = {b['atr']}",
-        f"First leg-out: TR ≥ ATR ×          = {b['atr']}",
-        f"Filled candle: min body %          = {b['body']}",
-        f"1-2-4: Leg-in ≥ boring ×           = {b['li']}",
-        f"1-2-4: Leg-out (body) ≥ boring ×   = {b['lo']}",
-        f"Power: minimum reward 1:           = {b['power']}",
-        f"Maturity: candles after zone       = {int(b['maturity'])}",
-        f"Min score to trade                 = {int(b['score'])}  (Hide NO-TRADE = {'ON' if int(b['score']) > 0 else 'OFF'})",
-        f"MTF analysis → mandatory           = {TREND_TO_CORE.get(str(b['trend']))}",
-        f"Show supply zones                  = {'ON' if b['side'] == 'both' else 'OFF'}",
-        f"Break-even at 1: (0 = off)         = {b['be']}",
-        f"Min SL distance % of price         = {b.get('minrisk', 0.0)}",
-        f"Min leg-out/boring volume ratio    = {b.get('volratio', 0.0)}",
-        f"Min Edge score (/9, no BZ)         = {b.get('edge', 0)}",
-        f"Intraday TF पर Demand               = {'MIS (उसी दिन बंद)' if b.get('dmode') == 'MIS' else 'CNC (delivery)'}",
-        f"Curve (Location)                   = {CURVE_LABEL.get(str(b.get('loc', 'off')))}",
-        f"Zone-in-zone (HTF ज़ोन ज़रूरी)        = {'ON' if b.get('htf') == 'on' else 'OFF'}",
-        f"Supply सिर्फ़ intraday TF            = {'ON' if b['side'] == 'dem_intra_sup' else 'OFF'}",
-        f"Entry का तरीका                      = {b.get('approach', 'any')}",
-        f"सबसे अच्छा target                   = 1:{b['rr']:g}",
-    ])
-
-
-def optimizer_panel(inp: PineInputs, tb: dict, cap: float, rp: float, d0, d1, alloc: float = 25.0) -> None:
-    st.markdown("**✅ आपके चुने नियम v26 (28-Oct-2026 · 222 स्टॉक · साफ़ डेटा, 15:15 वाली candle ठीक)**")
-    st.caption("Leg-in: body ≥60% · TR ≥ ATR×1.0 · closing wick ≤30% · body ≥ 1.5× boring range · Boring: 1–3 · TR ≤ ATR×0.7 · "
-               "Leg-out: body ≥60% · TR ≥ ATR×1.2 · body ≥ leg-in body · ≥ 2× boring · Formation (DBR/RBD): open leg-in body के अंदर · "
-               "White area: leg-out की body और wick boring को पूरा न ढकें · Power ≥ 1:2.5 · Opposite 1:3 · Maturity 3 · "
-               "ज़ोन ≥0.4% · volume ≥1.5× · Edge ≥4 · बड़ा TF उल्टा नहीं · gap-open entry · target आधी 1:2.5, आधी 1:5। "
-               "2h·4h·1d, ₹25k / 0.5% जोखिम, चार्ज के बाद: Jan-24→Jun-25 +₹4,761, Jul-25→Oct-26 +₹1,625 · 28 ट्रेड (~1/माह) · "
-               "जीत ~61%। सामान्य limit order (दिन में कभी भी) इन्हीं नियमों पर: 312 ट्रेड, +₹3,308 / −₹1,996। गारंटी नहीं।")
-    put(st, "button", "✅ ये नियम ⚙️ इनपुट में लगाएँ", on_click=_opt_apply, args=(BACKTESTED_PRESET,), key="preset_apply")
-    st.divider()
-    st.markdown("**🔧 Optimizer — असली डेटा पर सबसे अच्छे नियम (zone कम न हों + मुनाफ़ा)**")
-    st.caption("ढीले नियमों से एक बार ज़ोन बनते हैं, फिर ~4,600 संयोजन चार्ज और पूँजी-सीमा के साथ चलते हैं। "
-               "In-sample पर चुने जाते हैं, बाद के अनदेखे (Out-of-sample) समय पर परखे जाते हैं। "
-               "अनिवार्य नियम (Filled-Unfilled-Filled, White area, Formation, CBLI, opposite zone) हमेशा लागू।")
-    o1, o2, o3 = cols([1, 1, 2])
-    split = o1.date_input("In-sample अंत / OOS शुरू", pd.Timestamp("2025-07-01").date(), key="opt_split")
-    keep = o2.slider("ट्रेड कम से कम (baseline का %)", 50, 150, 80, 10, key="opt_keep")
-    otfs = o3.multiselect("TF (लंबी अवधि वाले)", list(ALL_TFS), default=["1h", "2h", "4h", "1d", "1w"],
-                          key="opt_tfs")
-    if put(st, "button", "🔧 Optimizer चलाएँ", key="opt_go"):
-        syms = pick_symbols(tb)
-        start = pd.Timestamp(d0).tz_localize(IST)
-        end = pd.Timestamp(d1).tz_localize(IST) + pd.Timedelta(hours=23, minutes=59)
-        need = list(dict.fromkeys(list(otfs) + ["75m", "1d", "1w", "1M"]))
-        with st.spinner(f"{len(syms)} स्क्रिप्ट का डेटा…"):
-            frames_all = cached_frames(tuple(syms), tuple(need))
-        bar = st.progress(0.0, text="ज़ोन और ट्रेड बन रहे हैं…")
-        T = opt_collect(syms, frames_all, otfs, inp, start, end,
-                        progress=lambda f, s: bar.progress(min(1.0, f * 0.5), text=f"{s} …"))
-        R, meta = opt_run(T, float(cap), float(rp), pd.Timestamp(split).tz_localize(IST), float(keep), max_alloc=float(alloc),
-                          progress=lambda f: bar.progress(0.5 + 0.5 * min(1.0, f), text="संयोजन परखे जा रहे हैं…"))
-        bar.empty()
-        st.session_state["opt"] = dict(R=R, meta=meta, best=opt_pick(R), n=len(syms), zones=int(T["zid"].nunique()) if len(T) else 0)
-    O = st.session_state.get("opt")
-    if not O:
-        return
-    R, meta, best = O["R"], O["meta"], O["best"]
-    if R is None or R.empty or not best:
-        st.warning("कोई ट्रेड नहीं बना — ज़्यादा स्क्रिप्ट या TF चुनें।")
-        return
-    cols_show = ["atr", "body", "lo", "power", "maturity", "trend", "side", "be", "minrisk", "volratio", "edge", "dmode", "loc", "htf", "rr",
-                 "IS_sig", "IS_winR", "IS_grossR", "IS_costR", "IS_expR", "IS_totR",
-                 "OOS_sig", "OOS_winR", "OOS_grossR", "OOS_costR", "OOS_expR", "OOS_totR",
-                 "IS_trades", "IS_skipped", "IS_net", "OOS_trades", "OOS_skipped", "OOS_net", "OOS_max_dd"]
-    cols_show = [c for c in cols_show if c in R.columns]
-    st.markdown(f"**{O['n']} स्क्रिप्ट · {O['zones']} ज़ोन · न्यूनतम signal (IS): {meta['min_trades']:.0f}**")
-    st.caption("sig = signal (हर ज़ोन का पहला टच) · winR = जीत % · expR = हर signal का औसत नतीजा R में (चार्ज के बाद; "
-               "+0.30 = हर ट्रेड पर औसतन जोखिम का 30% मुनाफ़ा) · totR = कुल R · "
-               "grossR = चार्ज से पहले · costR = चार्ज R में · trades/skipped/net = ₹ पूँजी के साथ असली portfolio "
-               "(skipped = पैसे की कमी से छूटे)")
-    base_rows = [dict(v, नाम=f"आपके अभी के नियम · 1:{k:g}") for k, v in meta["base"].items()]
-    best_row = dict(best, नाम="★ सबसे अच्छा")
-    cmp = pd.DataFrame(base_rows + [best_row])[["नाम"] + cols_show]
-    stretch(st.dataframe, cmp.round(2), hide_index=True)
-    st.markdown("**Top 15 (In-sample कुल R के क्रम में, signal-सीमा पूरी करने वाले)**")
-    stretch(st.dataframe, R[R["feasible"]].head(15)[cols_show].round(2), hide_index=True)
-    put(st, "button", "✅ सबसे अच्छे नियम ⚙️ इनपुट में लगाएँ", on_click=_opt_apply, args=(best,), key="opt_apply")
-    st.markdown("**TradingView Pine में यही सेटिंग डालें:**")
-    st.code(_opt_pine_text(best), language="text")
-    put(st, "download_button", "⬇️ सारे संयोजन CSV", R.to_csv(index=False).encode("utf-8-sig"),
-        file_name=f"optimizer_{datetime.now(IST):%Y%m%d}.csv", mime="text/csv", key="opt_dl")
-
-
 # ---------------------------------------------------------------------------
 # 5 · यूनिवर्स
 # ---------------------------------------------------------------------------
@@ -4010,37 +2889,6 @@ def main():
         st.code(traceback.format_exc(), language="text")
 
 
-def qbt_panel(inp: "PineInputs", tfs: Sequence[str]) -> None:
-    """⚙️ इनपुट के ठीक नीचे: अभी की सेटिंग पर ज़ोन संख्या और जीत % (बदलते ही नया)।"""
-    Z = _qbt_cached()
-    with st.expander("📊 इन सेटिंग पर बैकटेस्ट — ज़ोन संख्या और जीत % (इनपुट बदलते ही बदलता है)", expanded=True):
-        if Z is None:
-            st.info("बैकटेस्ट डेटा (data/bt_zones.csv.gz) नहीं मिला।")
-            return
-        tfs_ok = [t for t in tfs if t in set(Z["tf"])] or ["2h", "4h", "1d"]
-        df, meta = qbt_run(Z, inp, tfs_ok)
-        other = "any" if inp.entryApproach == "gap" else "gap"
-        df2, meta2 = qbt_run(Z, inp, tfs_ok, entry=other)
-        t, t2 = meta["total"], meta2["total"]
-        name = {"gap": "gap-open", "any": "सामान्य limit", "clean": "clean"}
-        st.markdown(f"**अभी की सेटिंग ({name.get(inp.entryApproach, inp.entryApproach)} entry):** {t.get('ट्रेड', 0)} ट्रेड · "
-                    f"जीत {t.get('जीत %', 0)}% · कुल ₹{t.get('₹ कुल', 0):,} &nbsp;|&nbsp; "
-                    f"यही नियम {name[other]} entry पर: {t2.get('ट्रेड', 0)} ट्रेड · जीत {t2.get('जीत %', 0)}% · ₹{t2.get('₹ कुल', 0):,}")
-        stretch(st.dataframe, df.convert_dtypes(), hide_index=True)
-        st.caption(f"222 F&O स्टॉक · Jan-2024 से Oct-2026 · पूँजी ₹{inp.accountCapital:,.0f}, जोखिम {inp.riskPct:g}% (1R = ₹{meta['per_R']:,.0f}) · "
-                   f"आधी मात्रा T1 1:{inp.targetRR:g}, आधी T2 1:{inp.target2RR:g} (डेटा में 1:2.5, 1:3, 1:5 हैं; बाक़ी पास वाले पर) · "
-                   "चार्ज के बाद · MIS · एक स्टॉक-दिन-दिशा = एक ट्रेड · 1h–1d: Jan-2024 से Oct-2026; 5m–75m: Yahoo के 60 दिन; "
-                   "3m: 7 दिन — छोटे TF के नंबर कम समय के हैं, सावधानी से देखें। "
-                   "'बड़ा TF in favour' को 'उल्टा नहीं' जैसा गिना है।")
-        if meta["floor"]:
-            st.warning("ये इनपुट डेटा बनाने वाले नियमों से भी ढीले हैं, इसलिए उन पर असली गिनती इससे ज़्यादा होगी: " + ", ".join(meta["floor"]))
-
-
-@st.cache_data(show_spinner=False)
-def _qbt_cached():
-    return qbt_load()
-
-
 def _main():
     st.caption(f"build {APP_BUILD} · streamlit {st.__version__}")
     css()
@@ -4050,10 +2898,6 @@ def _main():
     tb = top_bar()
     ctrl = cols([.01, .85, .7, .7, 4.9])
     inp, uo = pine_panel(None)          # ⚙️ इनपुट पूरी चौड़ाई में (tablet पर साफ़ दिखे)
-    try:
-        qbt_panel(inp, tb["tfs"])
-    except Exception as e:                                     # noqa: BLE001
-        st.caption(f"तुरंत बैकटेस्ट नहीं चला: {e}")
 
     # ── स्कैन ────────────────────────────────────────────────────────────
     if tb["go"]:
@@ -4069,10 +2913,6 @@ def _main():
                 res = run_scan(syms, inp, opts)
             res.update(inputs=inp, opts=opts, ui=uo, symbols=syms)
             st.session_state["scan"] = res
-
-    # ── Backtest ────────────────────────────────────────────────────────
-    with st.expander(f"🧪 Backtest · 🔧 Optimizer  ·  ({APP_BUILD.split(' ·')[0]})", expanded=False):
-        backtest_panel(inp, tb)
 
     res = st.session_state.get("scan")
     if not res:

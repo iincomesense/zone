@@ -30,7 +30,7 @@ TFS = os.environ.get("BT_TFS", "1h,2h,4h,1d,1w").split(",")
 _mode_f = os.path.join(os.path.dirname(os.path.abspath(__file__)), "MODE")
 COLLECT = os.path.exists(_mode_f) and open(_mode_f).read().strip().startswith("collect")
 if COLLECT:                                  # हर पैरामीटर अलग से परखने के लिए: बहुत ढीले नियम, सिर्फ़ signals
-    TFS = os.environ.get("BT_TFS_COLLECT", "15m,75m,1h,2h,4h,1d,1w").split(",")
+    TFS = os.environ.get("BT_TFS_COLLECT", "1h,2h,4h,1d").split(",")
 CAP, RISK, ALLOC, KEEP = 25000.0, 0.5, 25.0, 80.0
 
 t0 = time.time()

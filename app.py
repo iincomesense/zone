@@ -1024,9 +1024,11 @@ def _candidate(p: int, bc: int, nout: int, S: _S, I: PineInputs):
     in_body = in_body_hi - in_body_lo
     # ---- 2. CBLI ----
     m_cbli = 0.0
+    m_cbli_sz = 0.0
     if in_body > 0 and ((in_bull and S.bear[pi]) or (in_bear and S.bull[pi])):
         _ph, _pl = max(o[pi], c[pi]), min(o[pi], c[pi])
         m_cbli = float(max(0.0, min(_ph, in_body_hi) - max(_pl, in_body_lo)) / in_body)
+        m_cbli_sz = float((_ph - _pl) / in_body)
     if I.useCBLI and in_body > 0:
         opp = (in_bull and S.bear[pi]) or (in_bear and S.bull[pi])
         if opp:
@@ -1183,7 +1185,16 @@ def _candidate(p: int, bc: int, nout: int, S: _S, I: PineInputs):
         f_relvol=float(S.v[fo] / vs) if (np.isfinite(vs) and vs > 0) else float("nan"),
         f_volratio=float(out_vol / base_vol) if (np.isfinite(base_vol) and base_vol > 0) else float("nan"),
         f_basebars=int(bc), f_nout=int(nout),
-        fx=dict(m_cbli=m_cbli, m_base_tr=m_base_tr, m_base_body=m_base_body, m_lo_minbody=m_lo_minbody,
+        fx=dict(m_lo_li_body=float(abs(c[fo] - o[fo]) / in_body) if in_body > 0 else 9.0,
+                m_lo_li_range=float((h[fo] - l[fo]) / in_range) if in_range > 0 else 9.0,
+                m_loall_li_body=float((ob_hi - ob_lo) / in_body) if in_body > 0 else 9.0,
+                m_form_dev=float(max(0.0, o[fo] - in_body_hi, in_body_lo - o[fo]) / atr[fo]) if reversal else 0.0,
+                m_form_range=bool((in_low <= o[fo] <= in_high) if reversal else True),
+                m_lo_wick_in=float(((max(o[bl:b0 + 1].max(), c[bl:b0 + 1].max()) - l[fo]) if demand
+                                    else (h[fo] - min(o[bl:b0 + 1].min(), c[bl:b0 + 1].min()))) / base_size),
+                m_cbli_size=float(m_cbli_sz),
+                m_li_body_base=float(in_body / base_size),
+                m_cbli=m_cbli, m_base_tr=m_base_tr, m_base_body=m_base_body, m_lo_minbody=m_lo_minbody,
                 m_li_closewick=float(closing_wick / in_range) if in_range > 0 else 0.0,
                 m_li_wick=float(in_wick), m_white=bool(white_ok), m_form=bool(form_ok),
                 m_r1=bool(r1), m_r2=bool(r2), m_r3=bool(r3), m_r4=bool(r4), m_r5=bool(r5),
@@ -1433,7 +1444,8 @@ def engine(df: pd.DataFrame, I: PineInputs, tf: str, htf_daily: Optional[pd.Data
                         swing_break=swing_brk, trader_type=TT_NAME.get(tt, ""), t1_rr=t1,
                         state=STATE_FRESH, touches=0, outside=True, target_hit=False,
                         six=0, entry_bar=None, first_run=None, old_retest=False,
-                        created_bar=p, created_day=int(S.day[p]), bar=p,
+                        created_bar=p, created_day=int(S.day[p]), bar=p, atr_c=float(S.atr[p]),
+                        pow_first_px=float(cand["pow_first"]), pow_all_px=float(cand["pow_all"]),
                         left_bar=bl - 1, time=int(S.t[p]), start_time=int(S.t[bl - 1]),
                         broken_at=None, tf=tf, tf_sec=tf_sec, symbol=None,
                     )
@@ -1938,7 +1950,8 @@ def _bt_prep(df: pd.DataFrame, tf: str) -> dict:
 
 
 def _bt_sim_one(P: dict, z: dict, rr: float, maturity: int, be_rr: float, use_buffer: bool,
-                start: pd.Timestamp, end: pd.Timestamp, long_mis: bool = False) -> Optional[dict]:
+                start: pd.Timestamp, end: pd.Timestamp, long_mis: bool = False,
+                tgt_px: Optional[float] = None) -> Optional[dict]:
     """एक ज़ोन का एक ट्रेड (प्रति शेयर)। be_rr > 0 → price 1:be_rr पहुँचे तो SL = entry।"""
     idx, o, h, l, c, n = P["idx"], P["o"], P["h"], P["l"], P["c"], P["n"]
     dem = bool(z["demand"])
@@ -1948,6 +1961,10 @@ def _bt_sim_one(P: dict, z: dict, rr: float, maturity: int, be_rr: float, use_bu
     if risk_ps <= 0:
         return None
     tgt = prox + rr * risk_ps if dem else prox - rr * risk_ps
+    if tgt_px is not None:
+        if (tgt_px <= prox) if dem else (tgt_px >= prox):
+            return None
+        tgt = float(tgt_px)
     cb = int(z["created_bar"])
     ej = None
     cov_before = False
@@ -2342,6 +2359,17 @@ def _act_at(series: Optional[pd.DataFrame], ts: pd.Timestamp) -> Tuple[bool, boo
     return bool(row["long"]), bool(row["short"])
 
 
+# collect में हर ज़ोन पर ये रूप: (नाम, SL buffer ×ATR, entry buffer ×ATR, rr, target)
+COLLECT_VARIANTS = [
+    ("base", 0.0, 0.0, 5.0, "rr"), ("rr3", 0.0, 0.0, 3.0, "rr"),
+    ("sl0.1", 0.1, 0.0, 5.0, "rr"), ("sl0.25", 0.25, 0.0, 5.0, "rr"), ("sl0.5", 0.5, 0.0, 5.0, "rr"),
+    ("en0.1", 0.0, 0.1, 5.0, "rr"), ("en0.25", 0.0, 0.25, 5.0, "rr"), ("sl0.25en0.1", 0.25, 0.1, 5.0, "rr"),
+    ("sl0.25rr3", 0.25, 0.0, 3.0, "rr"),
+    ("tgt_lo1", 0.0, 0.0, 5.0, "lo1"), ("tgt_loall", 0.0, 0.0, 5.0, "loall"),
+    ("sl0.25tgt_loall", 0.25, 0.0, 5.0, "loall"),
+]
+
+
 def opt_loose_inputs(I: PineInputs, loose_all: bool = False) -> PineInputs:
     """Optimizer/collect के ढीले नियम (चार्ट बनाते समय भी यही)।"""
     loose = replace(I.sanitized(), scanBars=10 ** 7, maxStored=10 ** 7,
@@ -2405,6 +2433,31 @@ def opt_collect(symbols: Sequence[str], frames_all: Dict[str, Dict[str, pd.DataF
                 if loose_all and intra and z["demand"]:
                     modes = (("MIS", True),)
                 zborn = pd.Timestamp(int(z["time"]) + TF_SECONDS.get(tf, 0) * 1000, unit="ms", tz="UTC").tz_convert(IST)
+                if loose_all:
+                    _a = float(z.get("atr_c") or 0.0)
+                    _sg = 1.0 if z["demand"] else -1.0
+                    for vn, sbuf, ebuf, vrr, tmode in COLLECT_VARIANTS:
+                        zv = dict(z, prox=z["prox"] + _sg * ebuf * _a, dist=z["dist"] - _sg * sbuf * _a)
+                        tp = (z["pow_first_px"] if tmode == "lo1" else z["pow_all_px"] if tmode == "loall" else None)
+                        lmis = bool(intra and z["demand"])
+                        t = _bt_sim_one(P, zv, vrr, 0, 0.0, False, start, end, long_mis=lmis, tgt_px=tp)
+                        if t is None or (not t["gap_entry"] and not os.environ.get("COLLECT_ALL_ENTRIES")):
+                            continue
+                        al, ash = _act_at(act, t["entry_time"])
+                        hp = htf_conf(pspans, bool(z["demand"]), max(z["prox"], z["dist"]),
+                                      min(z["prox"], z["dist"]), zborn)
+                        _risk0 = abs(zv["prox"] - zv["dist"])
+                        rows.append(dict(base, var=vn, rr=vrr, maturity=0, be=0.0, dmode="MIS" if lmis else "ANY",
+                                         loc=np.nan, htf_conf=False, htf_par=hp, f_edge=edge_score(z, hp),
+                                         away=int(t["ej"]) - int(z["created_bar"]), intra=intra,
+                                         cov_before=t["cov_before"], gap_entry=bool(t["gap_entry"]),
+                                         entry_time=t["entry_time"], exit_time=t["exit_time"], entry=t["entry"],
+                                         exit=t["exit"], risk_ps=t["risk_ps"], risk0=_risk0, target=t["target"],
+                                         prox_v=zv["prox"], sl_v=zv["dist"],
+                                         m_pow1_rr=abs(z["pow_first_px"] - z["prox"]) / abs(z["prox"] - z["dist"]),
+                                         m_powall_rr=abs(z["pow_all_px"] - z["prox"]) / abs(z["prox"] - z["dist"]),
+                                         reason=t["reason"], act_long=al, act_short=ash))
+                    continue
                 for rr in OPT_GRID["rr"]:
                     for mat in ([0] if loose_all else OPT_GRID["maturity"]):
                         for be in OPT_GRID["be"]:

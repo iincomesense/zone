@@ -1957,15 +1957,20 @@ def scan_symbol(symbol: str,
                 drop("HTF ज़ोन साथ नहीं")
                 continue
             if I.minRiskPct > 0 and z["prox"] and abs(z["prox"] - z["dist"]) / z["prox"] * 100.0 < I.minRiskPct:
+                drop(f"ज़ोन पतला (SL दूरी < {I.minRiskPct:g}%)")
                 continue
             if I.minVolRatio > 0 and np.isfinite(z.get("f_volratio", np.nan)) and z["f_volratio"] < I.minVolRatio:
+                drop(f"Leg-out volume < {I.minVolRatio:g}× boring")
                 continue
             z["edge"] = edge_score(z, z["htf_conf"])
             if not edge_ok(z, I, z["htf_conf"]):
+                drop(f"Edge score < {I.minEdge} (या BZ)")
                 continue
             if I.filterAction and not act_ok:
+                drop("Action दिशा में नहीं")
                 continue
             if I.filterWholesale and not ws_ok:
+                drop("Wholesale नहीं")
                 continue
             z["cf"] = (dem, datetime.fromtimestamp(z["time"] / 1000, IST).date()) in fut_days.get(tf, set())
             extra_tags = [t for t, on in (("WS", ws_ok), ("C+F", z["cf"]), ("HTF", z["htf_conf"]), (f"E{z['edge']}", True),
@@ -2058,7 +2063,7 @@ def htf_conf(spans: Optional[dict], demand: bool, top: float, bot: float, ts: pd
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v30 · सिर्फ़ ज़ोन स्कैनर · आपकी स्क्रीनशॉट वाली सेटिंग default · 2026-10-28"
+APP_BUILD = "v31 · ज़ोन स्कैनर · स्क्रीनशॉट default · ढीला बटन + कारण गिनती · 2026-10-28"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -2254,8 +2259,8 @@ def reset_inputs():
 
 def preset_loose():
     """Pine default से थोड़ा ढीला (सिर्फ़ खोज के लिए)।"""
-    for k, v in {"in_powermin": 2.0, "in_filled": 0.40, "in_cbli": False,
-                 "in_form": False, "in_maturity": False}.items():
+    for k, v in {"in_volratio": 0.0, "in_minrisk": 0.0, "in_coremtf": MTF_CORE_MODES[0], "in_fact": False,
+                 "in_fws": False, "in_edge": 0, "in_minscore": 0, "in_maxlo": 3, "in_twolo": True}.items():
         st.session_state[k] = v
 
 
@@ -2923,8 +2928,9 @@ def _main():
     df_all: pd.DataFrame = res["rows"]
     uo = res.get("ui", uo)
     if df_all is None or df_all.empty:
-        st.warning("इस रन में कोई ज़ोन नहीं बना — ⚙️ इनपुट → 🔓 ढीला दबाएँ, या "
-                   "Power न्यूनतम 1:3 को 1:2 करें।" + _diag_text(res))
+        st.warning("इन सेटिंग पर अभी कोई जीवित (Fresh/Tested) ज़ोन नहीं है। सबसे ज़्यादा ज़ोन ये रोकते हैं: "
+                   "Volume ≥ ×, SL दूरी ≥ %, MTF in favour, सिर्फ़ Action, सिर्फ़ Wholesale, Edge/Min score। "
+                   "⚙️ इनपुट → 🔓 ढीला दबाएँ (ये सब बंद हो जाएँगे), या इनमें से कुछ खुद ढीले करें।" + _diag_text(res))
         return
 
     # ── स्कैन रेंज: EOD candle का High+ATR14 … Low−ATR14 बैंड ──

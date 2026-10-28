@@ -1873,10 +1873,13 @@ def _bt_sim_one(P: dict, z: dict, rr: float, maturity: int, be_rr: float, use_bu
     tgt = prox + rr * risk_ps if dem else prox - rr * risk_ps
     cb = int(z["created_bar"])
     ej = None
+    cov_before = False
     for j in range(cb + 1, n):
         touch = (l[j] <= prox) if dem else (h[j] >= prox)
         if not touch:
-            if j - cb <= COVER_BARS and ((min(o[j], c[j]) < z["cover"]) if dem else (max(o[j], c[j]) > z["cover"])):
+            if (min(o[j], c[j]) < z["cover"]) if dem else (max(o[j], c[j]) > z["cover"]):
+                cov_before = True
+            if cov_before and j - cb <= COVER_BARS:
                 return None                                  # ज़ोन बनते ही अगली candle ने leg-out ढका → trap
             continue
         if j - cb < maturity or idx[j] < start or idx[j] > end:
@@ -1927,7 +1930,8 @@ def _bt_sim_one(P: dict, z: dict, rr: float, maturity: int, be_rr: float, use_bu
                 break
     if exit_px is None:
         exit_px, exit_j, reason = c[n - 1], n - 1, "Open (last price)"
-    return dict(entry_time=idx[ej], exit_time=idx[exit_j], entry=float(fill), sl=float(sl0),
+    return dict(cov_before=bool(cov_before), gap_entry=bool(open_first),
+                entry_time=idx[ej], exit_time=idx[exit_j], entry=float(fill), sl=float(sl0),
                 target=float(tgt), exit=float(exit_px), risk_ps=float(abs(fill - sl0)) or risk_ps,
                 reason=reason, long=dem, kind="CNC" if (dem and not long_mis) else "MIS",
                 side=("Long MIS" if long_mis else "Long CNC") if dem else "Short MIS")
@@ -2135,11 +2139,19 @@ def htf_zone_spans(frames: Dict[str, pd.DataFrame], tf: str, I: PineInputs) -> O
     if not zs:
         return None
     sec = TF_SECONDS.get(htf, 0) * 1000
+    S = _S(df)
+    lo_, hi_ = S.l, S.h
+    t1 = []
+    for z in zs:                                   # HTF ज़ोन तब तक मान्य जब तक distal न टूटे
+        cb = int(z["created_bar"])
+        brk = (np.flatnonzero(lo_[cb + 1:] <= z["dist"]) if z["demand"]
+               else np.flatnonzero(hi_[cb + 1:] >= z["dist"]))
+        t1.append(int(S.t[cb + 1 + brk[0]]) if len(brk) else 2 ** 62)
     return dict(dem=np.array([z["demand"] for z in zs]),
                 top=np.array([max(z["prox"], z["dist"]) for z in zs]),
                 bot=np.array([min(z["prox"], z["dist"]) for z in zs]),
                 t0=np.array([z["time"] + sec for z in zs], dtype="int64"),
-                t1=np.array([z.get("dead_time") or 2 ** 62 for z in zs], dtype="int64"))
+                t1=np.array(t1, dtype="int64"))
 
 
 def htf_conf(spans: Optional[dict], demand: bool, top: float, bot: float, ts: pd.Timestamp) -> bool:
@@ -2160,7 +2172,7 @@ def htf_conf(spans: Optional[dict], demand: bool, top: float, bot: float, ts: pd
 # ═══════════════════════════════════════════════════════════════════════
 OPT_GRID = dict(
     atr=[1.0, 1.2],                 # leg-in और leg-out: TR ≥ ATR ×
-    body=[0.5, 0.6],                # filled candle body ≥
+    body=[0.6],                     # filled candle body ≥ (0.5/0.6 में फ़र्क नहीं मिला)
     li=[1.5],                       # 1-2-4: leg-in ≥ boring ×
     lo=[2.0, 2.5, 3.0],             # 1-2-4: leg-out (body) ≥ boring ×
     power=[2.0, 3.0],               # power of leg-out ≥ 1:x
@@ -2168,17 +2180,18 @@ OPT_GRID = dict(
     score=[0],                      # (score 7 पिछले रन में कभी नहीं चुना गया)
     trend=["off", "not_against", "in_favour"],
     side=["both", "demand", "dem_intra_sup"],   # dem_intra_sup = Demand सब + Supply सिर्फ़ intraday TF
-    be=[0.0, 2.0],                  # 1:2 पर SL entry पर
+    be=[0.0],                       # (break-even से फ़र्क नहीं मिला)
     minrisk=[0.0, 0.5],             # SL की दूरी भाव का कम से कम % (पतले ज़ोन में चार्ज R खा जाते हैं)
     dmode=["CNC", "MIS"],           # intraday TF पर Demand: CNC (कई दिन) या MIS (उसी दिन, कम चार्ज)
     loc=["off", "half", "third"],   # Curve: DZ discount में / SZ premium में
     htf=["off", "on"],              # Zone-in-zone: ट्रेंड TF का जीवित ज़ोन साथ हो
+    approach=["any", "clean", "gap"],  # clean = लौटते समय leg-out 50% नहीं ढका; gap = open ही ज़ोन में
     rr=[3.0, 5.0],
 )
 OPT_BASE = dict(atr=1.2, body=0.6, li=1.5, lo=2.5, power=3.0, maturity=3, score=0, trend="off",
-                side="both", be=0.0, minrisk=0.0, dmode="CNC", loc="off", htf="off")
+                side="both", be=0.0, minrisk=0.0, dmode="CNC", loc="off", htf="off", approach="any")
 BACKTESTED_PRESET = dict(atr=1.2, body=0.6, li=1.5, lo=3.0, power=2.0, maturity=0, score=0, trend="in_favour",
-                         side="demand", be=0.0, minrisk=0.0, dmode="MIS", loc="off", htf="off", rr=5.0)
+                         side="demand", be=0.0, minrisk=0.0, dmode="MIS", loc="off", htf="off", approach="clean", rr=5.0)
 
 
 TREND_TO_CORE = {"off": "Off (score only)", "not_against": "Higher-TF not against",
@@ -2279,7 +2292,7 @@ def opt_collect(symbols: Sequence[str], frames_all: Dict[str, Dict[str, pd.DataF
                             hc = htf_conf(spans, bool(z["demand"]), max(z["prox"], z["dist"]),
                                           min(z["prox"], z["dist"]), zborn)
                             rows.append(dict(base, rr=rr, maturity=mat, be=be, dmode=dm, loc=lv, htf_conf=hc,
-                                             intra=intra,
+                                             intra=intra, cov_before=t["cov_before"], gap_entry=t["gap_entry"],
                                              entry_time=t["entry_time"], exit_time=t["exit_time"],
                                              entry=t["entry"], exit=t["exit"], risk_ps=t["risk_ps"],
                                              reason=t["reason"], act_long=al, act_short=ash))
@@ -2394,7 +2407,9 @@ def opt_run(T: pd.DataFrame, capital: float, risk_pct: float, split: pd.Timestam
     r_cost = _charges_vec(cnc, buy, sell, xt) / R0
     r_net = r_gross - r_cost
     keys = ["atr", "body", "li", "lo", "power", "maturity", "score", "trend", "side", "be", "minrisk", "dmode",
-            "loc", "htf", "rr"]
+            "loc", "htf", "approach", "rr"]
+    covb = T["cov_before"].to_numpy(dtype=bool)
+    gape = T["gap_entry"].to_numpy(dtype=bool)
     locv = T["loc"].to_numpy(dtype="float64")
     hconf = T["htf_conf"].to_numpy(dtype=bool)
     intra = T["intra"].to_numpy(dtype=bool)
@@ -2427,6 +2442,10 @@ def opt_run(T: pd.DataFrame, capital: float, risk_pct: float, split: pd.Timestam
         m &= loc_ok[p["loc"]]
         if p["htf"] == "on":
             m &= hconf
+        if p["approach"] == "clean":
+            m &= ~covb
+        elif p["approach"] == "gap":
+            m &= gape
         if p["trend"] == "not_against":
             m &= ~act_against
         elif p["trend"] == "in_favour":

@@ -715,6 +715,7 @@ class PineInputs:
     monthlyRR: float = 3.0
     target2RR: float = 5.0
     halfQty3: bool = True
+    maxAllocPct: float = 25.0       # एक ट्रेड में पूँजी का अधिकतम % (4 live ट्रेड)
     traderType: str = "Auto (25×)"
     bufferMode: str = "DATR % (course)"
     bufAggrPct: float = 2.0
@@ -1294,6 +1295,8 @@ def engine(df: pd.DataFrame, I: PineInputs, tf: str, htf_daily: Optional[pd.Data
                     t5 = entry + risk * I.target2RR if dem else entry - risk * I.target2RR
                     xrr = ((cand["xrpt"] - entry) if dem else (entry - cand["xrpt"])) / risk
                     qty = int(math.floor(I.accountCapital * I.riskPct / 100.0 / risk))
+                    per_sh = entry if dem else entry * MIS_MARGIN      # CNC पूरा भाव, MIS 20% margin
+                    qty = min(qty, int(I.accountCapital * I.maxAllocPct / 100.0 / per_sh) if per_sh > 0 else 0)
                     if I.halfQty3 and bc >= 3:
                         qty = qty // 2
                     # ---- पुराने ज़ोन: follow-up / base break / opposite room ----

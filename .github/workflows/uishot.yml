@@ -3,6 +3,7 @@ on:
   push:
     paths:
       - "tools/UISHOT"
+      - "tools/SCANDIAG"
   workflow_dispatch:
 permissions:
   contents: write
@@ -16,6 +17,9 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -r requirements.txt playwright && python -m playwright install --with-deps chromium
+      - name: scanner diag
+        if: hashFiles('tools/SCANDIAG') != ''
+        run: python tools/scan_diag.py || true
       - run: |
           nohup streamlit run app.py --server.headless true --server.port 8501 > /tmp/st.log 2>&1 &
           sleep 25

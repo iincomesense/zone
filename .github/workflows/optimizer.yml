@@ -19,9 +19,6 @@ jobs:
           python-version: "3.11"
       - run: pip install -r requirements.txt tabulate
       - run: python tools/run_optimizer.py
-        env:
-          DHAN_CLIENT_ID: ${{ secrets.DHAN_CLIENT_ID }}
-          DHAN_ACCESS_TOKEN: ${{ secrets.DHAN_ACCESS_TOKEN }}
       - name: save results to branch optimizer-results
         run: |
           git config user.name "optimizer-bot"

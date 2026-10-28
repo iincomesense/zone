@@ -28,16 +28,17 @@ END = pd.Timestamp(os.environ.get("BT_END", "2026-10-01"), tz=IST) + pd.Timedelt
 SPLIT = pd.Timestamp(os.environ.get("BT_SPLIT", "2025-07-01"), tz=IST)
 TFS = os.environ.get("BT_TFS", "1h,2h,4h,1d,1w").split(",")
 _mode_f = os.path.join(os.path.dirname(os.path.abspath(__file__)), "MODE")
-COLLECT = os.path.exists(_mode_f) and open(_mode_f).read().strip().startswith("collect")
+MODE_TXT = os.environ.get("RUN_MODE") or (open(_mode_f).read().strip() if os.path.exists(_mode_f) else "")
+COLLECT = MODE_TXT.startswith("collect")
 if COLLECT:                                  # हर पैरामीटर अलग से परखने के लिए: बहुत ढीले नियम, सिर्फ़ signals
     TFS = os.environ.get("BT_TFS_COLLECT", "1h,2h,4h,6h,1d").split(",")
     END = pd.Timestamp.now(tz=IST).normalize() + pd.Timedelta(hours=23, minutes=59)
     A.COLLECT_VARIANTS = [v for v in A.COLLECT_VARIANTS if v[0] in ("base", "rr2.5", "rr3")]
     os.environ["COLLECT_ALL_ENTRIES"] = "1"      # सामान्य limit order भी (सिर्फ़ gap-open नहीं)
-if os.path.exists(_mode_f) and open(_mode_f).read().strip().startswith("full"):
+if MODE_TXT.startswith("full"):
     TFS = list(A.ALL_TFS)
     END = pd.Timestamp.now(tz=IST).normalize() + pd.Timedelta(hours=23, minutes=59)   # आज तक (पिछले 60 दिन भी)
-    if "small" in open(_mode_f).read():
+    if "small" in MODE_TXT:
         TFS = ["3m", "5m", "10m", "15m", "30m", "75m"]
 CAP, RISK, ALLOC, KEEP = 25000.0, 0.5, 25.0, 80.0
 
@@ -47,14 +48,14 @@ try:
 except Exception:  # noqa: BLE001
     syms = list(A.FALLBACK_FNO)
 syms = list(dict.fromkeys(syms))
-CHARTS = os.path.exists(_mode_f) and open(_mode_f).read().strip().startswith("charts")
+CHARTS = MODE_TXT.startswith("charts")
 if CHARTS:                                   # चुने हुए ट्रेड के असली चार्ट (OHLC + ज़ोन) — JSON
     SEL = pd.read_csv(os.path.join(ROOT, "tools", "chart_trades.csv"))
     syms = sorted(SEL["symbol"].unique())
     TFS = sorted(SEL["tf"].unique())
 print("symbols", len(syms), flush=True)
 need = list(dict.fromkeys(TFS + ["75m", "1d", "1w", "1M"]))
-DHAN = os.path.exists(_mode_f) and open(_mode_f).read().strip().startswith("dhan")
+DHAN = MODE_TXT.startswith("dhan")
 if DHAN:                                     # छोटे TF: NSE cash का लंबा इतिहास Dhan API से
     cid_, tok_ = A.dhan_creds()
     ids_ = A._dhan_eq_ids(syms)
@@ -169,7 +170,7 @@ if CHARTS:
     print("charts", len(out), "missing", miss, flush=True)
     sys.exit(0)
 
-FULL = os.path.exists(_mode_f) and open(_mode_f).read().strip().startswith("full")
+FULL = MODE_TXT.startswith("full")
 if FULL:                                     # सारे F&O स्टॉक · सारे 13 TF · v25 नियम → हर ट्रेड का चार्ट
     A.COLLECT_VARIANTS = [("base", 0.0, 0.0, 5.0, "rr"), ("rr2.5", 0.0, 0.0, 2.5, "rr")]
     os.environ["COLLECT_ALL_ENTRIES"] = "1"

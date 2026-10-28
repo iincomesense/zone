@@ -1123,6 +1123,22 @@ def _candidate(p: int, bc: int, nout: int, S: _S, I: PineInputs):
     lo20 = float(np.nanmin(l[max(0, li - 20):li])) if li > 0 else float("nan")
     hi20 = float(np.nanmax(h[max(0, li - 20):li])) if li > 0 else float("nan")
     pivot = bool((zone_low <= lo20) if demand else (zone_high >= hi20)) if np.isfinite(lo20) else False
+    # और अनुमान: boring कितनी सिकुड़ी (ATR में) · boring में rejection wick · पुरानी swing (price memory) ज़ोन में
+    a0 = float(atr[b0]) if np.isfinite(atr[b0]) and atr[b0] > 0 else float("nan")
+    f_tight = float(base_size / a0) if np.isfinite(a0) else float("nan")
+    rng_b = h[bl:b0 + 1] - l[bl:b0 + 1]
+    wk_b = (np.minimum(o[bl:b0 + 1], c[bl:b0 + 1]) - l[bl:b0 + 1]) if demand \
+        else (h[bl:b0 + 1] - np.maximum(o[bl:b0 + 1], c[bl:b0 + 1]))
+    f_rejwick = float(np.nansum(wk_b) / max(float(np.nansum(rng_b)), 1e-12))
+    f_memory = 0
+    j0 = max(0, li - 150)
+    if li - j0 >= 7:
+        from numpy.lib.stride_tricks import sliding_window_view as _swv
+        ser = l[j0:li] if demand else h[j0:li]
+        win = _swv(ser, 7)
+        mid = win[:, 3]
+        isp = (mid == win.min(axis=1)) if demand else (mid == win.max(axis=1))
+        f_memory = int(np.sum(isp & (mid >= zone_low) & (mid <= zone_high)))
     # ---- Levels ----
     course = I.distalMode == DIST_MODES[0]
     d_dist = (min(base_low, in_low, out_low) if reversal else min(base_low, out_low)) if course else base_low
@@ -1153,6 +1169,8 @@ def _candidate(p: int, bc: int, nout: int, S: _S, I: PineInputs):
         f_relvol=float(S.v[fo] / vs) if (np.isfinite(vs) and vs > 0) else float("nan"),
         f_volratio=float(out_vol / base_vol) if (np.isfinite(base_vol) and base_vol > 0) else float("nan"),
         f_basebars=int(bc), f_nout=int(nout),
+        fx=dict(f_tight=f_tight, f_rejwick=f_rejwick, f_memory=f_memory, f_notes=int(notes_pass),
+                f_inst=int(disp) + int(rel_vol) + int(sweep) + int(imb)),
         b0=b0, bl=bl, li=li,
     )
 
@@ -1372,7 +1390,7 @@ def engine(df: pd.DataFrame, I: PineInputs, tf: str, htf_daily: Optional[pd.Data
                         m_li_ratio=cand["m_li_ratio"], m_lo_ratio=cand["m_lo_ratio"],
                         f_pivot=cand["f_pivot"], f_gapout=cand["f_gapout"], f_fvg=cand["f_fvg"], f_sweep=cand["f_sweep"],
                         f_disp=cand["f_disp"], f_relvol=cand["f_relvol"], f_volratio=cand["f_volratio"],
-                        f_strong=cand["strong_gap"],
+                        f_strong=cand["strong_gap"], fx=cand.get("fx", {}),
                         long_out=cand["long_out"], follow=follow, base_break=base_brk,
                         swing_break=swing_brk, trader_type=TT_NAME.get(tt, ""), t1_rr=t1,
                         state=STATE_FRESH, touches=0, outside=True, target_hit=False,
@@ -2151,9 +2169,12 @@ def curve_ok(mode: str, demand: bool, loc: float) -> bool:
     return loc <= lim if demand else loc >= 1.0 - lim
 
 
-def htf_zone_spans(frames: Dict[str, pd.DataFrame], tf: str, I: PineInputs) -> Optional[dict]:
-    """ट्रेंड TF के सभी ज़ोन: कब से (candle पूरी होने पर) कब तक जीवित, कहाँ।"""
-    htf = trend_tf(tf)
+PARENT_TF = {"1h": "1d", "2h": "1d", "4h": "1w", "1d": "1w", "75m": "1d", "125m": "1d", "15m": "1h", "30m": "1d"}
+
+
+def htf_zone_spans(frames: Dict[str, pd.DataFrame], tf: str, I: PineInputs, htf: Optional[str] = None) -> Optional[dict]:
+    """ट्रेंड TF (या दिया गया बड़ा TF) के सभी ज़ोन: कब से (candle पूरी होने पर) कब तक जीवित, कहाँ।"""
+    htf = htf or trend_tf(tf)
     df = frames.get(htf)
     if df is None or len(df) < 40 or htf == tf:
         return None
@@ -2296,6 +2317,7 @@ def opt_collect(symbols: Sequence[str], frames_all: Dict[str, Dict[str, pd.DataF
             intra = P["intraday"]
             cs = curve_series(fr, tf)
             spans = htf_zone_spans(fr, tf, replace(I, commodityMode=Is.commodityMode))
+            pspans = htf_zone_spans(fr, tf, Is, htf=PARENT_TF.get(tf))
             for zid, z in enumerate(zs):
                 if z.get("room_tf") is not None and z["room_tf"] < Is.oppositeRR:
                     continue                                   # आपका अनिवार्य opposite-zone नियम
@@ -2308,7 +2330,8 @@ def opt_collect(symbols: Sequence[str], frames_all: Dict[str, Dict[str, pd.DataF
                             f_basebars=int(z["base_count"]), f_nout=int(z["leg_outs"]), f_fu=bool(z.get("follow")),
                             f_bz=bool(z.get("base_break")), f_sb=bool(z.get("swing_break")),
                             f_zone_pct=abs(z["prox"] - z["dist"]) / z["prox"] * 100.0 if z["prox"] else float("nan"),
-                            room_pt=int(z.get("room_tf") is None or z["room_tf"] >= 10 or z["xrr"] >= 10))
+                            room_pt=int(z.get("room_tf") is None or z["room_tf"] >= 10 or z["xrr"] >= 10),
+                            **z.get("fx", {}))
                 modes = (("CNC", False), ("MIS", True)) if (intra and z["demand"]) else (("ANY", False),)
                 zborn = pd.Timestamp(int(z["time"]) + TF_SECONDS.get(tf, 0) * 1000, unit="ms", tz="UTC").tz_convert(IST)
                 for rr in OPT_GRID["rr"]:
@@ -2322,7 +2345,9 @@ def opt_collect(symbols: Sequence[str], frames_all: Dict[str, Dict[str, pd.DataF
                             lv = loc_at(cs, t["entry_time"], t["entry"])
                             hc = htf_conf(spans, bool(z["demand"]), max(z["prox"], z["dist"]),
                                           min(z["prox"], z["dist"]), zborn)
-                            rows.append(dict(base, rr=rr, maturity=mat, be=be, dmode=dm, loc=lv, htf_conf=hc,
+                            hp = htf_conf(pspans, bool(z["demand"]), max(z["prox"], z["dist"]),
+                                          min(z["prox"], z["dist"]), zborn)
+                            rows.append(dict(base, rr=rr, maturity=mat, be=be, dmode=dm, loc=lv, htf_conf=hc, htf_par=hp,
                                              away=int(t["ej"]) - int(z["created_bar"]),
                                              intra=intra, cov_before=t["cov_before"], gap_entry=t["gap_entry"],
                                              entry_time=t["entry_time"], exit_time=t["exit_time"],

@@ -2217,7 +2217,7 @@ OPT_GRID = dict(
 OPT_BASE = dict(atr=1.2, body=0.6, li=1.5, lo=2.5, power=3.0, maturity=3, score=0, trend="off",
                 side="both", be=0.0, minrisk=0.0, dmode="CNC", loc="off", htf="off", approach="any")
 BACKTESTED_PRESET = dict(atr=1.2, body=0.6, li=1.5, lo=3.0, power=3.0, maturity=3, score=0, trend="not_against",
-                         side="both", be=0.0, minrisk=0.0, dmode="MIS", loc="off", htf="off", approach="gap", rr=5.0)
+                         side="both", be=0.0, minrisk=0.4, dmode="MIS", loc="off", htf="off", approach="gap", rr=5.0)
 
 
 TREND_TO_CORE = {"off": "Off (score only)", "not_against": "Higher-TF not against",
@@ -2547,7 +2547,7 @@ def opt_pick(R: pd.DataFrame, top: int = 15) -> Optional[dict]:
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v19 · gap-open preset · dedupe · 2026-10-28"
+APP_BUILD = "v20 · gap-open + zone ≥0.4% preset · 2026-10-28"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -3447,11 +3447,13 @@ def _opt_pine_text(b: dict) -> str:
 
 
 def optimizer_panel(inp: PineInputs, tb: dict, cap: float, rp: float, d0, d1, alloc: float = 25.0) -> None:
-    st.markdown("**✅ बैकटेस्ट से पास नियम (28-Oct-2026 · 222 स्टॉक · Jan-2024 से Oct-2026 · v18 सही fills)**")
+    st.markdown("**✅ बैकटेस्ट से पास नियम v20 (28-Oct-2026 · 222 स्टॉक · Jan-2024 से Oct-2026)**")
     st.caption("Gap-open entry (बाज़ार खुलते ही भाव ज़ोन में) · उसी दिन बंद (MIS) · ATR×1.2 · leg-out ≥ 3× boring · "
-               "Power ≥ 1:3 · ऊँचा TF उल्टा न हो · target 1:5 — चार्ज के बाद, एक ही दिन के दोहराव हटाकर: "
-               "Jan-24→Jun-25 +0.32R/ट्रेड (111), Jul-25→Oct-26 +0.39R/ट्रेड (93)। "
-               "चेतावनी: जीत ~19%, पूरा मुनाफ़ा ~10 बड़े दिनों से आया — लंबा घाटे का दौर संभव, गारंटी नहीं।")
+               "Power ≥ 1:3 · ऊँचा TF उल्टा न हो · ज़ोन चौड़ाई (SL दूरी) ≥ 0.4% भाव · target 1:5 — चार्ज के बाद, "
+               "एक ही दिन के दोहराव हटाकर: Jan-24→Jun-25 +0.48R/ट्रेड (89), Jul-25→Oct-26 +0.68R/ट्रेड (66), "
+               "जीत ~25%, ~62% महीने मुनाफ़े में, सबसे बड़ा गिरावट ~9R। "
+               "Pivot / FVG / HTF zone-in-zone / volume — परखे, स्थिर फ़ायदा नहीं दिखा, इसलिए अनिवार्य नहीं। "
+               "चेतावनी: ट्रेड कम (~5/महीना), भविष्य की गारंटी नहीं।")
     put(st, "button", "✅ ये नियम ⚙️ इनपुट में लगाएँ", on_click=_opt_apply, args=(BACKTESTED_PRESET,), key="preset_apply")
     st.divider()
     st.markdown("**🔧 Optimizer — असली डेटा पर सबसे अच्छे नियम (zone कम न हों + मुनाफ़ा)**")

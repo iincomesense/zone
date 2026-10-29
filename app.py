@@ -794,7 +794,7 @@ BUFFER_MODES = ["DATR % (course)", "Chart ATR ×"]
 DIST_MODES = ["Pattern lowest/highest (course)", "Boring only"]
 MAX_ZONES = 200            # Pine: const int MAX_ZONES (पहले "Max chart zones" input था)
 POWER_MIN_RR = 3.0         # Pine: leg-out candles (1–3) के अंदर ही Entry→XRPT ≥ 1:3
-DISTAL_MAX_TOUCH = 1       # Pine: distal 1 से ज़्यादा बार टच = Break zone
+PROX_MAX_TOUCH = 1         # Pine: proximal 1 से ज़्यादा बार टच = Break zone
 
 
 @dataclass
@@ -1292,7 +1292,7 @@ def engine(df: pd.DataFrame, I: PineInputs, tf: str, htf_daily: Optional[pd.Data
                         state=STATE_FRESH, entries=0, touches=0, outside=False,
                         created_bar=p, bar=p, atr_c=float(S.atr[p]),
                         left_bar=li, time=int(S.t[p]), start_time=int(S.t[li]),
-                        broken_at=None, dist_touches=0, dist_out=True, tf=tf, tf_sec=tf_sec, symbol=None,
+                        broken_at=None, prox_touches=0, prox_out=True, tf=tf, tf_sec=tf_sec, symbol=None,
                     )
                     zones.append(z)
                     created += 1
@@ -1307,11 +1307,10 @@ def engine(df: pd.DataFrame, I: PineInputs, tf: str, htf_daily: Optional[pd.Data
             dem = z["demand"]
             touch = (lo_ <= z["entry"]) if dem else (hi_ >= z["entry"])
             hit_sl = (lo_ <= z["sl"]) if dem else (hi_ >= z["sl"])
-            dist_touch = (lo_ <= z["dist"]) if dem else (hi_ >= z["dist"])
-            if dist_touch and z["dist_out"]:
-                z["dist_touches"] += 1            # नया टच (बीच में distal से बाहर गया था)
-            z["dist_out"] = not dist_touch
-            if hit_sl or z["dist_touches"] > DISTAL_MAX_TOUCH:
+            if touch and z["prox_out"]:
+                z["prox_touches"] += 1            # नया टच (बीच में proximal से बाहर गया था)
+            z["prox_out"] = not touch
+            if hit_sl or z["prox_touches"] > PROX_MAX_TOUCH:
                 z["state"] = STATE_BROKEN
                 z["broken_at"] = p
             elif z["state"] == STATE_FRESH:
@@ -1509,7 +1508,7 @@ def eod_band(df: Optional[pd.DataFrame], tf: str, atr_period: int = 14) -> Optio
 # ---------------------------------------------------------------------------
 _EMPTY_SNAP = {"demand": None, "supply": None, "demand_time": 0, "supply_time": 0}
 _ZCACHE: Dict[tuple, tuple] = {}
-_ZVER = "z19"           # इंजन बदले तो बढ़ाएँ — पुराना कैश अपने आप बेकार
+_ZVER = "z20"           # इंजन बदले तो बढ़ाएँ — पुराना कैश अपने आप बेकार
 
 
 def _inputs_hash(I: PineInputs) -> str:
@@ -1716,7 +1715,7 @@ def htf_conf(spans: Optional[dict], demand: bool, top: float, bot: float, ts: pd
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v38 · Pine v24.3: Power ≥ 1:3 · Distal 2× = break · 2026-10-29"
+APP_BUILD = "v39 · Pine v24.4: Power ≥ 1:3 · Proximal 2× = break · 2026-10-29"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")

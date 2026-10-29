@@ -795,6 +795,7 @@ DIST_MODES = ["Pattern lowest/highest (course)", "Boring only"]
 MAX_ZONES = 200            # Pine: const int MAX_ZONES (पहले "Max chart zones" input था)
 POWER_MIN_RR = 3.0         # Pine: leg-out candles (1–3) के अंदर ही Entry→XRPT ≥ 1:3
 PROX_MAX_TOUCH = 1         # Pine: proximal 1 से ज़्यादा बार टच = Break zone
+POWER_BEST_RR = 5.0        # Pine: leg-out (1–3) के अंदर ही ≥ 1:5 = ⚡ हाइलाइट (सिर्फ़ निशान)
 
 
 @dataclass
@@ -1268,7 +1269,7 @@ def engine(df: pd.DataFrame, I: PineInputs, tf: str, htf_daily: Optional[pd.Data
                     else:
                         swing_brk = l_brk is not None and sw_l_bar is not None and sw_l_bar < li and l_brk >= li
                     shadow = bool(I.showShadow and (behind or base_brk or swing_brk))
-                    tags = " ".join(t for t, on in (("★HQ", cand["hq"]), ("BASE BREAK", base_brk),
+                    tags = " ".join(t for t, on in (("⚡1:5", xrr >= POWER_BEST_RR), ("★HQ", cand["hq"]), ("BASE BREAK", base_brk),
                                                     ("SWING", swing_brk), ("Shadow", shadow and not (base_brk or swing_brk)))
                                     if on)
                     bc = cand["bc"]
@@ -1278,7 +1279,7 @@ def engine(df: pd.DataFrame, I: PineInputs, tf: str, htf_daily: Optional[pd.Data
                         sl=float(sl), tp=float(tp),
                         t3=float(entry + risk * POWER_MIN_RR if dem else entry - risk * POWER_MIN_RR), t5=float(cand["xrpt"]), xrpt=float(cand["xrpt"]),
                         risk=float(risk), qty=qty, xrr=float(xrr), pow_rr=float(xrr),
-                        score=int(cand["score"]), hq=bool(cand["hq"]), best=bool(cand["hq"]),
+                        score=int(cand["score"]), hq=bool(cand["hq"]), best=bool(xrr >= POWER_BEST_RR),
                         tags=tags, pattern=cand["pattern"], category=cand["category"],
                         reversal=cand["category"] == "Reversal",
                         base_count=bc, leg_outs=nout, single_lo=nout == 1, grade=_grade(bc),
@@ -1509,7 +1510,7 @@ def eod_band(df: Optional[pd.DataFrame], tf: str, atr_period: int = 14) -> Optio
 # ---------------------------------------------------------------------------
 _EMPTY_SNAP = {"demand": None, "supply": None, "demand_time": 0, "supply_time": 0}
 _ZCACHE: Dict[tuple, tuple] = {}
-_ZVER = "z21"           # इंजन बदले तो बढ़ाएँ — पुराना कैश अपने आप बेकार
+_ZVER = "z22"           # इंजन बदले तो बढ़ाएँ — पुराना कैश अपने आप बेकार
 
 
 def _inputs_hash(I: PineInputs) -> str:
@@ -1716,7 +1717,7 @@ def htf_conf(spans: Optional[dict], demand: bool, top: float, bot: float, ts: pd
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v40 · Pine v24.5: SL buffer 0.3 · T 1:3 कॉलम · 2026-10-29"
+APP_BUILD = "v41 · Pine v24.6: ⚡1:5 हाइलाइट · T 1:3 · 2026-10-29"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -2328,8 +2329,8 @@ def sheet_html(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0, extra=False,
             cells += [
                 _td(f'{int(r["score"])}', int(r["score"]), "ctr",
                     style=f"background:{_score_bg(float(r['score']))};color:#111;font-weight:700",),
-                _td(f'{"★ " if r.get("hq") else ""}1:{float(r.get("xrr", 0)):.1f}',
-                    float(r.get("xrr", 0)), "ctr" + (" gs-star" if r.get("hq") else "")),
+                _td(f'{"⚡ " if r.get("best") else ""}1:{float(r.get("xrr", 0)):.1f}',
+                    float(r.get("xrr", 0)), "ctr" + (" gs-star" if r.get("best") else "")),
                 _td(f'<span class="gs-star">{r.get("tags") or ""}</span>' if r.get("tags") else '<span class="gs-sm">—</span>',
                     str(r.get("tags") or "~")),
                 _td(mtf_cell, mtf_n),

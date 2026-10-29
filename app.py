@@ -98,7 +98,7 @@ TF_FETCH: Dict[str, Tuple[str, Optional[str]]] = {
     "5m": ("5m", None),
     "10m": ("5m", "10min"),
     "15m": ("15m", None),
-    "30m": ("30m", "30min"),
+    "30m": ("15m", "30min"),     # Yahoo का 30m घड़ी (:00/:30) पर बँटा है — NSE/TradingView 09:15 से; इसलिए 15m से बनाओ
     "75m": ("15m", "75min"),
     "1h": ("60m", "60min"),
     "2h": ("60m", "120min"),
@@ -175,7 +175,7 @@ def sym_meta(sym: str) -> dict:
         return m
     if up in IDX_SYMBOLS:                       # सूचकांक (cash index + futures दोनों)
         return dict(name=sym, yahoo=IDX_YAHOO.get(up, "^NSEI"),
-                    cash=IDX_TV.get(up), fut=IDX_TV.get(up))
+                    cash=IDX_CASH_TV.get(up, IDX_TV.get(up)), fut=IDX_TV.get(up))
     return dict(name=sym, yahoo=f"{sym}.NS", cash=f"NSE:{sym}", fut=f"NSE:{sym}1!")
 
 
@@ -247,6 +247,9 @@ def clear_cache() -> None:
 IDX_SYMBOLS = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50"}
 IDX_YAHOO = {"NIFTY": "^NSEI", "BANKNIFTY": "^NSEBANK", "FINNIFTY": "NIFTY_FIN_SERVICE.NS",
              "MIDCPNIFTY": "^NSEMDCP50", "NIFTYNXT50": "^NSENXT50"}
+# इंडेक्स का स्कैन Yahoo के cash इंडेक्स (^NSEBANK आदि) पर होता है — इसलिए Equity (Cash) लिंक वही इंडेक्स चार्ट खोले
+IDX_CASH_TV = {"NIFTY": "NSE:NIFTY", "BANKNIFTY": "NSE:BANKNIFTY", "FINNIFTY": "NSE:CNXFINANCE",
+               "MIDCPNIFTY": "NSE:NIFTY_MID_SELECT", "NIFTYNXT50": "NSE:NIFTYJR"}
 IDX_TV = {"NIFTY": "NSE:NIFTY1!", "BANKNIFTY": "NSE:BANKNIFTY1!", "FINNIFTY": "NSE:FINNIFTY1!",
           "MIDCPNIFTY": "NSE:MIDCPNIFTY1!", "NIFTYNXT50": "NSE:NIFTYNXT501!"}
 
@@ -1545,7 +1548,7 @@ def eod_band(df: Optional[pd.DataFrame], tf: str, atr_period: int = 14) -> Optio
 # ---------------------------------------------------------------------------
 _EMPTY_SNAP = {"demand": None, "supply": None, "demand_time": 0, "supply_time": 0}
 _ZCACHE: Dict[tuple, tuple] = {}
-_ZVER = "z25"           # इंजन बदले तो बढ़ाएँ — पुराना कैश अपने आप बेकार
+_ZVER = "z26"           # इंजन बदले तो बढ़ाएँ — पुराना कैश अपने आप बेकार
 
 
 def _inputs_hash(I: PineInputs) -> str:
@@ -1752,7 +1755,7 @@ def htf_conf(spans: Optional[dict], demand: bool, top: float, bot: float, ts: pd
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v44 · Pine v24.10: SWING BRK कॉलम · 🔁FLIP · 2026-10-29"
+APP_BUILD = "v45 · 30m अब 15m से (09:15 वाली NSE candles) · इंडेक्स cash लिंक · 2026-10-29"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")

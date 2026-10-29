@@ -828,6 +828,7 @@ class PineInputs:
     legOutJoinTolAtr: float = 0.25       # Leg-out 2/3: |open − prev close| ≤ ATR ×
     legOutAtrMult: float = 1.2           # First leg-out: TR ≥ ATR ×
     legOutMaxWick: float = 0.3           # First leg-out: max wick %
+    legOutWick3: bool = False            # विकल्प: 3 leg-out पर wick तीनों को मिलाकर (पहली open → आख़िरी close)
     # ---- 2 · Validation rules ----
     useCBLI: bool = True                 # उल्टे रंग की पिछली candle = trap (body बड़ी हो तो)
     cbliMaxBody: float = 0.5             # CBLI: max body vs leg-in body
@@ -994,8 +995,9 @@ class _S:
         # तेज़ी के लिए vectorized prefilter (वही शर्तें जो _candidate दोबारा जाँचता है)
         self.li_ok = (fin & (rng > 0) & (self.bull | self.bear) & (bp >= I.legInMinBody)
                       & (self.tr >= I.legInAtrMult * np.where(fin, self.atr, np.inf)))
-        self.lo_ok = (fin & (rng > 0) & (self.bull | self.bear) & ((1.0 - bp) <= I.legOutMaxWick)
-                      & (self.tr >= I.legOutAtrMult * np.where(fin, self.atr, np.inf)))
+        self.lo_ok_nw = (fin & (rng > 0) & (self.bull | self.bear)
+                         & (self.tr >= I.legOutAtrMult * np.where(fin, self.atr, np.inf)))
+        self.lo_ok = self.lo_ok_nw & ((1.0 - bp) <= I.legOutMaxWick)
         boring_ok = fin & (self.tr <= I.boringAtrMult * np.where(fin, self.atr, -np.inf))
         self.nb_cum = np.concatenate(([0], np.cumsum(~boring_ok))).astype("int64")
         # DATR — पिछले पूरे दिन का Daily ATR (Pine: request.security("D", rma(tr)[1]))
@@ -1072,7 +1074,8 @@ def _candidate(p: int, bc: int, nout: int, S: _S, I: PineInputs):
         return (4, "Leg-out doji")
     if tr[fo] < I.legOutAtrMult * atr[fo]:
         return (4, "Leg-out TR < ATR")
-    if fo_range <= 0 or (fo_range - abs(c[fo] - o[fo])) / fo_range > I.legOutMaxWick:
+    wick3 = bool(I.legOutWick3 and nout == 3)        # विकल्प: 3 leg-out पर wick तीनों को मिलाकर
+    if fo_range <= 0 or (not wick3 and (fo_range - abs(c[fo] - o[fo])) / fo_range > I.legOutMaxWick):
         return (4, "Leg-out wick")
     # ---- 5. Leg-out 2/3: उसी रंग की, open ≈ पिछली close ----
     out_h, out_l = h[fo], l[fo]
@@ -1083,6 +1086,10 @@ def _candidate(p: int, bc: int, nout: int, S: _S, I: PineInputs):
             return (5, "Leg-outs not continuous")
         out_h, out_l = max(out_h, h[k]), min(out_l, l[k])
         ob_hi, ob_lo = max(ob_hi, o[k], c[k]), min(ob_lo, o[k], c[k])
+    if wick3:
+        all_range = out_h - out_l
+        if all_range <= 0 or (all_range - abs(c[p] - o[fo])) / all_range > I.legOutMaxWick:
+            return (5, "Leg-out wick (3 combined)")
     # ---- 6. 1-2-4 ----
     if in_range < I.legInToBaseSizeMult * base_range:
         return (6, f"1-2-4: leg-in < {I.legInToBaseSizeMult:g}× boring")
@@ -1147,7 +1154,7 @@ def _find(p: int, S: _S, I: PineInputs):
     best_stage, best_reason = -1, ""
     for nout in range(1, I.maxLegOut + 1):
         fo = p - (nout - 1)
-        if fo < 0 or not S.lo_ok[fo]:
+        if fo < 0 or not (S.lo_ok_nw[fo] if (I.legOutWick3 and nout == 3) else S.lo_ok[fo]):
             continue
         for bc in range(I.minBaseCount, I.maxBaseCount + 1):
             li = p - (nout + bc)
@@ -1548,7 +1555,7 @@ def eod_band(df: Optional[pd.DataFrame], tf: str, atr_period: int = 14) -> Optio
 # ---------------------------------------------------------------------------
 _EMPTY_SNAP = {"demand": None, "supply": None, "demand_time": 0, "supply_time": 0}
 _ZCACHE: Dict[tuple, tuple] = {}
-_ZVER = "z26"           # इंजन बदले तो बढ़ाएँ — पुराना कैश अपने आप बेकार
+_ZVER = "z27"           # इंजन बदले तो बढ़ाएँ — पुराना कैश अपने आप बेकार
 
 
 def _inputs_hash(I: PineInputs) -> str:
@@ -1755,7 +1762,7 @@ def htf_conf(spans: Optional[dict], demand: bool, top: float, bot: float, ts: pd
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v45 · 30m अब 15m से (09:15 वाली NSE candles) · इंडेक्स cash लिंक · 2026-10-29"
+APP_BUILD = "v46 · विकल्प: 3 leg-out wick मिलाकर · 30m अब 15m से · इंडेक्स cash लिंक · 2026-10-29"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -2027,8 +2034,10 @@ def pine_panel(slot=None):
             maxlo = c10.number_input("Max leg-out candles counted (course: 3)", 1, 3, D.maxLegOut, 1, key="in_maxlo")
             join_tol = c11.number_input("Leg-out 2/3: |open − prev close| ≤ ATR ×", 0.0, 2.0, D.legOutJoinTolAtr, 0.05, key="in_jointol")
             lo_atr = c12.number_input("First leg-out: TR ≥ ATR ×", 0.0, 5.0, D.legOutAtrMult, 0.05, key="in_loatr")
-            c13, _, _, _ = st.columns(4)
+            c13, c14, _, _ = st.columns(4)
             lo_wick = c13.number_input("First leg-out: max wick %", 0.0, 1.0, D.legOutMaxWick, 0.05, key="in_lowick")
+            lo_wick3 = c14.checkbox("3 leg-out: max wick % on all 3 combined (first open → last close)", D.legOutWick3, key="in_lowick3",
+                                    help="चालू: 3 leg-out वाले ज़ोन में wick % तीनों को मिलाकर। 1 और 2 leg-out पर पहले वाला नियम ही।")
         with t2:
             v1, v2, v3, v4 = st.columns(4)
             cbli = v1.checkbox("CBLI: reject if candle behind leg-in is opposite colour", D.useCBLI, key="in_cbli")
@@ -2074,7 +2083,7 @@ def pine_panel(slot=None):
         boringAtrMult=float(bo_atr), legInAtrMult=float(li_atr), legInMinBody=float(li_body),
         legInMaxCloseWick=float(li_cw), legInToBaseSizeMult=float(li_base), legOutToBaseSizeMult=float(lo_base),
         maxLegOut=int(maxlo), legOutJoinTolAtr=float(join_tol), legOutAtrMult=float(lo_atr),
-        legOutMaxWick=float(lo_wick),
+        legOutMaxWick=float(lo_wick), legOutWick3=bool(lo_wick3),
         useCBLI=bool(cbli), cbliMaxBody=float(cbli_body), useFormation=bool(form), useWhiteArea=bool(white),
         maxEntries=int(max_ent), distalMode=str(dist_mode), reqVolume=bool(req_vol), reqImbalance=bool(req_imb),
         volSmaPeriod=int(vol_sma), hqLegOutMult=float(hq_out), hqLegInAtr=float(hq_in), bodyHeavyPct=float(heavy),

@@ -1762,7 +1762,7 @@ def htf_conf(spans: Optional[dict], demand: bool, top: float, bot: float, ts: pd
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v48 · FLIP · SWING BRK · निशान एक कॉलम में · Score कॉलम हटाया · 2026-10-29"
+APP_BUILD = "v49 · टेबल से T1 · XRPT · Boring · Leg-out · Entries · Range Low/High हटाए · 2026-10-29"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -2330,9 +2330,7 @@ def sheet_html(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0, extra=False,
     ]
     if extra:
         heads += [_th("FLIP · निशान"), _th("XRPT (1:x)"), _th("Multi-TF Highlight"),
-                  _th("Entry"), _th("SL"), _th("T 1:3"), _th("T1"), _th("XRPT"), _th("Qty"), _th("Boring"),
-                  _th("Leg-out"), _th("Entries"), _th("Pulse · Trend"),
-                  _th("Range Low"), _th("Range High")]
+                  _th("Entry"), _th("SL"), _th("T 1:3"), _th("Qty"), _th("Pulse · Trend")]
         if show_mcap:
             heads += [_th("Mkt Cap (₹Cr)")]
     body = []
@@ -2391,18 +2389,9 @@ def sheet_html(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0, extra=False,
                 _td(f'{float(r["entry"]):,.2f}', float(r["entry"]), "num"),
                 _td(f'{float(r["sl"]):,.2f}', float(r["sl"]), "num"),
                 _td(f'<b>{float(r["t3"]):,.2f}</b>', float(r["t3"]), "num"),
-                _td(f'{float(r["tp"]):,.2f}', float(r["tp"]), "num"),
-                _td(f'{float(r["t5"]):,.2f}', float(r["t5"]), "num"),
                 _td(f'{int(r["qty"])}', int(r["qty"]), "num"),
-                _td(f'{int(r["base_count"])}', int(r["base_count"]), "ctr"),
-                _td(f'{int(r.get("leg_outs", 1))}', int(r.get("leg_outs", 1)), "ctr"),
-                _td(f'{int(r.get("entries", 0))}', int(r.get("entries", 0)), "ctr"),
                 _td(f'{r.get("trend_tf", "")} {r.get("pulse", "")} {r.get("trend", "")}',
                     str(r.get("pulse", "")), "ctr " + ("gs-ok" if r.get("action_ok") else "gs-sm")),
-                (_td(f'{float(r["band_low"]):,.2f}', float(r["band_low"]), "num gs-sm")
-                 if pd.notna(r.get("band_low")) else _td("—", -1e18, "num gs-sm")),
-                (_td(f'{float(r["band_high"]):,.2f}', float(r["band_high"]), "num gs-sm")
-                 if pd.notna(r.get("band_high")) else _td("—", -1e18, "num gs-sm")),
             ]
             if show_mcap:
                 mv = r.get("mcap_cr", float("nan"))
@@ -2425,21 +2414,16 @@ def zone_table(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0) -> pd.DataFra
         "TF": df["tf"],
         "पक्ष": df["side_hi"],
         "पैटर्न": df["pattern"],
-        "बेस": df["base_count"].map(lambda b: f"{int(b)} · {_GRADE_HI.get(int(b), '')}"),
         "Proximal": df["prox"].round(2),
         "एंट्री": df["entry"].round(2),
         "डिस्टल": df["dist"].round(2),
         "SL": df["sl"].round(2),
         "T 1:3": df["t3"].round(2),
-        "T1": df["tp"].round(2),
         "दूरी %": df["dist_pct"].round(2),
         "FLIP · निशान": df["tags"].fillna(""),
         "फ़ैसला": df["verdict"],
-        "XRPT": df["xrpt"].round(2),
         "XRPT (1:x)": df["xrr"].round(1),
         "★ HQ": df["hq"].map(lambda v: "★" if v else ""),
-        "Leg-out": df["leg_outs"].astype(int),
-        "Entries": df["entries"].astype(int),
         "Pulse·Trend": df["pulse"].astype(str) + " " + df["trend"].astype(str),
         "MTF": df["mtf_n"].map(lambda n: f"★{int(n)}" if n else "–"),
         "स्थिति": df["state"],

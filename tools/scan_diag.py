@@ -18,30 +18,18 @@ frames = A.load_frames(syms, list(dict.fromkeys(TFS + ["75m", "1d", "1w", "1M"])
 print("frames", len(frames), round(time.time() - t0), flush=True)
 D = A.PineInputs().sanitized()
 M = A.MTF_CORE_MODES
-VARS = {"DEFAULT (स्क्रीनशॉट)": {}}
-steps = [("+ Volume 0, SL दूरी 0", dict(minVolRatio=0.0, minRiskPct=0.0)),
-         ("+ MTF Off, Action/Wholesale बंद", dict(coreMTF=M[0], filterAction=False, filterWholesale=False)),
-         ("+ Edge 0, score 0", dict(minEdge=0, minScore=0)),
-         ("+ Max leg-out 3, 2 leg-out", dict(maxLegOut=3, allowTwoLegOut=True)),
-         ("+ Leg-in body vs boring 0", dict(legInBodyVsBase=0.0)),
-         ("+ Leg-out vs leg-in 0", dict(legOutBodyVsLegIn=0.0)),
-         ("+ 1-2-4 leg-out 1.5×", dict(legOutToBaseSizeMult=1.5)),
-         ("+ Closing wick 1", dict(legInMaxCloseWick=1.0)),
-         ("+ Boring ≤ ATR×1.0", dict(boringAtrMult=1.0)),
-         ("+ Opposite बंद", dict(coreOpposite=False)),
-         ("+ Maturity बंद", dict(useMaturity=False)),
-         ("+ Covered leg-out बंद", dict(useCoveredLegOut=False)),
-         ("+ scanBars 3000", dict(scanBars=3000))]
-acc = {}
-for nm, ch in steps:
-    acc = dict(acc, **ch)
-    VARS[nm] = dict(acc)
-singles = {"सिर्फ़ Max leg-out 3": dict(maxLegOut=3, allowTwoLegOut=True), "सिर्फ़ MTF not against": dict(coreMTF=M[1]),
-           "सिर्फ़ Action/Wholesale बंद": dict(filterAction=False, filterWholesale=False),
-           "सिर्फ़ leg-out 1.5× boring": dict(legOutToBaseSizeMult=1.5), "सिर्फ़ Edge 0": dict(minEdge=0)}
-singles = {"सिर्फ़ Volume 0, SL दूरी 0": dict(minVolRatio=0.0, minRiskPct=0.0),
-           "सिर्फ़ Volume 0, SL 0, MTF Off, Action/WS बंद, Edge 0": dict(minVolRatio=0.0, minRiskPct=0.0, coreMTF=M[0], filterAction=False, filterWholesale=False, minEdge=0)}
-VARS.update(singles)
+BASEOFF = dict(minVolRatio=0.0, minRiskPct=0.0, coreMTF=M[0], filterAction=False, filterWholesale=False, minEdge=0, minScore=0,
+               legInBodyVsBase=0.0, legOutBodyVsLegIn=0.0, legInMaxCloseWick=1.0, whiteWick=False)
+ORIG = dict(BASEOFF, legInAtrMult=1.2, legOutAtrMult=1.2, boringAtrMult=1.0, legOutToBaseSizeMult=2.5, maxLegOut=3,
+            allowTwoLegOut=True, maxBaseCountInput=3, powerMinRR=3.0, corePower=True, powerMode=A.POWER_MODES[1],
+            useWhiteArea=True, useFormation=True, formationRange=False, formationTolAtr=0.10, useCBLI=True, cbliMaxPct=0.5,
+            oppositeRR=5.0, legOutMinBody=0.65, legInMaxWick=0.20, gapTolAtr=0.10, legOutTooLong=4.0, coverPct=0.5)
+VARS = {"DEFAULT (स्क्रीनशॉट)": {},
+        "आपके candle नियम, सारी छन्नी बंद": BASEOFF,
+        "+ Opposite बंद": dict(BASEOFF, coreOpposite=False),
+        "+ Opposite बंद, Fresh बंद": dict(BASEOFF, coreOpposite=False, coreFresh=False),
+        "शुरुआती मूल नियम (Pine v1 जैसे), छन्नी बंद": ORIG,
+        "मूल नियम + Opposite बंद": dict(ORIG, coreOpposite=False)}
 rows, rej_def = [], {}
 for name, ch in VARS.items():
     I = replace(D, **ch).sanitized()
@@ -64,7 +52,22 @@ for name, ch in VARS.items():
     rows.append(dict(सेटिंग=name, ज़ोन=zones, Fresh=fresh, TF=json.dumps(per_tf, ensure_ascii=False)))
     print(name, zones, round(time.time() - t0), flush=True)
 os.makedirs(os.path.join(ROOT, "shots"), exist_ok=True)
+hist = {}
+for nm in ("DEFAULT (स्क्रीनशॉट)", "आपके candle नियम, सारी छन्नी बंद", "शुरुआती मूल नियम (Pine v1 जैसे), छन्नी बंद"):
+    I = replace(D, **VARS[nm]).sanitized()
+    hh = {}
+    for s_ in ["RELIANCE", "SBIN", "TCS", "INFY", "HDFCBANK"]:
+        fr = frames.get(s_) or {}
+        for tf in ("15m", "1h", "4h", "1d"):
+            df = fr.get(tf)
+            if df is None:
+                continue
+            zs = A.engine(df, I, tf, htf_daily=fr.get("1d"), return_all=True)
+            for z in zs:
+                hh[f"{tf}:{z['state']}"] = hh.get(f"{tf}:{z['state']}", 0) + 1
+    hist[nm] = hh
 out = ["# स्कैनर जाँच", "", f"स्टॉक {len(frames)} · TF {len(TFS)} · समय {round(time.time() - t0)}s", "",
        pd.DataFrame(rows).to_string(index=False), "", "## DEFAULT पर ज़ोन क्यों रुके (rej)",
-       json.dumps(dict(sorted(rej_def.items(), key=lambda kv: -kv[1])), ensure_ascii=False, indent=1)]
+       json.dumps(dict(sorted(rej_def.items(), key=lambda kv: -kv[1])), ensure_ascii=False, indent=1),
+       "## 5 स्टॉक, engine के सारे ज़ोन की स्थिति", json.dumps(hist, ensure_ascii=False, indent=1)]
 open(os.path.join(ROOT, "shots", "scan_diag.md"), "w").write("\n".join(out))

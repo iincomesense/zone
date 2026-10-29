@@ -1,7 +1,7 @@
 // This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
 // © iincomesense
 //
-// Zone MTF (KTP rules) — v24.2 (साफ़ डिस्प्ले; नियम/inputs वही)
+// Zone MTF (KTP rules) — v24.3 (Power ≥ 1:3 within leg-outs · Distal 2× touch = break zone · swing dots हटाए)
 // Dr. Ravi R. Kumar (Know The Pulse / Super Trader) कोर्स के demand-supply ज़ोन नियम।
 //
 // v24 में बदलाव (स्क्रीनशॉट के अनुसार):
@@ -21,6 +21,8 @@
 indicator("Zone MTF (KTP rules)", shorttitle="Zone MTF KTP", overlay=true, max_bars_back=5000, max_boxes_count=500, max_labels_count=500, max_lines_count=60)
 
 const int MAX_ZONES = 200            // पहले "Max chart zones" input था — अब तय (TradingView box सीमा 500)
+const float POWER_MIN_RR = 3.0       // Power of leg-out: 1–3 leg-out candles के अंदर ही Entry→XRPT ≥ 1:3 (Entry = Proximal, SL = Distal ± buffer)
+const int DISTAL_MAX_TOUCH = 1       // Distal 1 से ज़्यादा बार टच = Break zone (shadow)
 
 // ============================================================ INPUTS
 G0 = "0 · Capital · Risk · SL buffer"
@@ -251,6 +253,14 @@ f_candidate(int bc, int nOut) =>
         bool course = distalMode == "Pattern lowest/highest (course)"
         c.dist := demand ? (course ? (reversal ? math.min(baseL, inL, outL) : math.min(baseL, outL)) : baseL) : (course ? (reversal ? math.max(baseH, inH, outH) : math.max(baseH, outH)) : baseH)
         c.xrpt := demand ? obHi : obLo
+        // ---- Power of leg-out: leg-out candles (1–3, एक ही दिशा) के अंदर ही ≥ 1:3
+        float pBuf = bufferMode == "DATR % (course)" and not na(dAtr) ? dAtr * bufPct / 100 : slBufferAtr * atr_val
+        float pSL = demand ? c.dist - pBuf : c.dist + pBuf
+        float pRisk = math.abs(c.prox - pSL)
+        float pRR = pRisk > 0 ? (demand ? c.xrpt - c.prox : c.prox - c.xrpt) / pRisk : 0.0
+        if pRR < POWER_MIN_RR
+            c.valid := false
+            why := "Power < 1:3"
         // ---- Quality score (0–100, सिर्फ़ रैंकिंग)
         bool hqIn = tr_s[li] >= hqLegInAtr * atr_val[li]
         bool hqOut = tr_s[fo] >= hqLegOutMult * tr_s[li]
@@ -290,6 +300,8 @@ type MtfZone
     bool tested = false
     int startTime
     int createdBar
+    int distTouches = 0
+    bool distOut = true
 
 f_mtf_engine() =>
     var array<MtfZone> mz = array.new<MtfZone>()
@@ -318,7 +330,10 @@ f_mtf_engine() =>
             if bar_index > z.createdBar
                 bool touch = z.demand ? low <= z.prox : high >= z.prox
                 bool brk = z.demand ? low <= z.sl : high >= z.sl
-                if brk
+                if brk and z.distOut
+                    z.distTouches += 1
+                z.distOut := not brk
+                if z.distTouches > DISTAL_MAX_TOUCH
                     dead := true
                 else if not z.tested
                     if touch
@@ -443,6 +458,8 @@ type Zone
     box shadowBox
     label infoLabel
     label tagLabel
+    int distTouches = 0
+    bool distOut = true
 
 var array<Zone> zones = array.new<Zone>()
 var int zonesCreated = 0
@@ -474,13 +491,17 @@ f_paint(Zone z) =>
         box.set_border_width(z.zoneBox, 2)
     else
         color dead = z.state == "Exhausted" ? color.orange : color.gray
+        bool distBreak = z.state == "Broken" and z.distTouches > DISTAL_MAX_TOUCH
         box.set_bgcolor(z.zoneBox, color.new(dead, 93))
         box.set_border_color(z.zoneBox, color.new(dead, 70))
         box.set_border_style(z.zoneBox, line.style_dotted)
         box.set_border_width(z.zoneBox, 1)
+        // Distal 1 से ज़्यादा बार टच = Break zone → बाकी break zones जैसी (नारंगी) shadow
+        if distBreak and showShadow and na(z.shadowBox)
+            z.shadowBox := box.new(box.get_left(z.zoneBox), math.max(z.prox, z.sl) + shadowAtr * atr_val, box.get_right(z.zoneBox), math.min(z.prox, z.sl) - shadowAtr * atr_val, border_style=line.style_dotted)
         if not na(z.shadowBox)
-            box.set_bgcolor(z.shadowBox, color.new(color.gray, 96))
-            box.set_border_color(z.shadowBox, color.new(color.gray, 88))
+            box.set_bgcolor(z.shadowBox, distBreak ? color.new(color.orange, 88) : color.new(color.gray, 96))
+            box.set_border_color(z.shadowBox, distBreak ? color.new(color.orange, 55) : color.new(color.gray, 88))
     if not na(z.infoLabel)
         if f_alive(z)
             label.set_text(z.infoLabel, f_short(z))
@@ -493,8 +514,6 @@ f_paint(Zone z) =>
 // ---- Confirmed swings (ta.pivothigh/low) — chart पर निशान + swing break
 float ph = ta.pivothigh(high, swingLeft, swingRight)
 float pl = ta.pivotlow(low, swingLeft, swingRight)
-plotshape(showFlags ? ph : na, "Swing high", shape.circle, location.absolute, color.new(color.red, 45), offset=-swingRight, size=size.tiny, display=display.pane)
-plotshape(showFlags ? pl : na, "Swing low", shape.circle, location.absolute, color.new(color.green, 45), offset=-swingRight, size=size.tiny, display=display.pane)
 var float lastSwingHigh = na
 var float lastSwingLow = na
 var int lastSwingHighBar = na
@@ -590,7 +609,11 @@ if array.size(zones) > 0
             string before = z.state
             bool touch = z.demand ? low <= z.entry : high >= z.entry
             bool hitSL = z.demand ? low <= z.sl : high >= z.sl
-            if hitSL
+            bool distTouch = z.demand ? low <= z.dist : high >= z.dist
+            if distTouch and z.distOut
+                z.distTouches += 1            // नया टच (बीच में distal से बाहर गया था)
+            z.distOut := not distTouch
+            if hitSL or z.distTouches > DISTAL_MAX_TOUCH
                 z.state := "Broken"
                 z.brokenAt := bar_index
             else if z.state == "Fresh"

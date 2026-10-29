@@ -793,6 +793,8 @@ TRADER_TYPES = ["Auto", "Aggressive", "Hourly", "Daily", "Weekly/Swing", "Monthl
 BUFFER_MODES = ["DATR % (course)", "Chart ATR ×"]
 DIST_MODES = ["Pattern lowest/highest (course)", "Boring only"]
 MAX_ZONES = 200            # Pine: const int MAX_ZONES (पहले "Max chart zones" input था)
+POWER_MIN_RR = 3.0         # Pine: leg-out candles (1–3) के अंदर ही Entry→XRPT ≥ 1:3
+DISTAL_MAX_TOUCH = 1       # Pine: distal 1 से ज़्यादा बार टच = Break zone
 
 
 @dataclass
@@ -1107,6 +1109,12 @@ def _candidate(p: int, bc: int, nout: int, S: _S, I: PineInputs):
         prox = base_l
         dist = (max(base_h, in_h, out_h) if reversal else max(base_h, out_h)) if course else base_h
         xrpt = ob_lo
+    # ---- Power of leg-out: leg-out candles (1–3, एक ही दिशा) के अंदर ही ≥ 1:3 ----
+    p_sl = dist - S.slbuf[p] if demand else dist + S.slbuf[p]
+    p_risk = abs(prox - p_sl)
+    p_rr = ((xrpt - prox) if demand else (prox - xrpt)) / p_risk if p_risk > 0 else 0.0
+    if p_rr < POWER_MIN_RR:
+        return (10, f"Power < 1:{POWER_MIN_RR:g}")
     # ---- Quality score (0–100, सिर्फ़ रैंकिंग) ----
     hq_in = tr[li] >= I.hqLegInAtr * atr[li]
     hq_out = tr[fo] >= I.hqLegOutMult * tr[li]
@@ -1182,6 +1190,8 @@ def engine(df: pd.DataFrame, I: PineInputs, tf: str, htf_daily: Optional[pd.Data
         return []
     tt = trader_type(tf, I)
     bpct = _buf_pct(tt, I)
+    S.slbuf = np.where((I.bufferMode == BUFFER_MODES[0]) & np.isfinite(S.datr),
+                       S.datr * bpct / 100.0, I.slBufferAtr * S.atr)
     start = max(0, n - max(I.scanBars, 50))
     min_p = max(I.atrPeriod, I.maxBaseCount + I.maxLegOut + 3, 11)
     live_last = _bar_incomplete(S, tf)
@@ -1227,9 +1237,7 @@ def engine(df: pd.DataFrame, I: PineInputs, tf: str, htf_daily: Optional[pd.Data
                     checked += 1
                     if checked >= 11:
                         break
-                datr = S.datr[p]
-                slbuf = (datr * bpct / 100.0 if (I.bufferMode == BUFFER_MODES[0] and np.isfinite(datr))
-                         else I.slBufferAtr * S.atr[p])
+                slbuf = S.slbuf[p]
                 sl = cand["dist"] - slbuf if dem else cand["dist"] + slbuf
                 entry = cand["prox"]
                 risk = abs(entry - sl)
@@ -1284,7 +1292,7 @@ def engine(df: pd.DataFrame, I: PineInputs, tf: str, htf_daily: Optional[pd.Data
                         state=STATE_FRESH, entries=0, touches=0, outside=False,
                         created_bar=p, bar=p, atr_c=float(S.atr[p]),
                         left_bar=li, time=int(S.t[p]), start_time=int(S.t[li]),
-                        broken_at=None, tf=tf, tf_sec=tf_sec, symbol=None,
+                        broken_at=None, dist_touches=0, dist_out=True, tf=tf, tf_sec=tf_sec, symbol=None,
                     )
                     zones.append(z)
                     created += 1
@@ -1299,7 +1307,11 @@ def engine(df: pd.DataFrame, I: PineInputs, tf: str, htf_daily: Optional[pd.Data
             dem = z["demand"]
             touch = (lo_ <= z["entry"]) if dem else (hi_ >= z["entry"])
             hit_sl = (lo_ <= z["sl"]) if dem else (hi_ >= z["sl"])
-            if hit_sl:
+            dist_touch = (lo_ <= z["dist"]) if dem else (hi_ >= z["dist"])
+            if dist_touch and z["dist_out"]:
+                z["dist_touches"] += 1            # नया टच (बीच में distal से बाहर गया था)
+            z["dist_out"] = not dist_touch
+            if hit_sl or z["dist_touches"] > DISTAL_MAX_TOUCH:
                 z["state"] = STATE_BROKEN
                 z["broken_at"] = p
             elif z["state"] == STATE_FRESH:
@@ -1497,7 +1509,7 @@ def eod_band(df: Optional[pd.DataFrame], tf: str, atr_period: int = 14) -> Optio
 # ---------------------------------------------------------------------------
 _EMPTY_SNAP = {"demand": None, "supply": None, "demand_time": 0, "supply_time": 0}
 _ZCACHE: Dict[tuple, tuple] = {}
-_ZVER = "z18"           # इंजन बदले तो बढ़ाएँ — पुराना कैश अपने आप बेकार
+_ZVER = "z19"           # इंजन बदले तो बढ़ाएँ — पुराना कैश अपने आप बेकार
 
 
 def _inputs_hash(I: PineInputs) -> str:
@@ -1704,7 +1716,7 @@ def htf_conf(spans: Optional[dict], demand: bool, top: float, bot: float, ts: pd
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v37 · Pine v24 नियम (Zone MTF KTP rules) · 2026-10-29"
+APP_BUILD = "v38 · Pine v24.3: Power ≥ 1:3 · Distal 2× = break · 2026-10-29"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")

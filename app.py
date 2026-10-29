@@ -88,10 +88,10 @@ BASE_SPEC: Dict[str, Tuple[str, str]] = {
     "5m": ("5m", "60d"),
     "15m": ("15m", "60d"),
     "30m": ("30m", "60d"),
-    "60m": ("60m", "729d"),       # Yahoo: 60m सिर्फ़ ~730 दिन
-    "1d": ("1d", "5y"),
-    "1wk": ("1wk", "10y"),
-    "1mo": ("1mo", "max"),
+    "60m": ("60m", "1y"),         # ट्रेडिंग स्कैन: लंबा इतिहास नहीं चाहिए
+    "1d": ("1d", "2y"),
+    "1wk": ("1wk", "5y"),
+    "1mo": ("1mo", "10y"),
 }
 
 TF_FETCH: Dict[str, Tuple[str, Optional[str]]] = {
@@ -2069,7 +2069,7 @@ def htf_conf(spans: Optional[dict], demand: bool, top: float, bot: float, ts: pd
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v32 · ज़ोन स्कैनर · समय-इकाई bug ठीक + रेंज default सभी · 2026-10-29"
+APP_BUILD = "v33 · D/W/M EOD रेंज स्कैन + छोटा डेटा · 2026-10-29"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -2080,7 +2080,8 @@ SIDE_HI = {"Demand": "मांग (Demand)", "Supply": "आपूर्ति (
 CAT_HI = {"Reversal": "पलटाव", "Continuation": "निरंतरता"}
 
 UNIVERSES = ["NSE All Futures", "NIFTY 50", "Global Instruments", "Futures + Global"]
-BANDS = ["सभी (बैंड नहीं)", "Daily (EOD)", "Weekly (EOD)", "Monthly (EOD)"]
+BANDS = ["D·W·M EOD (कोई भी)", "Daily (EOD)", "Weekly (EOD)", "Monthly (EOD)", "सभी (बैंड नहीं)"]
+BAND_LETTER = {"1d": "D", "1w": "W", "1M": "M"}
 BAND_TF = {"Daily (EOD)": "1d", "Weekly (EOD)": "1w", "Monthly (EOD)": "1M"}
 TV_TF = {"3m": "3", "5m": "5", "10m": "10", "15m": "15", "30m": "30", "75m": "75",
          "1h": "60", "2h": "120", "4h": "240", "6h": "360", "1d": "D", "1w": "W",
@@ -2282,7 +2283,7 @@ def top_bar():
                           label_visibility="collapsed")
     status = c[3].selectbox("स्थिति", ["All"] + ALL_STATES, index=1, key="in_status",
                             label_visibility="collapsed")
-    band = c[4].selectbox("रेंज", BANDS, index=0, key="in_band",
+    band = c[4].selectbox("EOD रेंज", BANDS, index=0, key="in_band",
                           label_visibility="collapsed")
     sym_txt = c[5].text_input("स्क्रिप्ट", key="in_symtxt", label_visibility="collapsed",
                               placeholder="RELIANCE, SBIN…")
@@ -2567,12 +2568,18 @@ def _scan_all(symbols, inp, opts):
                 for k, v in (r.get("rej") or {}).items():
                     rej_all[k] = rej_all.get(k, 0) + int(v)
 
+    # Daily / Weekly / Monthly EOD candle का High+ATR … Low−ATR — तीनों हमेशा, फ़िल्टर _main में
     btf = BAND_TF.get(opts.get("band") or "")
-    bands = {}
-    for s in (symbols if btf else []):
-        b = eod_band(frames.get(s, {}).get(btf), btf, inp.atrPeriod)
-        if b:
-            bands[s] = b
+    bands3: Dict[str, Dict[str, dict]] = {"1d": {}, "1w": {}, "1M": {}}
+    for s in symbols:
+        for t3 in bands3:
+            try:
+                b = eod_band(frames.get(s, {}).get(t3), t3, inp.atrPeriod)
+            except Exception:                                    # noqa: BLE001
+                b = None
+            if b:
+                bands3[t3][s] = b
+    bands = bands3.get(btf, {}) if btf else {}
 
     df = pd.DataFrame(rows)
     if not df.empty:
@@ -2581,7 +2588,7 @@ def _scan_all(symbols, inp, opts):
         df["created_ist"] = df["time"].map(
             lambda ms: datetime.fromtimestamp(ms / 1000, IST).strftime("%d-%b %H:%M") if ms else "—")
         df = df.sort_values(["dist_pct", "score"], ascending=[True, False]).reset_index(drop=True)
-    return dict(rows=df, snaps=snaps, atr=atrs, ltp=ltps, errs=errs, bands=bands,
+    return dict(rows=df, snaps=snaps, atr=atrs, ltp=ltps, errs=errs, bands=bands, bands3=bands3,
                 band_tf=btf, at=datetime.now(IST), scanned=len(jobs),
                 rej=rej_all, created=created_all, dhan=_DHAN_STATUS.get("status", ""))
 
@@ -2709,7 +2716,7 @@ def sheet_html(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0, extra=False,
     heads = [_th("", sortable=False)]
     heads += [
         _th("Equity (Cash)"), _th("Current-Month Future"),
-        _th("TF"), _th("Zone Side"), _th("Pattern"), _th("Status"),
+        _th("TF"), _th("Zone Side"), _th("Pattern"), _th("Status"), _th("EOD रेंज"),
         _th("Score /12"), _th("Power"), _th("निशान"),
         _th("Multi-TF Highlight"),
         _th("Proximal (₹)"), _th("Distal (₹)"), _th("Current LTP"),
@@ -2752,6 +2759,7 @@ def sheet_html(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0, extra=False,
             _td(str(r["pattern"]), r["pattern"], "ctr"),
             _td(f'<span class="{_STATE_CLS.get(state, "")}">{state}</span>',
                 _STATE_ORDER.get(state, 9)),
+            _td(f'<b>{r.get("eod") or "—"}</b>', str(r.get("eod") or "~"), "ctr"),
             _td(f'{int(r["score"])}', int(r["score"]), "ctr",
                 style=f"background:{_score_bg(float(r['score']))};color:#111;font-weight:700",),
             _td(f'{"★ " if r.get("best") else ""}1:{float(r.get("pow_rr", 0)):.1f}'
@@ -2945,13 +2953,29 @@ def _main():
         return
 
     # ── स्कैन रेंज: EOD candle का High+ATR14 … Low−ATR14 बैंड ──
-    bands = res.get("bands") or {}
-    if bands:
-        lo = df_all["symbol"].map(lambda x: (bands.get(x) or {}).get("low", -np.inf))
-        hi = df_all["symbol"].map(lambda x: (bands.get(x) or {}).get("high", np.inf))
-        df_all = df_all[(df_all["prox"] >= lo) & (df_all["prox"] <= hi)].copy()
-        df_all["band_low"] = df_all["symbol"].map(lambda x: (bands.get(x) or {}).get("low"))
-        df_all["band_high"] = df_all["symbol"].map(lambda x: (bands.get(x) or {}).get("high"))
+    bands3 = res.get("bands3") or {}
+    sel_band = (res.get("opts") or {}).get("band") or BANDS[0]
+    n_before = len(df_all)
+    if bands3:
+        def _eod_tags(r):
+            tags, blo, bhi = [], None, None
+            for t3 in ("1d", "1w", "1M"):
+                b = (bands3.get(t3) or {}).get(r["symbol"])
+                if b and b["low"] <= float(r["prox"]) <= b["high"]:
+                    tags.append(BAND_LETTER[t3])
+                    if blo is None:
+                        blo, bhi = b["low"], b["high"]
+            return pd.Series({"eod": " ".join(tags), "band_low": blo, "band_high": bhi})
+        df_all = pd.concat([df_all.reset_index(drop=True), df_all.apply(_eod_tags, axis=1).reset_index(drop=True)], axis=1)
+        want = {"Daily (EOD)": "D", "Weekly (EOD)": "W", "Monthly (EOD)": "M"}.get(sel_band)
+        if sel_band == BANDS[0]:
+            df_all = df_all[df_all["eod"] != ""].copy()
+        elif want:
+            df_all = df_all[df_all["eod"].str.contains(want)].copy()
+    if df_all.empty:
+        st.warning(f"{n_before} ज़ोन मिले, पर कोई भी **{sel_band}** रेंज (EOD candle High+ATR … Low−ATR) के अंदर नहीं है। "
+                   "ऊपर 'रेंज' में Weekly/Monthly या 'सभी' चुनें।" + _diag_text(res))
+        return
 
     f = df_all.copy()
     if tb["side"] != "All":

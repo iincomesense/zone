@@ -45,11 +45,14 @@ for name, ch in VARS.items():
             k = type(e).__name__ + ": " + str(e)[:120] + " @ " + traceback.format_exc().strip().splitlines()[-3].strip()[:160]
             ERRS[k] = ERRS.get(k, 0) + 1
             continue
-        bz = 0
-        b = A.eod_band(fr.get("1d"), "1d", I.atrPeriod)
+        bb = {t3: A.eod_band(fr.get(t3), t3, I.atrPeriod) for t3 in ("1d", "1w", "1M")}
         for z in r["rows"]:
-            if b and b["low"] <= z["prox"] <= b["high"]:
-                BAND[name] = BAND.get(name, 0) + 1
+            tg = "".join(A.BAND_LETTER[t3] for t3, b in bb.items() if b and b["low"] <= z["prox"] <= b["high"])
+            for k in ("D", "W", "M"):
+                if k in tg:
+                    BAND.setdefault(name, {})[k] = BAND.setdefault(name, {}).get(k, 0) + 1
+            if tg:
+                BAND.setdefault(name, {})["कोई भी"] = BAND[name].get("कोई भी", 0) + 1
             zones += 1
             per_tf[z["tf"]] = per_tf.get(z["tf"], 0) + 1
             fresh += int(z.get("state") == "Fresh")

@@ -808,7 +808,7 @@ class PineInputs:
     bufAggrPct: float = 2.0
     bufDailyPct: float = 2.0
     bufSwingPct: float = 2.0
-    slBufferAtr: float = 0.5             # 'Chart ATR ×' या DATR न मिले तब
+    slBufferAtr: float = 0.3             # 'Chart ATR ×' या DATR न मिले तब
     # ---- 1 · Leg-in / Boring / Leg-out (1-2-4) ----
     atrPeriod: int = 14
     minBaseCountInput: int = 1
@@ -1275,7 +1275,8 @@ def engine(df: pd.DataFrame, I: PineInputs, tf: str, htf_daily: Optional[pd.Data
                     z = dict(
                         demand=dem, side="Demand" if dem else "Supply",
                         prox=cand["prox"], dist=cand["dist"], entry=float(entry),
-                        sl=float(sl), tp=float(tp), t5=float(cand["xrpt"]), xrpt=float(cand["xrpt"]),
+                        sl=float(sl), tp=float(tp),
+                        t3=float(entry + risk * POWER_MIN_RR if dem else entry - risk * POWER_MIN_RR), t5=float(cand["xrpt"]), xrpt=float(cand["xrpt"]),
                         risk=float(risk), qty=qty, xrr=float(xrr), pow_rr=float(xrr),
                         score=int(cand["score"]), hq=bool(cand["hq"]), best=bool(cand["hq"]),
                         tags=tags, pattern=cand["pattern"], category=cand["category"],
@@ -1508,7 +1509,7 @@ def eod_band(df: Optional[pd.DataFrame], tf: str, atr_period: int = 14) -> Optio
 # ---------------------------------------------------------------------------
 _EMPTY_SNAP = {"demand": None, "supply": None, "demand_time": 0, "supply_time": 0}
 _ZCACHE: Dict[tuple, tuple] = {}
-_ZVER = "z20"           # इंजन बदले तो बढ़ाएँ — पुराना कैश अपने आप बेकार
+_ZVER = "z21"           # इंजन बदले तो बढ़ाएँ — पुराना कैश अपने आप बेकार
 
 
 def _inputs_hash(I: PineInputs) -> str:
@@ -1715,7 +1716,7 @@ def htf_conf(spans: Optional[dict], demand: bool, top: float, bot: float, ts: pd
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v39 · Pine v24.4: Power ≥ 1:3 · Proximal 2× = break · 2026-10-29"
+APP_BUILD = "v40 · Pine v24.5: SL buffer 0.3 · T 1:3 कॉलम · 2026-10-29"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -2281,7 +2282,7 @@ def sheet_html(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0, extra=False,
     ]
     if extra:
         heads += [_th("Score /100"), _th("XRPT (1:x)"), _th("निशान"), _th("Multi-TF Highlight"),
-                  _th("Entry"), _th("SL"), _th("T1"), _th("XRPT"), _th("Qty"), _th("Boring"),
+                  _th("Entry"), _th("SL"), _th("T 1:3"), _th("T1"), _th("XRPT"), _th("Qty"), _th("Boring"),
                   _th("Leg-out"), _th("Entries"), _th("Pulse · Trend"),
                   _th("Range Low"), _th("Range High")]
         if show_mcap:
@@ -2334,6 +2335,7 @@ def sheet_html(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0, extra=False,
                 _td(mtf_cell, mtf_n),
                 _td(f'{float(r["entry"]):,.2f}', float(r["entry"]), "num"),
                 _td(f'{float(r["sl"]):,.2f}', float(r["sl"]), "num"),
+                _td(f'<b>{float(r["t3"]):,.2f}</b>', float(r["t3"]), "num"),
                 _td(f'{float(r["tp"]):,.2f}', float(r["tp"]), "num"),
                 _td(f'{float(r["t5"]):,.2f}', float(r["t5"]), "num"),
                 _td(f'{int(r["qty"])}', int(r["qty"]), "num"),
@@ -2373,6 +2375,7 @@ def zone_table(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0) -> pd.DataFra
         "एंट्री": df["entry"].round(2),
         "डिस्टल": df["dist"].round(2),
         "SL": df["sl"].round(2),
+        "T 1:3": df["t3"].round(2),
         "T1": df["tp"].round(2),
         "दूरी %": df["dist_pct"].round(2),
         "स्कोर /100": df["score"].astype(int),

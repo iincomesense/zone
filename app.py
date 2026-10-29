@@ -795,6 +795,7 @@ DIST_MODES = ["Pattern lowest/highest (course)", "Boring only"]
 MAX_ZONES = 200            # Pine: const int MAX_ZONES (पहले "Max chart zones" input था)
 POWER_MIN_RR = 3.0         # Pine: leg-out candles (1–3) के अंदर ही Entry→XRPT ≥ 1:3
 PROX_MAX_TOUCH = 1         # Pine: proximal 1 से ज़्यादा बार टच = Break zone
+SWING_AREA_ATR = 0.5       # Pine: swing area = swing से उसकी wick तक, कम से कम ½ ATR
 POWER_BEST_RR = 5.0        # Pine: leg-out (1–3) के अंदर ही ≥ 1:5 = ⚡ हाइलाइट (सिर्फ़ निशान)
 
 
@@ -1204,6 +1205,7 @@ def engine(df: pd.DataFrame, I: PineInputs, tf: str, htf_daily: Optional[pd.Data
     rej: Dict[str, int] = {}
     created = 0
     sw_h = sw_l = None
+    sw_h_body = sw_l_body = None
     sw_h_bar = sw_l_bar = None
     h_brk = l_brk = None
 
@@ -1214,8 +1216,10 @@ def engine(df: pd.DataFrame, I: PineInputs, tf: str, htf_daily: Optional[pd.Data
             hc, lc = S.h[cpv], S.l[cpv]
             if hc > S.h[cpv - L:cpv].max() and hc > S.h[cpv + 1:p + 1].max():
                 sw_h, sw_h_bar, h_brk = hc, cpv, None
+                sw_h_body = max(S.o[cpv], S.c[cpv])
             if lc < S.l[cpv - L:cpv].min() and lc < S.l[cpv + 1:p + 1].min():
                 sw_l, sw_l_bar, l_brk = lc, cpv, None
+                sw_l_body = min(S.o[cpv], S.c[cpv])
         if sw_h is not None and h_brk is None and S.c[p] > sw_h:
             h_brk = p
         if sw_l is not None and l_brk is None and S.c[p] < sw_l:
@@ -1288,7 +1292,18 @@ def engine(df: pd.DataFrame, I: PineInputs, tf: str, htf_daily: Optional[pd.Data
                             if base_in and out_breaks:
                                 flip = True
                                 break
-                    tags = " ".join(t for t, on in (("🔁FLIP", flip), ("⚡1:5", xrr >= POWER_BEST_RR), ("★HQ", cand["hq"]), ("BASE BREAK", base_brk),
+                    # ---- SWING BRK (High quality): swing area में boring, leg-out ने वही swing तोड़ा ----
+                    sw_brk = False
+                    sw_pad = I.shadowAtr * S.atr[p]
+                    if dem and sw_h is not None and h_brk is not None and sw_h_bar < li and h_brk >= p - (nout - 1):
+                        a_top = sw_h + sw_pad
+                        a_bot = min(sw_h_body if sw_h_body is not None else sw_h, sw_h - SWING_AREA_ATR * S.atr[p]) - sw_pad
+                        sw_brk = cand["base_l"] <= a_top and cand["base_h"] >= a_bot
+                    if (not dem) and sw_l is not None and l_brk is not None and sw_l_bar < li and l_brk >= p - (nout - 1):
+                        b_bot = sw_l - sw_pad
+                        b_top = max(sw_l_body if sw_l_body is not None else sw_l, sw_l + SWING_AREA_ATR * S.atr[p]) + sw_pad
+                        sw_brk = cand["base_l"] <= b_top and cand["base_h"] >= b_bot
+                    tags = " ".join(t for t, on in (("🔁FLIP", flip), ("SW-BRK", sw_brk), ("⚡1:5", xrr >= POWER_BEST_RR), ("★HQ", cand["hq"]), ("BASE BREAK", base_brk),
                                                     ("SWING", swing_brk), ("Shadow", shadow and not (base_brk or swing_brk)))
                                     if on)
                     bc = cand["bc"]
@@ -1298,7 +1313,7 @@ def engine(df: pd.DataFrame, I: PineInputs, tf: str, htf_daily: Optional[pd.Data
                         sl=float(sl), tp=float(tp),
                         t3=float(entry + risk * POWER_MIN_RR if dem else entry - risk * POWER_MIN_RR), t5=float(cand["xrpt"]), xrpt=float(cand["xrpt"]),
                         risk=float(risk), qty=qty, xrr=float(xrr), pow_rr=float(xrr),
-                        score=int(cand["score"]), hq=bool(cand["hq"]), best=bool(xrr >= POWER_BEST_RR), flip=bool(flip),
+                        score=int(cand["score"]), hq=bool(cand["hq"]), best=bool(xrr >= POWER_BEST_RR), flip=bool(flip), sw_brk=bool(sw_brk),
                         tags=tags, pattern=cand["pattern"], category=cand["category"],
                         reversal=cand["category"] == "Reversal",
                         base_count=bc, leg_outs=nout, single_lo=nout == 1, grade=_grade(bc),
@@ -1530,7 +1545,7 @@ def eod_band(df: Optional[pd.DataFrame], tf: str, atr_period: int = 14) -> Optio
 # ---------------------------------------------------------------------------
 _EMPTY_SNAP = {"demand": None, "supply": None, "demand_time": 0, "supply_time": 0}
 _ZCACHE: Dict[tuple, tuple] = {}
-_ZVER = "z24"           # इंजन बदले तो बढ़ाएँ — पुराना कैश अपने आप बेकार
+_ZVER = "z25"           # इंजन बदले तो बढ़ाएँ — पुराना कैश अपने आप बेकार
 
 
 def _inputs_hash(I: PineInputs) -> str:
@@ -1737,7 +1752,7 @@ def htf_conf(spans: Optional[dict], demand: bool, top: float, bot: float, ts: pd
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v43 · Pine v24.9: 🔁FLIP (boring ज़ोन में, leg-out तोड़े) · FLIP कॉलम · 2026-10-29"
+APP_BUILD = "v44 · Pine v24.10: SWING BRK कॉलम · 🔁FLIP · 2026-10-29"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -2302,7 +2317,7 @@ def sheet_html(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0, extra=False,
         _th("Distance", dir0="asc"),
     ]
     if extra:
-        heads += [_th("FLIP"), _th("Score /100"), _th("XRPT (1:x)"), _th("निशान"), _th("Multi-TF Highlight"),
+        heads += [_th("FLIP"), _th("SWING BRK"), _th("Score /100"), _th("XRPT (1:x)"), _th("निशान"), _th("Multi-TF Highlight"),
                   _th("Entry"), _th("SL"), _th("T 1:3"), _th("T1"), _th("XRPT"), _th("Qty"), _th("Boring"),
                   _th("Leg-out"), _th("Entries"), _th("Pulse · Trend"),
                   _th("Range Low"), _th("Range High")]
@@ -2349,6 +2364,8 @@ def sheet_html(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0, extra=False,
             fl = bool(r.get("flip"))
             cells += [
                 _td('<b style="color:#7F77DD">🔁 FLIP</b>' if fl else '<span class="gs-sm">—</span>', 1 if fl else 0, "ctr"),
+                (_td(f'<b style="color:#1D9E75">{"🔺" if r["demand"] else "🔻"} SW-BRK</b>', 1, "ctr") if bool(r.get("sw_brk"))
+                 else _td('<span class="gs-sm">—</span>', 0, "ctr")),
                 _td(f'{int(r["score"])}', int(r["score"]), "ctr",
                     style=f"background:{_score_bg(float(r['score']))};color:#111;font-weight:700",),
                 _td(f'{"⚡ " if r.get("best") else ""}1:{float(r.get("xrr", 0)):.1f}',
@@ -2402,6 +2419,7 @@ def zone_table(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0) -> pd.DataFra
         "T1": df["tp"].round(2),
         "दूरी %": df["dist_pct"].round(2),
         "FLIP": df["flip"].map(lambda v: "🔁 FLIP" if v else "") if "flip" in df.columns else "",
+        "SWING BRK": df["sw_brk"].map(lambda v: "SW-BRK" if v else "") if "sw_brk" in df.columns else "",
         "स्कोर /100": df["score"].astype(int),
         "निशान": df["tags"].fillna(""),
         "फ़ैसला": df["verdict"],

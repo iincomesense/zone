@@ -4,7 +4,7 @@
 // This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
 // © iincomesense
 //
-// Zone MTF (KTP rules) — v24.9 (FLIP: उल्टे ज़ोन की shadow में boring + leg-out उसे तोड़े = High quality · shadow सिर्फ़ टूटने तक · Break zone ग्रे shadow साफ़ दिखे · v24.4 पर: ज़ोन बॉक्स SL/buffer तक · 1:3 टार्गेट लाइन · leg-out में 1:5 वाले ज़ोन ⚡ हाइलाइट)
+// Zone MTF (KTP rules) — v24.10 (SWING BRK: swing area में boring + leg-out swing तोड़े · FLIP: उल्टे ज़ोन की shadow में boring + leg-out उसे तोड़े = High quality · shadow सिर्फ़ टूटने तक · Break zone ग्रे shadow साफ़ दिखे · v24.4 पर: ज़ोन बॉक्स SL/buffer तक · 1:3 टार्गेट लाइन · leg-out में 1:5 वाले ज़ोन ⚡ हाइलाइट)
 // Dr. Ravi R. Kumar (Know The Pulse / Super Trader) कोर्स के demand-supply ज़ोन नियम।
 //
 // v24 में बदलाव (स्क्रीनशॉट के अनुसार):
@@ -26,6 +26,7 @@ indicator("Zone MTF (KTP rules)", shorttitle="Zone MTF KTP", overlay=true, max_b
 const int MAX_ZONES = 200            // पहले "Max chart zones" input था — अब तय (TradingView box सीमा 500)
 const float POWER_MIN_RR = 3.0       // Power of leg-out: 1–3 leg-out candles के अंदर ही Entry→XRPT ≥ 1:3 (Entry = Proximal, SL = Distal ± buffer)
 const int PROX_MAX_TOUCH = 1         // Proximal 1 से ज़्यादा बार टच = Break zone (shadow)
+const float SWING_AREA_ATR = 0.5     // Swing area: swing high/low से उसकी wick तक, कम से कम ½ ATR मोटा
 const float POWER_BEST_RR = 5.0      // leg-out candles (1–3) के अंदर ही Entry→XRPT ≥ 1:5 = ⚡ हाइलाइट (सिर्फ़ निशान, फ़िल्टर नहीं)
 
 // ============================================================ INPUTS
@@ -470,6 +471,7 @@ type Zone
     bool proxOut = true
     bool best = false
     bool flip = false
+    bool swBrk = false
     bool slHit = false
     int deadAt = na
     line t3Line
@@ -481,7 +483,8 @@ var int zonesCreated = 0
 f_alive(Zone z) => z.state == "Fresh" or z.state == "Tested"
 f_fmt(float v) => str.tostring(v, format.mintick)
 f_info(Zone z) =>
-    (z.flip ? "🔁 FLIP: " + (z.demand ? "Supply" : "Demand") + " ज़ोन की shadow में boring, leg-out ने उसे तोड़ा — High quality\n" : "") +
+    (z.swBrk ? (z.demand ? "🔺 SWING BRK: swing high area में boring, leg-out ने swing high तोड़ा\n" : "🔻 SWING BRK: swing low area में boring, leg-out ने swing low तोड़ा\n") : "") +
+     (z.flip ? "🔁 FLIP: " + (z.demand ? "Supply" : "Demand") + " ज़ोन की shadow में boring, leg-out ने उसे तोड़ा — High quality\n" : "") +
      (z.best ? "⚡ Power 1:5+ (leg-out में)\n" : "") +
      z.pattern + " · " + str.tostring(z.bc) + " boring · Score " + str.tostring(z.score) + (z.hq ? " ★" : "") +
      "\nEntry " + f_fmt(z.entry) + "  SL " + f_fmt(z.sl) +
@@ -492,20 +495,20 @@ f_info(Zone z) =>
      (evWarn != "" ? "\n" + evWarn : "")
 
 f_short(Zone z) =>
-    (z.flip ? "🔁FLIP " : "") + (z.best ? "⚡1:5 " : "") + z.pattern + " " + str.tostring(z.score) + (z.hq ? " ★" : "") + (z.state == "Tested" ? " · T" + str.tostring(z.entries) : "") + (evWarn != "" ? " ⚠" : "")
+    (z.flip ? "🔁FLIP " : "") + (z.swBrk ? (z.demand ? "🔺SW-BRK " : "🔻SW-BRK ") : "") + (z.best ? "⚡1:5 " : "") + z.pattern + " " + str.tostring(z.score) + (z.hq ? " ★" : "") + (z.state == "Tested" ? " · T" + str.tostring(z.entries) : "") + (evWarn != "" ? " ⚠" : "")
 
 f_paint(Zone z) =>
     color base = z.demand ? color.green : color.red
     if z.state == "Fresh"
         box.set_bgcolor(z.zoneBox, color.new(base, 80))
-        box.set_border_color(z.zoneBox, z.flip ? color.rgb(156, 39, 176) : z.best ? color.rgb(255, 170, 0) : base)
+        box.set_border_color(z.zoneBox, z.flip ? color.rgb(156, 39, 176) : z.swBrk ? color.rgb(29, 158, 117) : z.best ? color.rgb(255, 170, 0) : base)
         box.set_border_style(z.zoneBox, line.style_solid)
-        box.set_border_width(z.zoneBox, z.flip or z.best ? 3 : z.hq ? 2 : 1)
+        box.set_border_width(z.zoneBox, z.flip or z.swBrk or z.best ? 3 : z.hq ? 2 : 1)
     else if z.state == "Tested"
         box.set_bgcolor(z.zoneBox, color.new(base, 70))
-        box.set_border_color(z.zoneBox, z.flip ? color.rgb(156, 39, 176) : z.best ? color.rgb(255, 170, 0) : base)
+        box.set_border_color(z.zoneBox, z.flip ? color.rgb(156, 39, 176) : z.swBrk ? color.rgb(29, 158, 117) : z.best ? color.rgb(255, 170, 0) : base)
         box.set_border_style(z.zoneBox, line.style_dashed)
-        box.set_border_width(z.zoneBox, z.flip or z.best ? 3 : 2)
+        box.set_border_width(z.zoneBox, z.flip or z.swBrk or z.best ? 3 : 2)
     else
         color dead = z.state == "Exhausted" ? color.orange : color.gray
         bool proxBreak = z.state == "Broken" and z.proxTouches > PROX_MAX_TOUCH
@@ -549,12 +552,16 @@ var int lastSwingHighBar = na
 var int lastSwingLowBar = na
 var int highBreakAt = na
 var int lowBreakAt = na
+var float lastSwingHighBody = na
+var float lastSwingLowBody = na
 if not na(ph)
     lastSwingHigh := ph
+    lastSwingHighBody := math.max(open[swingRight], close[swingRight])
     lastSwingHighBar := bar_index - swingRight
     highBreakAt := na
 if not na(pl)
     lastSwingLow := pl
+    lastSwingLowBody := math.min(open[swingRight], close[swingRight])
     lastSwingLowBar := bar_index - swingRight
     lowBreakAt := na
 if not na(lastSwingHigh) and na(highBreakAt) and close > lastSwingHigh
@@ -635,8 +642,19 @@ if bar_index >= math.max(atrPeriod, maxBaseCount + maxLegOut + 3, 11) and not na
                         if baseIn and outBreaks
                             z.flip := true
                             break
+            // ---- SWING BRK (High quality): पुराने swing high/low के area में boring बनी और leg-out ने
+            //      वही swing तोड़ा (close पार) — Demand: swing high · Supply: swing low
+            float swPad = shadowAtr * atr_val
+            if c.demand and not na(lastSwingHigh) and not na(highBreakAt) and lastSwingHighBar < bar_index - bLeg and highBreakAt >= bar_index - (c.nOut - 1)
+                float aTop = lastSwingHigh + swPad
+                float aBot = math.min(nz(lastSwingHighBody, lastSwingHigh), lastSwingHigh - SWING_AREA_ATR * atr_val) - swPad
+                z.swBrk := c.baseLo <= aTop and c.baseHi >= aBot
+            if not c.demand and not na(lastSwingLow) and not na(lowBreakAt) and lastSwingLowBar < bar_index - bLeg and lowBreakAt >= bar_index - (c.nOut - 1)
+                float bBot = lastSwingLow - swPad
+                float bTop = math.max(nz(lastSwingLowBody, lastSwingLow), lastSwingLow + SWING_AREA_ATR * atr_val) + swPad
+                z.swBrk := c.baseLo <= bTop and c.baseHi >= bBot
             if showInfo
-                z.infoLabel := label.new(bar_index + 15, (c.prox + sl) / 2, f_short(z), style=label.style_label_left, color=color.new(zc, 100), textcolor=z.flip ? color.rgb(156, 39, 176) : z.best ? color.rgb(230, 140, 0) : color.new(zc, 0), size=size.small, tooltip=f_info(z))
+                z.infoLabel := label.new(bar_index + 15, (c.prox + sl) / 2, f_short(z), style=label.style_label_left, color=color.new(zc, 100), textcolor=z.flip ? color.rgb(156, 39, 176) : z.swBrk ? color.rgb(29, 158, 117) : z.best ? color.rgb(230, 140, 0) : color.new(zc, 0), size=size.small, tooltip=f_info(z))
             // 1:3 टार्गेट: छोटी लाइन + भाव (ढूँढना न पड़े)
             float t3 = c.demand ? entry + risk * POWER_MIN_RR : entry - risk * POWER_MIN_RR
             z.t3Line := line.new(bar_index + 5, t3, bar_index + 15, t3, color=color.teal, width=2)
@@ -644,7 +662,7 @@ if bar_index >= math.max(atrPeriod, maxBaseCount + maxLegOut + 3, 11) and not na
             f_paint(z)
             array.push(zones, z)
             zonesCreated += 1
-            alert(syminfo.ticker + " " + timeframe.period + " नया " + (z.flip ? "🔁FLIP " : "") + (z.best ? "⚡1:5 " : "") + (c.demand ? "Demand" : "Supply") + " ज़ोन " + c.pattern + " · Entry " + f_fmt(entry) + " SL " + f_fmt(sl) + " Score " + str.tostring(c.score), alert.freq_once_per_bar_close)
+            alert(syminfo.ticker + " " + timeframe.period + " नया " + (z.flip ? "🔁FLIP " : "") + (z.swBrk ? "SW-BRK " : "") + (z.best ? "⚡1:5 " : "") + (c.demand ? "Demand" : "Supply") + " ज़ोन " + c.pattern + " · Entry " + f_fmt(entry) + " SL " + f_fmt(sl) + " Score " + str.tostring(c.score), alert.freq_once_per_bar_close)
             if array.size(zones) > MAX_ZONES
                 Zone gone = array.shift(zones)
                 box.delete(gone.zoneBox)

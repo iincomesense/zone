@@ -1762,7 +1762,7 @@ def htf_conf(spans: Optional[dict], demand: bool, top: float, bot: float, ts: pd
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v46 · विकल्प: 3 leg-out wick मिलाकर · 30m अब 15m से · इंडेक्स cash लिंक · 2026-10-29"
+APP_BUILD = "v47 · टेबल से EOD कॉलम हटाया · विकल्प: 3 leg-out wick मिलाकर · 30m अब 15m से · इंडेक्स cash लिंक · 2026-10-29"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -2324,7 +2324,7 @@ def sheet_html(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0, extra=False,
     heads = [_th("", sortable=False)]
     heads += [
         _th("Equity (Cash)"), _th("Current-Month Future"),
-        _th("TF"), _th("Zone Side"), _th("Pattern"), _th("Status"), _th("EOD रेंज"),
+        _th("TF"), _th("Zone Side"), _th("Pattern"), _th("Status"),
         _th("Proximal (₹)"), _th("Distal (₹)"), _th("Current LTP"),
         _th("Distance", dir0="asc"),
     ]
@@ -2366,7 +2366,6 @@ def sheet_html(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0, extra=False,
             _td(str(r["pattern"]), r["pattern"], "ctr"),
             _td(f'<span class="{_STATE_CLS.get(state, "")}">{state}</span>',
                 _STATE_ORDER.get(state, 9)),
-            _td(f'<b>{r.get("eod") or "—"}</b>', str(r.get("eod") or "~"), "ctr"),
             _td(f'{float(r["prox"]):,.2f}', float(r["prox"]), "num"),
             _td(f'{float(r["dist"]):,.2f}', float(r["dist"]), "num"),
             _td(ltp_txt, ltp if np.isfinite(ltp) else -1e18, "num"),

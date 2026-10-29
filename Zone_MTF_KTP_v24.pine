@@ -1,7 +1,7 @@
 // This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
 // © iincomesense
 //
-// Zone MTF (KTP rules) — v24.1 (events: results / dividend / split)
+// Zone MTF (KTP rules) — v24.2 (साफ़ डिस्प्ले; नियम/inputs वही)
 // Dr. Ravi R. Kumar (Know The Pulse / Super Trader) कोर्स के demand-supply ज़ोन नियम।
 //
 // v24 में बदलाव (स्क्रीनशॉट के अनुसार):
@@ -24,77 +24,77 @@ const int MAX_ZONES = 200            // पहले "Max chart zones" input थ
 
 // ============================================================ INPUTS
 G0 = "0 · Capital · Risk · SL buffer"
-accountCapital = input.float(25000.0, "Account Capital (₹)", minval=1, group=G0)
-riskPct = input.float(0.5, "Risk % per trade (course: 0.5)", minval=0.01, step=0.05, group=G0)
-targetRR = input.float(5.0, "Target RR (course minimum 1:5)", minval=1, step=0.5, group=G0)
-traderTypeIn = input.string("Auto", "Trader type", options=["Auto", "Aggressive", "Hourly", "Daily", "Weekly/Swing", "Monthly"], group=G0, tooltip="Auto = चार्ट TF से: ≤1m Aggressive · ≤5m Hourly · ≤30m Daily · <1D Weekly/Swing · 1D+ Monthly। इसी से DATR buffer % चुना जाता है।")
-bufferMode = input.string("Chart ATR ×", "SL buffer method", options=["DATR % (course)", "Chart ATR ×"], group=G0)
-bufAggrPct = input.float(2.0, "Buffer % of DATR — Aggressive/Hourly", minval=0, group=G0)
-bufDailyPct = input.float(2.0, "Buffer % of DATR — Daily", minval=0, group=G0)
-bufSwingPct = input.float(2.0, "Buffer % of DATR — Weekly/Monthly", minval=0, group=G0)
-slBufferAtr = input.float(0.5, "SL Buffer × chart ATR (if 'Chart ATR ×' or DATR missing)", minval=0, step=0.05, group=G0)
+accountCapital = input.float(25000.0, "Account Capital (₹)", minval=1, group=G0, display=display.none)
+riskPct = input.float(0.5, "Risk % per trade (course: 0.5)", minval=0.01, step=0.05, group=G0, display=display.none)
+targetRR = input.float(5.0, "Target RR (course minimum 1:5)", minval=1, step=0.5, group=G0, display=display.none)
+traderTypeIn = input.string("Auto", "Trader type", options=["Auto", "Aggressive", "Hourly", "Daily", "Weekly/Swing", "Monthly"], group=G0, tooltip="Auto = चार्ट TF से: ≤1m Aggressive · ≤5m Hourly · ≤30m Daily · <1D Weekly/Swing · 1D+ Monthly। इसी से DATR buffer % चुना जाता है।", display=display.none)
+bufferMode = input.string("Chart ATR ×", "SL buffer method", options=["DATR % (course)", "Chart ATR ×"], group=G0, display=display.none)
+bufAggrPct = input.float(2.0, "Buffer % of DATR — Aggressive/Hourly", minval=0, group=G0, display=display.none)
+bufDailyPct = input.float(2.0, "Buffer % of DATR — Daily", minval=0, group=G0, display=display.none)
+bufSwingPct = input.float(2.0, "Buffer % of DATR — Weekly/Monthly", minval=0, group=G0, display=display.none)
+slBufferAtr = input.float(0.5, "SL Buffer × chart ATR (if 'Chart ATR ×' or DATR missing)", minval=0, step=0.05, group=G0, display=display.none)
 
 G1 = "1 · Leg-in / Boring / Leg-out (1-2-4)"
-atrPeriod = input.int(14, "ATR Period (course: 14)", minval=1, group=G1)
-minBaseCountIn = input.int(1, "Min boring candles", minval=1, maxval=4, group=G1)
-maxBaseCountIn = input.int(3, "Max boring candles (course: >4 = trap)", minval=1, maxval=4, group=G1)
-boringAtrMult = input.float(1.0, "Boring: TR must be ≤ ATR ×", minval=0.1, step=0.05, group=G1)
-legInAtrMult = input.float(1.0, "Leg-in: TR ≥ ATR ×", minval=0, step=0.05, group=G1)
-legInMinBody = input.float(0.5, "Leg-in: min body % (Filled = body > wick)", minval=0, maxval=1, step=0.05, group=G1)
-legInMaxCloseWick = input.float(0.2, "Leg-in: max closing-side wick %", minval=0, maxval=1, step=0.05, group=G1, tooltip="Bull leg-in: (High − Close) ÷ Range · Bear leg-in: (Close − Low) ÷ Range")
-legInToBase = input.float(1.6, "1-2-4: Leg-in ≥ boring ×", minval=1, step=0.1, group=G1, tooltip="Leg-in की range (high–low) ≥ boring की range (wick से wick) × यह")
-legOutToBase = input.float(2.6, "1-2-4: Leg-out ≥ boring ×", minval=1, step=0.1, group=G1, tooltip="सभी leg-out की body (पहली open से आख़िरी close) ≥ boring range × यह")
-maxLegOut = input.int(3, "Max leg-out candles counted (course: 3)", minval=1, maxval=3, group=G1)
-legOutJoinTol = input.float(0.25, "Leg-out 2/3: |open − prev close| ≤ ATR ×", minval=0, step=0.05, group=G1)
-legOutAtrMult = input.float(1.2, "First leg-out: TR ≥ ATR ×", minval=0, step=0.05, group=G1)
-legOutMaxWick = input.float(0.3, "First leg-out: max wick %", minval=0, maxval=1, step=0.05, group=G1)
+atrPeriod = input.int(14, "ATR Period (course: 14)", minval=1, group=G1, display=display.none)
+minBaseCountIn = input.int(1, "Min boring candles", minval=1, maxval=4, group=G1, display=display.none)
+maxBaseCountIn = input.int(3, "Max boring candles (course: >4 = trap)", minval=1, maxval=4, group=G1, display=display.none)
+boringAtrMult = input.float(1.0, "Boring: TR must be ≤ ATR ×", minval=0.1, step=0.05, group=G1, display=display.none)
+legInAtrMult = input.float(1.0, "Leg-in: TR ≥ ATR ×", minval=0, step=0.05, group=G1, display=display.none)
+legInMinBody = input.float(0.5, "Leg-in: min body % (Filled = body > wick)", minval=0, maxval=1, step=0.05, group=G1, display=display.none)
+legInMaxCloseWick = input.float(0.2, "Leg-in: max closing-side wick %", minval=0, maxval=1, step=0.05, group=G1, tooltip="Bull leg-in: (High − Close) ÷ Range · Bear leg-in: (Close − Low) ÷ Range", display=display.none)
+legInToBase = input.float(1.6, "1-2-4: Leg-in ≥ boring ×", minval=1, step=0.1, group=G1, tooltip="Leg-in की range (high–low) ≥ boring की range (wick से wick) × यह", display=display.none)
+legOutToBase = input.float(2.6, "1-2-4: Leg-out ≥ boring ×", minval=1, step=0.1, group=G1, tooltip="सभी leg-out की body (पहली open से आख़िरी close) ≥ boring range × यह", display=display.none)
+maxLegOut = input.int(3, "Max leg-out candles counted (course: 3)", minval=1, maxval=3, group=G1, display=display.none)
+legOutJoinTol = input.float(0.25, "Leg-out 2/3: |open − prev close| ≤ ATR ×", minval=0, step=0.05, group=G1, display=display.none)
+legOutAtrMult = input.float(1.2, "First leg-out: TR ≥ ATR ×", minval=0, step=0.05, group=G1, display=display.none)
+legOutMaxWick = input.float(0.3, "First leg-out: max wick %", minval=0, maxval=1, step=0.05, group=G1, display=display.none)
 
 G2 = "2 · Validation rules"
-useCBLI = input.bool(true, "CBLI: reject if candle behind leg-in is opposite colour", group=G2)
-cbliMaxBody = input.float(0.5, "CBLI: max body vs leg-in body", minval=0, maxval=5, step=0.05, group=G2, tooltip="उल्टे रंग की पिछली candle की body ≤ leg-in body × यह हो तो ज़ोन मान्य")
-useFormation = input.bool(true, "Formation of leg-out (DBR/RBD: leg-out open inside leg-in body)", group=G2, tooltip="कोई tolerance नहीं — open ठीक leg-in की body (open–close) के अंदर हो")
-useWhiteArea = input.bool(false, "White area (leg-out body must not cover whole boring wick)", group=G2, tooltip="पहली leg-out की body, boring के High से Low (wick से wick) तक पूरी न ढके")
-maxEntries = input.int(3, "Max entries before zone is exhausted (course: 1–3)", minval=1, maxval=10, group=G2)
-distalMode = input.string("Pattern lowest/highest (course)", "Distal (SL) line", options=["Pattern lowest/highest (course)", "Boring only"], group=G2)
-reqVolume = input.bool(false, "Require leg-out volume > leg-in volume (optional)", group=G2)
-reqImbalance = input.bool(false, "Require imbalance: gap or close beyond leg-in extreme (optional)", group=G2)
+useCBLI = input.bool(true, "CBLI: reject if candle behind leg-in is opposite colour", group=G2, display=display.none)
+cbliMaxBody = input.float(0.5, "CBLI: max body vs leg-in body", minval=0, maxval=5, step=0.05, group=G2, tooltip="उल्टे रंग की पिछली candle की body ≤ leg-in body × यह हो तो ज़ोन मान्य", display=display.none)
+useFormation = input.bool(true, "Formation of leg-out (DBR/RBD: leg-out open inside leg-in body)", group=G2, tooltip="कोई tolerance नहीं — open ठीक leg-in की body (open–close) के अंदर हो", display=display.none)
+useWhiteArea = input.bool(false, "White area (leg-out body must not cover whole boring wick)", group=G2, tooltip="पहली leg-out की body, boring के High से Low (wick से wick) तक पूरी न ढके", display=display.none)
+maxEntries = input.int(3, "Max entries before zone is exhausted (course: 1–3)", minval=1, maxval=10, group=G2, display=display.none)
+distalMode = input.string("Pattern lowest/highest (course)", "Distal (SL) line", options=["Pattern lowest/highest (course)", "Boring only"], group=G2, display=display.none)
+reqVolume = input.bool(false, "Require leg-out volume > leg-in volume (optional)", group=G2, display=display.none)
+reqImbalance = input.bool(false, "Require imbalance: gap or close beyond leg-in extreme (optional)", group=G2, display=display.none)
 
 G3 = "3 · Quality score (ranking only)"
-volSmaPeriod = input.int(20, "Volume SMA Period", minval=1, group=G3)
-hqLegOutMult = input.float(2.0, "HQ: leg-out TR ≥ leg-in TR ×", minval=0, step=0.1, group=G3)
-hqLegInAtr = input.float(1.1, "HQ: leg-in TR ≥ ATR ×", minval=0, step=0.05, group=G3)
-bodyHeavyPct = input.float(0.6, "Leg-out body-heavy %", minval=0, maxval=1, step=0.05, group=G3)
+volSmaPeriod = input.int(20, "Volume SMA Period", minval=1, group=G3, display=display.none)
+hqLegOutMult = input.float(2.0, "HQ: leg-out TR ≥ leg-in TR ×", minval=0, step=0.1, group=G3, display=display.none)
+hqLegInAtr = input.float(1.1, "HQ: leg-in TR ≥ ATR ×", minval=0, step=0.05, group=G3, display=display.none)
+bodyHeavyPct = input.float(0.6, "Leg-out body-heavy %", minval=0, maxval=1, step=0.05, group=G3, display=display.none)
 
 G4 = "4 · Display"
-showInfo = input.bool(true, "Show zone info label (entry, SL, T1, XRPT, qty)", group=G4)
-showMcap = input.bool(true, "Show market-cap check table", group=G4)
-minMcapCr = input.float(50000, "Min market cap (₹ Cr)", minval=0, group=G4)
+showInfo = input.bool(true, "Show zone info label (entry, SL, T1, XRPT, qty)", group=G4, display=display.none)
+showMcap = input.bool(true, "Show market-cap check table", group=G4, display=display.none)
+minMcapCr = input.float(50000, "Min market cap (₹ Cr)", minval=0, group=G4, display=display.none)
 
 G5 = "5 · MTF lines"
-showMTF = input.bool(true, "Show other-TF proximal lines", group=G5)
-filterDistantMTF = input.bool(true, "Hide distant MTF lines (display only)", group=G5)
-mtfNearPct = input.float(8.0, "Show lines within % of last price", minval=0.1, maxval=100.0, step=0.5, group=G5)
-tf1 = input.timeframe("3", "TF 1", group=G5)
-tf2 = input.timeframe("5", "TF 2", group=G5)
-tf3 = input.timeframe("10", "TF 3", group=G5)
-tf4 = input.timeframe("15", "TF 4", group=G5)
-tf5 = input.timeframe("30", "TF 5", group=G5)
-tf6 = input.timeframe("60", "TF 6", group=G5)
-tf7 = input.timeframe("75", "TF 7", group=G5, tooltip="75 मिनट सिर्फ़ उन्हीं प्लान पर जिनमें custom timeframe है")
-tf8 = input.timeframe("120", "TF 8", group=G5)
-tf9 = input.timeframe("D", "TF 9", group=G5)
+showMTF = input.bool(true, "Show other-TF proximal lines", group=G5, display=display.none)
+filterDistantMTF = input.bool(true, "Hide distant MTF lines (display only)", group=G5, display=display.none)
+mtfNearPct = input.float(8.0, "Show lines within % of last price", minval=0.1, maxval=100.0, step=0.5, group=G5, display=display.none)
+tf1 = input.timeframe("3", "TF 1", group=G5, display=display.none)
+tf2 = input.timeframe("5", "TF 2", group=G5, display=display.none)
+tf3 = input.timeframe("10", "TF 3", group=G5, display=display.none)
+tf4 = input.timeframe("15", "TF 4", group=G5, display=display.none)
+tf5 = input.timeframe("30", "TF 5", group=G5, display=display.none)
+tf6 = input.timeframe("60", "TF 6", group=G5, display=display.none)
+tf7 = input.timeframe("75", "TF 7", group=G5, tooltip="75 मिनट सिर्फ़ उन्हीं प्लान पर जिनमें custom timeframe है", display=display.none)
+tf8 = input.timeframe("120", "TF 8", group=G5, display=display.none)
+tf9 = input.timeframe("D", "TF 9", group=G5, display=display.none)
 
 G6 = "6 · Shadows & swings"
-showShadow = input.bool(true, "Shadow when prior zone behind / broken / swing broken", group=G6)
-showFlags = input.bool(true, "Show BASE BREAK / SWING labels", group=G6)
-shadowAtr = input.float(0.08, "Shadow padding × ATR", minval=0, maxval=1, step=0.01, group=G6)
-swingLeft = input.int(6, "Confirmed swing: bars on left", minval=1, maxval=30, group=G6, tooltip="NSE अध्ययन (40 F&O stocks, 5m–1W): ATR×2 वाले swings से सबसे अच्छा मेल N = 6 (हर TF पर 5–6)")
-swingRight = input.int(6, "Confirmed swing: bars on right", minval=1, maxval=30, group=G6, tooltip="ज़्यादा = swing पक्का, पर देर से मार्क होगा")
+showShadow = input.bool(true, "Shadow when prior zone behind / broken / swing broken", group=G6, display=display.none)
+showFlags = input.bool(true, "Show BASE BREAK / SWING labels", group=G6, display=display.none)
+shadowAtr = input.float(0.08, "Shadow padding × ATR", minval=0, maxval=1, step=0.01, group=G6, display=display.none)
+swingLeft = input.int(6, "Confirmed swing: bars on left", minval=1, maxval=30, group=G6, tooltip="NSE अध्ययन (40 F&O stocks, 5m–1W): ATR×2 वाले swings से सबसे अच्छा मेल N = 6 (हर TF पर 5–6)", display=display.none)
+swingRight = input.int(6, "Confirmed swing: bars on right", minval=1, maxval=30, group=G6, tooltip="ज़्यादा = swing पक्का, पर देर से मार्क होगा", display=display.none)
 
 G7 = "7 · Events (results · dividend · split)"
-showEvents = input.bool(true, "Show events: results / dividend / split (chart + table)", group=G7, tooltip="TradingView के पास जो कंपनी-इवेंट डेटा है वही। News/headlines और TradingView notifications Pine में उपलब्ध नहीं हैं।")
-eventWarnDays = input.int(7, "Warn if next event within (days)", minval=0, maxval=60, group=G7)
-eventAlert = input.bool(true, "Popup alert: live zone + event coming", group=G7, tooltip="Popup के लिए: TradingView में Alert बनाएँ → Condition: इस indicator का 'Any alert() function call'")
+showEvents = input.bool(true, "Show events: results / dividend / split (chart + table)", group=G7, tooltip="TradingView के पास जो कंपनी-इवेंट डेटा है वही। News/headlines और TradingView notifications Pine में उपलब्ध नहीं हैं।", display=display.none)
+eventWarnDays = input.int(7, "Warn if next event within (days)", minval=0, maxval=60, group=G7, display=display.none)
+eventAlert = input.bool(true, "Popup alert: live zone + event coming", group=G7, tooltip="Popup के लिए: TradingView में Alert बनाएँ → Condition: इस indicator का 'Any alert() function call'", display=display.none)
 
 // ============================================================ COMMON SERIES
 int minBaseCount = math.max(1, math.min(minBaseCountIn, maxBaseCountIn))
@@ -404,9 +404,9 @@ float evEarn = request.earnings(syminfo.tickerid, earnings.actual, barmerge.gaps
 float evDiv = request.dividends(syminfo.tickerid, dividends.gross, barmerge.gaps_on, barmerge.lookahead_off, ignore_invalid_symbol=true)
 float evSplitN = request.splits(syminfo.tickerid, splits.numerator, barmerge.gaps_on, barmerge.lookahead_off, ignore_invalid_symbol=true)
 float evSplitD = request.splits(syminfo.tickerid, splits.denominator, barmerge.gaps_on, barmerge.lookahead_off, ignore_invalid_symbol=true)
-plotshape(showEvents and not na(evEarn), "Results (past)", shape.labelup, location.belowbar, color.new(color.blue, 0), text="R", textcolor=color.white, size=size.tiny)
-plotshape(showEvents and not na(evDiv), "Dividend (past)", shape.labelup, location.belowbar, color.new(color.purple, 0), text="D", textcolor=color.white, size=size.tiny)
-plotshape(showEvents and not na(evSplitN), "Split (past)", shape.labelup, location.belowbar, color.new(color.orange, 0), text="S", textcolor=color.white, size=size.tiny)
+plotshape(showEvents and not na(evEarn), "Results (past)", shape.labelup, location.bottom, color.new(color.blue, 40), text="R", textcolor=color.white, size=size.tiny, display=display.pane)
+plotshape(showEvents and not na(evDiv), "Dividend (past)", shape.labelup, location.bottom, color.new(color.purple, 40), text="D", textcolor=color.white, size=size.tiny, display=display.pane)
+plotshape(showEvents and not na(evSplitN), "Split (past)", shape.labelup, location.bottom, color.new(color.orange, 40), text="S", textcolor=color.white, size=size.tiny, display=display.pane)
 // आने वाले इवेंट (TradingView का अनुमानित कैलेंडर)
 int nextResT = earnings.future_time
 int nextExDivT = dividends.future_ex_date
@@ -457,6 +457,9 @@ f_info(Zone z) =>
      "\nQty " + str.tostring(z.qty) + " · " + z.state + (z.entries > 0 ? " " + str.tostring(z.entries) + "/" + str.tostring(maxEntries) : "") +
      (evWarn != "" ? "\n" + evWarn : "")
 
+f_short(Zone z) =>
+    z.pattern + " " + str.tostring(z.score) + (z.hq ? " ★" : "") + (z.state == "Tested" ? " · T" + str.tostring(z.entries) : "") + (evWarn != "" ? " ⚠" : "")
+
 f_paint(Zone z) =>
     color base = z.demand ? color.green : color.red
     if z.state == "Fresh"
@@ -480,7 +483,8 @@ f_paint(Zone z) =>
             box.set_border_color(z.shadowBox, color.new(color.gray, 88))
     if not na(z.infoLabel)
         if f_alive(z)
-            label.set_text(z.infoLabel, f_info(z))
+            label.set_text(z.infoLabel, f_short(z))
+            label.set_tooltip(z.infoLabel, f_info(z))
         else
             label.delete(z.infoLabel)
             z.infoLabel := na
@@ -489,8 +493,8 @@ f_paint(Zone z) =>
 // ---- Confirmed swings (ta.pivothigh/low) — chart पर निशान + swing break
 float ph = ta.pivothigh(high, swingLeft, swingRight)
 float pl = ta.pivotlow(low, swingLeft, swingRight)
-plotshape(showFlags and not na(ph), "Swing high", shape.triangledown, location.abovebar, color.new(color.red, 30), offset=-swingRight, size=size.tiny)
-plotshape(showFlags and not na(pl), "Swing low", shape.triangleup, location.belowbar, color.new(color.green, 30), offset=-swingRight, size=size.tiny)
+plotshape(showFlags ? ph : na, "Swing high", shape.circle, location.absolute, color.new(color.red, 45), offset=-swingRight, size=size.tiny, display=display.pane)
+plotshape(showFlags ? pl : na, "Swing low", shape.circle, location.absolute, color.new(color.green, 45), offset=-swingRight, size=size.tiny, display=display.pane)
 var float lastSwingHigh = na
 var float lastSwingLow = na
 var int lastSwingHighBar = na
@@ -554,16 +558,16 @@ if bar_index >= math.max(atrPeriod, maxBaseCount + maxLegOut + 3, 11) and not na
             box halo = na
             if showShadow and (behind or baseBreak or swingBreak)
                 color hc = baseBreak ? color.orange : swingBreak ? color.yellow : color.gray
-                halo := box.new(leftBar, math.max(c.prox, sl) + shadowAtr * atr_val, bar_index + 15, math.min(c.prox, sl) - shadowAtr * atr_val, border_color=color.new(hc, baseBreak ? 15 : 55), border_width=baseBreak ? 3 : swingBreak ? 2 : 1, bgcolor=color.new(hc, baseBreak ? 75 : swingBreak ? 84 : 92))
+                halo := box.new(leftBar, math.max(c.prox, sl) + shadowAtr * atr_val, bar_index + 15, math.min(c.prox, sl) - shadowAtr * atr_val, border_color=color.new(hc, baseBreak ? 55 : 80), border_width=1, border_style=line.style_dotted, bgcolor=color.new(hc, baseBreak ? 88 : swingBreak ? 92 : 96))
             box zb = box.new(leftBar, math.max(c.prox, c.dist), bar_index + 15, math.min(c.prox, c.dist), border_color=zc, bgcolor=color.new(zc, 80))
             label tag = na
             if showFlags and (baseBreak or swingBreak)
                 string msg = (baseBreak ? "BASE BREAK" : "") + (baseBreak and swingBreak ? " + " : "") + (swingBreak ? "SWING" : "")
-                tag := label.new(bar_index, c.dist, msg, style=c.demand ? label.style_label_up : label.style_label_down, color=baseBreak ? color.orange : color.yellow, textcolor=color.black, size=size.tiny)
+                tag := label.new(leftBar, c.dist, msg, style=c.demand ? label.style_label_up : label.style_label_down, color=color.new(color.white, 100), textcolor=baseBreak ? color.orange : color.olive, size=size.tiny)
             label infoLbl = na
             Zone z = Zone.new(c.prox, c.dist, entry, sl, tp, c.xrpt, xrr, qty, c.demand, c.pattern, c.bc, c.score, c.hq, "Fresh", 0, false, bar_index, na, zb, halo, infoLbl, tag)
             if showInfo
-                z.infoLabel := label.new(bar_index + 2, c.prox, f_info(z), style=label.style_label_left, color=color.new(zc, 85), textcolor=chart.fg_color, size=size.tiny)
+                z.infoLabel := label.new(bar_index + 15, (c.prox + c.dist) / 2, f_short(z), style=label.style_label_left, color=color.new(zc, 100), textcolor=color.new(zc, 0), size=size.small, tooltip=f_info(z))
             f_paint(z)
             array.push(zones, z)
             zonesCreated += 1
@@ -608,7 +612,7 @@ if array.size(zones) > 0
                 if not na(z.shadowBox)
                     box.set_right(z.shadowBox, bar_index + 15)
                 if not na(z.infoLabel)
-                    label.set_x(z.infoLabel, bar_index + 2)
+                    label.set_x(z.infoLabel, bar_index + 15)
             if z.state != before or (barstate.islast and f_alive(z))
                 f_paint(z)
 
@@ -633,28 +637,27 @@ if barstate.islast
 
 // ============================================================ MARKET-CAP + EVENTS TABLE
 float sharesOut = request.financial(syminfo.tickerid, "TOTAL_SHARES_OUTSTANDING", "FQ", ignore_invalid_symbol=true)
-var table mcTable = table.new(position.top_right, 2, 6, bgcolor=color.new(color.gray, 90), border_width=0)
+var table mcTable = table.new(position.bottom_right, 2, 4, bgcolor=color.new(color.gray, 94), frame_color=color.new(color.gray, 80), frame_width=1, border_width=0)
 int aliveNow = 0
 if barstate.islast and array.size(zones) > 0
     for j = 0 to array.size(zones) - 1
         if f_alive(array.get(zones, j))
             aliveNow += 1
+f_dshort(int t) => na(t) ? "n/a" : str.format_time(t, "dd-MMM", "Asia/Kolkata")
 if barstate.islast and (showMcap or showEvents)
     float mcapCr = na(sharesOut) ? na : sharesOut * close / 1.0e7
+    color dim = color.new(chart.fg_color, 35)
     if showMcap
-        table.cell(mcTable, 0, 0, "Market cap", text_size=size.tiny)
-        table.cell(mcTable, 1, 0, na(mcapCr) ? "n/a" : str.tostring(math.round(mcapCr)) + " Cr " + (mcapCr >= minMcapCr ? "✓" : "✗"), text_size=size.tiny, text_color=na(mcapCr) ? chart.fg_color : mcapCr >= minMcapCr ? color.green : color.red)
-        table.cell(mcTable, 0, 1, "Min", text_size=size.tiny)
-        table.cell(mcTable, 1, 1, str.tostring(minMcapCr) + " Cr", text_size=size.tiny)
-    table.cell(mcTable, 0, 2, "Zones live", text_size=size.tiny)
-    table.cell(mcTable, 1, 2, str.tostring(aliveNow) + " / " + str.tostring(zonesCreated), text_size=size.tiny)
+        table.cell(mcTable, 0, 0, "Mcap", text_size=size.tiny, text_color=dim, text_halign=text.align_left)
+        table.cell(mcTable, 1, 0, na(mcapCr) ? "n/a" : str.tostring(math.round(mcapCr)) + " Cr " + (mcapCr >= minMcapCr ? "✓" : "✗"), text_size=size.tiny, text_color=na(mcapCr) ? dim : mcapCr >= minMcapCr ? color.green : color.red, text_halign=text.align_right, tooltip="Min " + str.tostring(minMcapCr) + " Cr")
+    table.cell(mcTable, 0, 1, "Zones", text_size=size.tiny, text_color=dim, text_halign=text.align_left)
+    table.cell(mcTable, 1, 1, str.tostring(aliveNow) + " live / " + str.tostring(zonesCreated), text_size=size.tiny, text_color=dim, text_halign=text.align_right)
     if showEvents
-        table.cell(mcTable, 0, 3, "Next results", text_size=size.tiny)
-        table.cell(mcTable, 1, 3, f_date(nextResT) + (na(resDays) ? "" : " (" + str.tostring(resDays) + " दिन)"), text_size=size.tiny, text_color=resSoon ? color.red : chart.fg_color)
-        table.cell(mcTable, 0, 4, "Next ex-dividend", text_size=size.tiny)
-        table.cell(mcTable, 1, 4, f_date(nextExDivT) + (na(nextDivAmt) ? "" : " · ₹" + str.tostring(nextDivAmt)) + (na(divDays) ? "" : " (" + str.tostring(divDays) + " दिन)"), text_size=size.tiny, text_color=divSoon ? color.red : chart.fg_color)
-        table.cell(mcTable, 0, 5, "Event risk", text_size=size.tiny)
-        table.cell(mcTable, 1, 5, evWarn != "" ? (aliveNow > 0 ? "⚠ ज़ोन + इवेंट पास — सावधान" : "⚠ इवेंट पास") : "—", text_size=size.tiny, text_color=evWarn != "" ? color.white : chart.fg_color, bgcolor=evWarn != "" ? color.new(color.red, 20) : na)
+        bool hot = evWarn != "" and aliveNow > 0
+        table.cell(mcTable, 0, 2, "Results", text_size=size.tiny, text_color=dim, text_halign=text.align_left)
+        table.cell(mcTable, 1, 2, f_dshort(nextResT) + (na(resDays) ? "" : " · " + str.tostring(resDays) + "d") + (resSoon ? " ⚠" : ""), text_size=size.tiny, text_color=resSoon ? (hot ? color.white : color.red) : dim, bgcolor=resSoon and hot ? color.new(color.red, 25) : na, text_halign=text.align_right, tooltip=hot ? "⚠ ज़ोन + इवेंट पास — सावधान" : "")
+        table.cell(mcTable, 0, 3, "Ex-div", text_size=size.tiny, text_color=dim, text_halign=text.align_left)
+        table.cell(mcTable, 1, 3, f_dshort(nextExDivT) + (na(nextDivAmt) ? "" : " ₹" + str.tostring(nextDivAmt)) + (na(divDays) ? "" : " · " + str.tostring(divDays) + "d") + (divSoon ? " ⚠" : ""), text_size=size.tiny, text_color=divSoon ? (hot ? color.white : color.red) : dim, bgcolor=divSoon and hot ? color.new(color.red, 25) : na, text_halign=text.align_right)
 
 // ---- Popup: live ज़ोन है और इवेंट पास है (script लोड होने के बाद एक बार)
 varip bool evAlertSent = false

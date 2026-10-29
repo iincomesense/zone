@@ -47,7 +47,7 @@ for name, ch in VARS.items():
             continue
         bb = {t3: A.eod_band(fr.get(t3), t3, I.atrPeriod) for t3 in ("1d", "1w", "1M")}
         for z in r["rows"]:
-            tg = "".join(A.BAND_LETTER[t3] for t3, b in bb.items() if b and b["low"] <= z["prox"] <= b["high"])
+            tg = "".join({"1d": "D", "1w": "W", "1M": "M"}[t3] for t3, b in bb.items() if b and b["low"] <= z["prox"] <= b["high"])
             for k in ("D", "W", "M"):
                 if k in tg:
                     BAND.setdefault(name, {})[k] = BAND.setdefault(name, {}).get(k, 0) + 1

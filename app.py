@@ -1770,8 +1770,7 @@ def eod_band(df: Optional[pd.DataFrame], tf: str, atr_period: int = 14) -> Optio
 
     i = len(df) - 1
     try:
-        if pstart(idx[-1]) >= pstart(datetime.now(IST)):
-            now = datetime.now(IST)
+        now = datetime.now(IST)
         closed = (not market_open_now()) and (now.hour * 60 + now.minute) >= 15 * 60 + 30
         if pstart(idx[-1]) >= pstart(datetime.now(IST)) and not (closed and tf == "1d"):
             i -= 1
@@ -1944,7 +1943,7 @@ def scan_symbol(symbol: str,
                 continue
             if I.supplyIntradayOnly and not dem and TF_SECONDS.get(tf, 0) >= 86400:
                 continue
-            lv = loc_at(curves.get(tf), pd.Timestamp.now(tz=IST), z["prox"])
+            lv = loc_at(curves.get(tf), pd.Timestamp.now(tz=IST).floor("s"), z["prox"])
             z["loc"] = lv
             if I.curveMode != "off" and not curve_ok(I.curveMode, dem, lv):
                 drop("Curve: location ठीक नहीं")
@@ -2032,7 +2031,14 @@ def loc_at(series: Optional[pd.DataFrame], ts: pd.Timestamp, price: float) -> fl
     """0 = दायरे का निचला सिरा, 1 = ऊपरी सिरा; पता न हो तो nan।"""
     if series is None or series.empty:
         return float("nan")
-    pos = series.index.searchsorted(ts, side="right") - 1
+    # Yahoo index की इकाई (s/ms) और now() (ns) अलग → pandas "Cannot losslessly convert units" देता था,
+    # जिससे ज़्यादातर स्टॉक का पूरा स्कैन फेल हो रहा था। int64 ns पर तुलना करें।
+    try:
+        ix_ns = pd.DatetimeIndex(series.index).tz_convert("UTC").tz_localize(None).values.astype("datetime64[ns]").astype("int64")
+        t_ns = pd.Timestamp(ts).tz_convert("UTC").tz_localize(None).to_datetime64().astype("datetime64[ns]").astype("int64")
+        pos = int(np.searchsorted(ix_ns, t_ns, side="right")) - 1
+    except Exception:                                            # noqa: BLE001
+        return float("nan")
     if pos < 0:
         return float("nan")
     hh, ll = series["hh"].iat[pos], series["ll"].iat[pos]
@@ -2063,7 +2069,7 @@ def htf_conf(spans: Optional[dict], demand: bool, top: float, bot: float, ts: pd
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v31 · ज़ोन स्कैनर · स्क्रीनशॉट default · ढीला बटन + कारण गिनती · 2026-10-28"
+APP_BUILD = "v32 · ज़ोन स्कैनर · समय-इकाई bug ठीक (ज़्यादातर स्टॉक फेल हो रहे थे) · 2026-10-29"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -2842,10 +2848,15 @@ def mtf_panel(snap: dict, tfs, peers):
 # ---------------------------------------------------------------------------
 def _diag_text(res: dict) -> str:
     rej = res.get("rej") or {}
-    if not rej:
-        return ""
-    top = sorted(rej.items(), key=lambda kv: -kv[1])[:3]
-    return " · सबसे ज़्यादा reject: " + ", ".join(f"{k} ({v})" for k, v in top)
+    errs = res.get("errs") or {}
+    out = ""
+    bad = {k: v for k, v in errs.items() if v != "डेटा नहीं मिला"}
+    if bad:
+        out += f" · ⚠️ {len(bad)} स्टॉक में त्रुटि: " + ", ".join(f"{k} ({v[:60]})" for k, v in list(bad.items())[:2])
+    if rej:
+        top = sorted(rej.items(), key=lambda kv: -kv[1])[:3]
+        out += " · सबसे ज़्यादा reject: " + ", ".join(f"{k} ({v})" for k, v in top)
+    return out
 
 
 def pick_symbols(tb: dict):

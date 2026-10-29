@@ -32,6 +32,7 @@ VARS = {"DEFAULT (स्क्रीनशॉट)": {},
         "मूल नियम + Opposite बंद": dict(ORIG, coreOpposite=False)}
 rows, rej_def = [], {}
 ERRS = {}
+BAND = {}
 for name, ch in VARS.items():
     I = replace(D, **ch).sanitized()
     zones, per_tf, rej = 0, {}, {}
@@ -44,7 +45,11 @@ for name, ch in VARS.items():
             k = type(e).__name__ + ": " + str(e)[:120] + " @ " + traceback.format_exc().strip().splitlines()[-3].strip()[:160]
             ERRS[k] = ERRS.get(k, 0) + 1
             continue
+        bz = 0
+        b = A.eod_band(fr.get("1d"), "1d", I.atrPeriod)
         for z in r["rows"]:
+            if b and b["low"] <= z["prox"] <= b["high"]:
+                BAND[name] = BAND.get(name, 0) + 1
             zones += 1
             per_tf[z["tf"]] = per_tf.get(z["tf"], 0) + 1
             fresh += int(z.get("state") == "Fresh")
@@ -73,6 +78,7 @@ for nm in ("DEFAULT (स्क्रीनशॉट)", "आपके candle न�
 out = ["# स्कैनर जाँच", "", f"स्टॉक {len(frames)} · TF {len(TFS)} · समय {round(time.time() - t0)}s", "",
        pd.DataFrame(rows).to_string(index=False), "", "## DEFAULT पर ज़ोन क्यों रुके (rej)",
        json.dumps(dict(sorted(rej_def.items(), key=lambda kv: -kv[1])), ensure_ascii=False, indent=1),
+       "## Daily EOD दायरे में", json.dumps(BAND, ensure_ascii=False, indent=1),
        "## Errors", json.dumps(ERRS, ensure_ascii=False, indent=1),
        "## 5 स्टॉक, engine के सारे ज़ोन की स्थिति", json.dumps(hist, ensure_ascii=False, indent=1)]
 open(os.path.join(ROOT, "shots", "scan_diag.md"), "w").write("\n".join(out))

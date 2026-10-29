@@ -2069,7 +2069,7 @@ def htf_conf(spans: Optional[dict], demand: bool, top: float, bot: float, ts: pd
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v35 · Weekly EOD रेंज (default) · चुने TF ही · 2026-10-29"
+APP_BUILD = "v36 · Weekly EOD रेंज के अंदर ही · सादी टेबल · 2026-10-29"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -2719,13 +2719,12 @@ def sheet_html(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0, extra=False,
     heads += [
         _th("Equity (Cash)"), _th("Current-Month Future"),
         _th("TF"), _th("Zone Side"), _th("Pattern"), _th("Status"), _th("EOD रेंज"),
-        _th("Score /12"), _th("Power"), _th("निशान"),
-        _th("Multi-TF Highlight"),
         _th("Proximal (₹)"), _th("Distal (₹)"), _th("Current LTP"),
         _th("Distance", dir0="asc"),
     ]
     if extra:
-        heads += [_th("Entry"), _th("SL"), _th("T1"), _th("T2"), _th("Qty"), _th("Boring"),
+        heads += [_th("Score /12"), _th("Power"), _th("निशान"), _th("Multi-TF Highlight"),
+                  _th("Entry"), _th("SL"), _th("T1"), _th("T2"), _th("Qty"), _th("Boring"),
                   _th("Rules /5"), _th("Inst /4"), _th("Pulse · Trend"), _th("Room"),
                   _th("Range Low"), _th("Range High")]
         if show_mcap:
@@ -2762,14 +2761,6 @@ def sheet_html(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0, extra=False,
             _td(f'<span class="{_STATE_CLS.get(state, "")}">{state}</span>',
                 _STATE_ORDER.get(state, 9)),
             _td(f'<b>{r.get("eod") or "—"}</b>', str(r.get("eod") or "~"), "ctr"),
-            _td(f'{int(r["score"])}', int(r["score"]), "ctr",
-                style=f"background:{_score_bg(float(r['score']))};color:#111;font-weight:700",),
-            _td(f'{"★ " if r.get("best") else ""}1:{float(r.get("pow_rr", 0)):.1f}'
-                f'{" · 1 LO" if r.get("single_lo") else ""}',
-                float(r.get("pow_rr", 0)), "ctr" + (" gs-star" if r.get("best") else "")),
-            _td(f'<span class="gs-star">{r.get("tags") or ""}</span>' if r.get("tags") else '<span class="gs-sm">—</span>',
-                str(r.get("tags") or "~")),
-            _td(mtf_cell, mtf_n),
             _td(f'{float(r["prox"]):,.2f}', float(r["prox"]), "num"),
             _td(f'{float(r["dist"]):,.2f}', float(r["dist"]), "num"),
             _td(ltp_txt, ltp if np.isfinite(ltp) else -1e18, "num"),
@@ -2779,6 +2770,14 @@ def sheet_html(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0, extra=False,
             rm = r.get("room")
             rm_ok = rm is not None and not (isinstance(rm, float) and pd.isna(rm))
             cells += [
+                _td(f'{int(r["score"])}', int(r["score"]), "ctr",
+                    style=f"background:{_score_bg(float(r['score']))};color:#111;font-weight:700",),
+                _td(f'{"★ " if r.get("best") else ""}1:{float(r.get("pow_rr", 0)):.1f}'
+                    f'{" · 1 LO" if r.get("single_lo") else ""}',
+                    float(r.get("pow_rr", 0)), "ctr" + (" gs-star" if r.get("best") else "")),
+                _td(f'<span class="gs-star">{r.get("tags") or ""}</span>' if r.get("tags") else '<span class="gs-sm">—</span>',
+                    str(r.get("tags") or "~")),
+                _td(mtf_cell, mtf_n),
                 _td(f'{float(r["entry"]):,.2f}', float(r["entry"]), "num"),
                 _td(f'{float(r["sl"]):,.2f}', float(r["sl"]), "num"),
                 _td(f'{float(r["tp"]):,.2f}', float(r["tp"]), "num"),
@@ -3009,8 +3008,7 @@ def _main():
         file_name=f"zone_mtf_{datetime.now(IST):%Y%m%d_%H%M}.tsv",
         mime="text/tab-separated-values")
 
-    st.caption(f"**{sel_band} रेंज में ज़ोन: {len(f)}** · TF: {', '.join(tb.get('tfs') or ALL_TFS)} · "
-               f"रेंज से बाहर (छिपे): {max(0, n_before - len(df_all))}" + _diag_text(res))
+    st.caption(f"**{sel_band} रेंज के अंदर ज़ोन: {len(f)}** · TF: {', '.join(tb.get('tfs') or ALL_TFS)}")
     if not f.empty:
         try:
             scale = float(max(1.0, f["dist_pct"].quantile(0.90)))

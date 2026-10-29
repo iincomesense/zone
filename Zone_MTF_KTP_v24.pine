@@ -4,7 +4,7 @@
 // This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
 // © iincomesense
 //
-// Zone MTF (KTP rules) — v24.6 (v24.4 पर: ज़ोन बॉक्स SL/buffer तक · 1:3 टार्गेट लाइन · leg-out में 1:5 वाले ज़ोन ⚡ हाइलाइट)
+// Zone MTF (KTP rules) — v24.7 (Break zone ग्रे shadow साफ़ दिखे · v24.4 पर: ज़ोन बॉक्स SL/buffer तक · 1:3 टार्गेट लाइन · leg-out में 1:5 वाले ज़ोन ⚡ हाइलाइट)
 // Dr. Ravi R. Kumar (Know The Pulse / Super Trader) कोर्स के demand-supply ज़ोन नियम।
 //
 // v24 में बदलाव (स्क्रीनशॉट के अनुसार):
@@ -505,12 +505,18 @@ f_paint(Zone z) =>
         box.set_border_color(z.zoneBox, color.new(dead, 70))
         box.set_border_style(z.zoneBox, line.style_dotted)
         box.set_border_width(z.zoneBox, 1)
-        // Proximal 1 से ज़्यादा बार टच = Break zone → बाकी break zones जैसी (नारंगी) shadow
-        if proxBreak and showShadow and na(z.shadowBox)
-            z.shadowBox := box.new(box.get_left(z.zoneBox), math.max(z.prox, z.sl) + shadowAtr * atr_val, box.get_right(z.zoneBox), math.min(z.prox, z.sl) - shadowAtr * atr_val, border_style=line.style_dotted)
+        // Break zone (SL हिट या Proximal 2× टच) → साफ़ दिखने वाला ग्रे shadow box, ज़ोन टूटने वाली candle तक
+        bool isBreak = z.state == "Broken"
+        if isBreak
+            box.set_right(z.zoneBox, nz(z.brokenAt, bar_index))
+        if isBreak and showShadow and na(z.shadowBox)
+            z.shadowBox := box.new(box.get_left(z.zoneBox), math.max(z.prox, z.sl) + shadowAtr * atr_val, nz(z.brokenAt, bar_index), math.min(z.prox, z.sl) - shadowAtr * atr_val, border_style=line.style_solid)
         if not na(z.shadowBox)
-            box.set_bgcolor(z.shadowBox, proxBreak ? color.new(color.orange, 88) : color.new(color.gray, 96))
-            box.set_border_color(z.shadowBox, proxBreak ? color.new(color.orange, 55) : color.new(color.gray, 88))
+            if isBreak
+                box.set_right(z.shadowBox, nz(z.brokenAt, bar_index))
+            box.set_bgcolor(z.shadowBox, isBreak ? color.new(color.gray, 85) : color.new(color.gray, 96))
+            box.set_border_color(z.shadowBox, proxBreak ? color.new(color.orange, 50) : isBreak ? color.new(color.gray, 65) : color.new(color.gray, 88))
+            box.set_border_width(z.shadowBox, 1)
     if not na(z.infoLabel)
         if f_alive(z)
             label.set_text(z.infoLabel, f_short(z))

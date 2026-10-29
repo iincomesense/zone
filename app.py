@@ -1133,6 +1133,7 @@ def _candidate(p: int, bc: int, nout: int, S: _S, I: PineInputs):
         q_hq_in=bool(hq_in), q_hq_out=bool(hq_out), q_vol=vol_ok, q_heavy=heavy, q_fav=fav,
         m_in_atr=float(tr[li] / atr[li]), m_out_atr=float(tr[fo] / atr[fo]),
         m_li_ratio=float(in_range / base_range), m_lo_ratio=float((ob_hi - ob_lo) / base_range),
+        base_h=float(base_h), base_l=float(base_l),
         b0=b0, bl=bl, li=li,
     )
 
@@ -1269,7 +1270,19 @@ def engine(df: pd.DataFrame, I: PineInputs, tf: str, htf_daily: Optional[pd.Data
                     else:
                         swing_brk = l_brk is not None and sw_l_bar is not None and sw_l_bar < li and l_brk >= li
                     shadow = bool(I.showShadow and (behind or base_brk or swing_brk))
-                    tags = " ".join(t for t, on in (("⚡1:5", xrr >= POWER_BEST_RR), ("★HQ", cand["hq"]), ("BASE BREAK", base_brk),
+                    # ---- FLIP (High quality): उल्टा ज़ोन SL तोड़कर टूटा, फिर उसकी shadow में boring बनी ----
+                    flip = False
+                    oldest_boring = cand["bl"]
+                    pad = I.shadowAtr * S.atr[p]
+                    for old in reversed(zones):
+                        if (old["demand"] != dem and old["state"] == STATE_BROKEN and old.get("sl_hit")
+                                and old.get("broken_at") is not None and old["broken_at"] <= oldest_boring):
+                            s_top = max(old["prox"], old["sl"]) + pad
+                            s_bot = min(old["prox"], old["sl"]) - pad
+                            if cand["base_l"] <= s_top and cand["base_h"] >= s_bot:
+                                flip = True
+                                break
+                    tags = " ".join(t for t, on in (("🔁FLIP", flip), ("⚡1:5", xrr >= POWER_BEST_RR), ("★HQ", cand["hq"]), ("BASE BREAK", base_brk),
                                                     ("SWING", swing_brk), ("Shadow", shadow and not (base_brk or swing_brk)))
                                     if on)
                     bc = cand["bc"]
@@ -1279,7 +1292,7 @@ def engine(df: pd.DataFrame, I: PineInputs, tf: str, htf_daily: Optional[pd.Data
                         sl=float(sl), tp=float(tp),
                         t3=float(entry + risk * POWER_MIN_RR if dem else entry - risk * POWER_MIN_RR), t5=float(cand["xrpt"]), xrpt=float(cand["xrpt"]),
                         risk=float(risk), qty=qty, xrr=float(xrr), pow_rr=float(xrr),
-                        score=int(cand["score"]), hq=bool(cand["hq"]), best=bool(xrr >= POWER_BEST_RR),
+                        score=int(cand["score"]), hq=bool(cand["hq"]), best=bool(xrr >= POWER_BEST_RR), flip=bool(flip),
                         tags=tags, pattern=cand["pattern"], category=cand["category"],
                         reversal=cand["category"] == "Reversal",
                         base_count=bc, leg_outs=nout, single_lo=nout == 1, grade=_grade(bc),
@@ -1315,6 +1328,7 @@ def engine(df: pd.DataFrame, I: PineInputs, tf: str, htf_daily: Optional[pd.Data
             if hit_sl or z["prox_touches"] > PROX_MAX_TOUCH:
                 z["state"] = STATE_BROKEN
                 z["broken_at"] = p
+                z["sl_hit"] = bool(hit_sl)
             elif z["state"] == STATE_FRESH:
                 if touch:
                     z["state"] = STATE_TRIG
@@ -1510,7 +1524,7 @@ def eod_band(df: Optional[pd.DataFrame], tf: str, atr_period: int = 14) -> Optio
 # ---------------------------------------------------------------------------
 _EMPTY_SNAP = {"demand": None, "supply": None, "demand_time": 0, "supply_time": 0}
 _ZCACHE: Dict[tuple, tuple] = {}
-_ZVER = "z22"           # इंजन बदले तो बढ़ाएँ — पुराना कैश अपने आप बेकार
+_ZVER = "z23"           # इंजन बदले तो बढ़ाएँ — पुराना कैश अपने आप बेकार
 
 
 def _inputs_hash(I: PineInputs) -> str:
@@ -1717,7 +1731,7 @@ def htf_conf(spans: Optional[dict], demand: bool, top: float, bot: float, ts: pd
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v41 · Pine v24.6: ⚡1:5 हाइलाइट · T 1:3 · 2026-10-29"
+APP_BUILD = "v42 · Pine v24.8: 🔁FLIP हाइलाइट · 2026-10-29"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")

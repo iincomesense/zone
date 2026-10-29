@@ -4,7 +4,7 @@
 // This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
 // © iincomesense
 //
-// Zone MTF (KTP rules) — v24.7 (Break zone ग्रे shadow साफ़ दिखे · v24.4 पर: ज़ोन बॉक्स SL/buffer तक · 1:3 टार्गेट लाइन · leg-out में 1:5 वाले ज़ोन ⚡ हाइलाइट)
+// Zone MTF (KTP rules) — v24.8 (FLIP: टूटे उल्टे ज़ोन की shadow में boring = High quality · shadow सिर्फ़ टूटने तक · Break zone ग्रे shadow साफ़ दिखे · v24.4 पर: ज़ोन बॉक्स SL/buffer तक · 1:3 टार्गेट लाइन · leg-out में 1:5 वाले ज़ोन ⚡ हाइलाइट)
 // Dr. Ravi R. Kumar (Know The Pulse / Super Trader) कोर्स के demand-supply ज़ोन नियम।
 //
 // v24 में बदलाव (स्क्रीनशॉट के अनुसार):
@@ -131,6 +131,8 @@ type Candidate
     float xrpt = na
     int score = 0
     bool hq = false
+    float baseHi = na
+    float baseLo = na
 
 f_candidate(int bc, int nOut) =>
     Candidate c = Candidate.new()
@@ -277,6 +279,8 @@ f_candidate(int bc, int nOut) =>
         s += imbalance ? 10 : 0
         c.score := s
         c.hq := hqIn and hqOut
+        c.baseHi := baseH
+        c.baseLo := baseL
     c.reason := why
     c
 
@@ -465,6 +469,9 @@ type Zone
     int proxTouches = 0
     bool proxOut = true
     bool best = false
+    bool flip = false
+    bool slHit = false
+    int deadAt = na
     line t3Line
     label t3Label
 
@@ -474,7 +481,8 @@ var int zonesCreated = 0
 f_alive(Zone z) => z.state == "Fresh" or z.state == "Tested"
 f_fmt(float v) => str.tostring(v, format.mintick)
 f_info(Zone z) =>
-    (z.best ? "⚡ Power 1:5+ (leg-out में)\n" : "") +
+    (z.flip ? "🔁 FLIP: टूटे " + (z.demand ? "Supply" : "Demand") + " ज़ोन की shadow में boring — High quality\n" : "") +
+     (z.best ? "⚡ Power 1:5+ (leg-out में)\n" : "") +
      z.pattern + " · " + str.tostring(z.bc) + " boring · Score " + str.tostring(z.score) + (z.hq ? " ★" : "") +
      "\nEntry " + f_fmt(z.entry) + "  SL " + f_fmt(z.sl) +
      "\nT 1:3 " + f_fmt(z.demand ? z.entry + (z.entry - z.sl) * POWER_MIN_RR : z.entry - (z.sl - z.entry) * POWER_MIN_RR) +
@@ -484,20 +492,20 @@ f_info(Zone z) =>
      (evWarn != "" ? "\n" + evWarn : "")
 
 f_short(Zone z) =>
-    (z.best ? "⚡1:5 " : "") + z.pattern + " " + str.tostring(z.score) + (z.hq ? " ★" : "") + (z.state == "Tested" ? " · T" + str.tostring(z.entries) : "") + (evWarn != "" ? " ⚠" : "")
+    (z.flip ? "🔁FLIP " : "") + (z.best ? "⚡1:5 " : "") + z.pattern + " " + str.tostring(z.score) + (z.hq ? " ★" : "") + (z.state == "Tested" ? " · T" + str.tostring(z.entries) : "") + (evWarn != "" ? " ⚠" : "")
 
 f_paint(Zone z) =>
     color base = z.demand ? color.green : color.red
     if z.state == "Fresh"
         box.set_bgcolor(z.zoneBox, color.new(base, 80))
-        box.set_border_color(z.zoneBox, z.best ? color.rgb(255, 170, 0) : base)
+        box.set_border_color(z.zoneBox, z.flip ? color.rgb(156, 39, 176) : z.best ? color.rgb(255, 170, 0) : base)
         box.set_border_style(z.zoneBox, line.style_solid)
-        box.set_border_width(z.zoneBox, z.best ? 3 : z.hq ? 2 : 1)
+        box.set_border_width(z.zoneBox, z.flip or z.best ? 3 : z.hq ? 2 : 1)
     else if z.state == "Tested"
         box.set_bgcolor(z.zoneBox, color.new(base, 70))
-        box.set_border_color(z.zoneBox, z.best ? color.rgb(255, 170, 0) : base)
+        box.set_border_color(z.zoneBox, z.flip ? color.rgb(156, 39, 176) : z.best ? color.rgb(255, 170, 0) : base)
         box.set_border_style(z.zoneBox, line.style_dashed)
-        box.set_border_width(z.zoneBox, z.best ? 3 : 2)
+        box.set_border_width(z.zoneBox, z.flip or z.best ? 3 : 2)
     else
         color dead = z.state == "Exhausted" ? color.orange : color.gray
         bool proxBreak = z.state == "Broken" and z.proxTouches > PROX_MAX_TOUCH
@@ -507,13 +515,12 @@ f_paint(Zone z) =>
         box.set_border_width(z.zoneBox, 1)
         // Break zone (SL हिट या Proximal 2× टच) → साफ़ दिखने वाला ग्रे shadow box, ज़ोन टूटने वाली candle तक
         bool isBreak = z.state == "Broken"
-        if isBreak
-            box.set_right(z.zoneBox, nz(z.brokenAt, bar_index))
+        int endBar = nz(z.deadAt, nz(z.brokenAt, bar_index))      // ज़ोन जिस candle पर ख़त्म हुआ — आगे नहीं बढ़ेगा
+        box.set_right(z.zoneBox, endBar)
         if isBreak and showShadow and na(z.shadowBox)
-            z.shadowBox := box.new(box.get_left(z.zoneBox), math.max(z.prox, z.sl) + shadowAtr * atr_val, nz(z.brokenAt, bar_index), math.min(z.prox, z.sl) - shadowAtr * atr_val, border_style=line.style_solid)
+            z.shadowBox := box.new(box.get_left(z.zoneBox), math.max(z.prox, z.sl) + shadowAtr * atr_val, endBar, math.min(z.prox, z.sl) - shadowAtr * atr_val, border_style=line.style_solid)
         if not na(z.shadowBox)
-            if isBreak
-                box.set_right(z.shadowBox, nz(z.brokenAt, bar_index))
+            box.set_right(z.shadowBox, endBar)
             box.set_bgcolor(z.shadowBox, isBreak ? color.new(color.gray, 85) : color.new(color.gray, 96))
             box.set_border_color(z.shadowBox, proxBreak ? color.new(color.orange, 50) : isBreak ? color.new(color.gray, 65) : color.new(color.gray, 88))
             box.set_border_width(z.shadowBox, 1)
@@ -609,8 +616,20 @@ if bar_index >= math.max(atrPeriod, maxBaseCount + maxLegOut + 3, 11) and not na
             label infoLbl = na
             Zone z = Zone.new(c.prox, c.dist, entry, sl, tp, c.xrpt, xrr, qty, c.demand, c.pattern, c.bc, c.score, c.hq, "Fresh", 0, false, bar_index, na, zb, halo, infoLbl, tag)
             z.best := xrr >= POWER_BEST_RR
+            // ---- FLIP (High quality): उल्टा ज़ोन SL तोड़कर टूटा, फिर उसकी shadow (Proximal–SL ± padding) में
+            //      boring बनी — Supply तोड़कर Demand / Demand तोड़कर Supply
+            if array.size(zones) > 0
+                int oldestBoring = bar_index - (c.nOut + c.bc - 1)
+                for j = array.size(zones) - 1 to 0
+                    Zone old = array.get(zones, j)
+                    if old.demand != c.demand and old.state == "Broken" and old.slHit and not na(old.brokenAt) and old.brokenAt <= oldestBoring
+                        float sTop = math.max(old.prox, old.sl) + shadowAtr * atr_val
+                        float sBot = math.min(old.prox, old.sl) - shadowAtr * atr_val
+                        if c.baseLo <= sTop and c.baseHi >= sBot
+                            z.flip := true
+                            break
             if showInfo
-                z.infoLabel := label.new(bar_index + 15, (c.prox + sl) / 2, f_short(z), style=label.style_label_left, color=color.new(zc, 100), textcolor=z.best ? color.rgb(230, 140, 0) : color.new(zc, 0), size=size.small, tooltip=f_info(z))
+                z.infoLabel := label.new(bar_index + 15, (c.prox + sl) / 2, f_short(z), style=label.style_label_left, color=color.new(zc, 100), textcolor=z.flip ? color.rgb(156, 39, 176) : z.best ? color.rgb(230, 140, 0) : color.new(zc, 0), size=size.small, tooltip=f_info(z))
             // 1:3 टार्गेट: छोटी लाइन + भाव (ढूँढना न पड़े)
             float t3 = c.demand ? entry + risk * POWER_MIN_RR : entry - risk * POWER_MIN_RR
             z.t3Line := line.new(bar_index + 5, t3, bar_index + 15, t3, color=color.teal, width=2)
@@ -618,7 +637,7 @@ if bar_index >= math.max(atrPeriod, maxBaseCount + maxLegOut + 3, 11) and not na
             f_paint(z)
             array.push(zones, z)
             zonesCreated += 1
-            alert(syminfo.ticker + " " + timeframe.period + " नया " + (z.best ? "⚡1:5 " : "") + (c.demand ? "Demand" : "Supply") + " ज़ोन " + c.pattern + " · Entry " + f_fmt(entry) + " SL " + f_fmt(sl) + " Score " + str.tostring(c.score), alert.freq_once_per_bar_close)
+            alert(syminfo.ticker + " " + timeframe.period + " नया " + (z.flip ? "🔁FLIP " : "") + (z.best ? "⚡1:5 " : "") + (c.demand ? "Demand" : "Supply") + " ज़ोन " + c.pattern + " · Entry " + f_fmt(entry) + " SL " + f_fmt(sl) + " Score " + str.tostring(c.score), alert.freq_once_per_bar_close)
             if array.size(zones) > MAX_ZONES
                 Zone gone = array.shift(zones)
                 box.delete(gone.zoneBox)
@@ -647,6 +666,7 @@ if array.size(zones) > 0
             if hitSL or z.proxTouches > PROX_MAX_TOUCH
                 z.state := "Broken"
                 z.brokenAt := bar_index
+                z.slHit := hitSL
             else if z.state == "Fresh"
                 if touch
                     z.state := "Tested"
@@ -661,6 +681,8 @@ if array.size(zones) > 0
                     z.outside := false
                     if z.entries > maxEntries
                         z.state := "Exhausted"
+            if not f_alive(z) and na(z.deadAt)
+                z.deadAt := bar_index
             if f_alive(z)
                 box.set_right(z.zoneBox, bar_index + 15)
                 if not na(z.shadowBox)

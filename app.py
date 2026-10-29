@@ -1762,7 +1762,7 @@ def htf_conf(spans: Optional[dict], demand: bool, top: float, bot: float, ts: pd
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v47 · टेबल से EOD कॉलम हटाया · विकल्प: 3 leg-out wick मिलाकर · 30m अब 15m से · इंडेक्स cash लिंक · 2026-10-29"
+APP_BUILD = "v48 · FLIP · SWING BRK · निशान एक कॉलम में · Score कॉलम हटाया · 2026-10-29"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -2329,7 +2329,7 @@ def sheet_html(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0, extra=False,
         _th("Distance", dir0="asc"),
     ]
     if extra:
-        heads += [_th("FLIP"), _th("SWING BRK"), _th("Score /100"), _th("XRPT (1:x)"), _th("निशान"), _th("Multi-TF Highlight"),
+        heads += [_th("FLIP · निशान"), _th("XRPT (1:x)"), _th("Multi-TF Highlight"),
                   _th("Entry"), _th("SL"), _th("T 1:3"), _th("T1"), _th("XRPT"), _th("Qty"), _th("Boring"),
                   _th("Leg-out"), _th("Entries"), _th("Pulse · Trend"),
                   _th("Range Low"), _th("Range High")]
@@ -2373,16 +2373,20 @@ def sheet_html(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0, extra=False,
         ]
         if extra:
             fl = bool(r.get("flip"))
+            sw = bool(r.get("sw_brk"))
+            rest = " ".join(t for t in str(r.get("tags") or "").split() if t not in ("🔁FLIP", "SW-BRK"))
+            parts = []
+            if fl:
+                parts.append('<b style="color:#7F77DD">🔁 FLIP</b>')
+            if sw:
+                parts.append(f'<b style="color:#1D9E75">{"🔺" if r["demand"] else "🔻"} SW-BRK</b>')
+            if rest:
+                parts.append(f'<span class="gs-star">{rest}</span>')
             cells += [
-                _td('<b style="color:#7F77DD">🔁 FLIP</b>' if fl else '<span class="gs-sm">—</span>', 1 if fl else 0, "ctr"),
-                (_td(f'<b style="color:#1D9E75">{"🔺" if r["demand"] else "🔻"} SW-BRK</b>', 1, "ctr") if bool(r.get("sw_brk"))
-                 else _td('<span class="gs-sm">—</span>', 0, "ctr")),
-                _td(f'{int(r["score"])}', int(r["score"]), "ctr",
-                    style=f"background:{_score_bg(float(r['score']))};color:#111;font-weight:700",),
+                _td(" ".join(parts) if parts else '<span class="gs-sm">—</span>',
+                    f'{2 * int(fl) + int(sw)} {rest}' if parts else "~"),
                 _td(f'{"⚡ " if r.get("best") else ""}1:{float(r.get("xrr", 0)):.1f}',
                     float(r.get("xrr", 0)), "ctr" + (" gs-star" if r.get("best") else "")),
-                _td(f'<span class="gs-star">{r.get("tags") or ""}</span>' if r.get("tags") else '<span class="gs-sm">—</span>',
-                    str(r.get("tags") or "~")),
                 _td(mtf_cell, mtf_n),
                 _td(f'{float(r["entry"]):,.2f}', float(r["entry"]), "num"),
                 _td(f'{float(r["sl"]):,.2f}', float(r["sl"]), "num"),
@@ -2429,10 +2433,7 @@ def zone_table(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0) -> pd.DataFra
         "T 1:3": df["t3"].round(2),
         "T1": df["tp"].round(2),
         "दूरी %": df["dist_pct"].round(2),
-        "FLIP": df["flip"].map(lambda v: "🔁 FLIP" if v else "") if "flip" in df.columns else "",
-        "SWING BRK": df["sw_brk"].map(lambda v: "SW-BRK" if v else "") if "sw_brk" in df.columns else "",
-        "स्कोर /100": df["score"].astype(int),
-        "निशान": df["tags"].fillna(""),
+        "FLIP · निशान": df["tags"].fillna(""),
         "फ़ैसला": df["verdict"],
         "XRPT": df["xrpt"].round(2),
         "XRPT (1:x)": df["xrr"].round(1),

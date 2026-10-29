@@ -1590,6 +1590,76 @@ def _zones_for(symbol: str, tf: str, df: pd.DataFrame, I: PineInputs, ihash: str
     return zs, snap, diag, False
 
 
+HTF_AREA_TFS = (("1d", "D", 90), ("1w", "W", 365), ("1M", "M", 730))   # TF, अक्षर, कितने दिन पीछे तक
+
+
+def _ms_index(df: pd.DataFrame) -> np.ndarray:
+    idx = pd.DatetimeIndex(df.index)
+    if idx.tz is None:
+        return (idx.as_unit("ns").asi8 - 19800 * 10 ** 9) // 1_000_000      # naive = IST
+    return idx.as_unit("ns").asi8 // 1_000_000
+
+
+def htf_areas(frames: Dict[str, pd.DataFrame]) -> List[dict]:
+    """D / W / M के Pivot और Gap area (सिर्फ़ Multi-TF Highlight कॉलम की जानकारी के लिए)।
+    Pivot: लगातार दो उल्टे रंग की candles — area दोनों की wick तक
+      (नीचे का pivot: लाल→हरी, low से पहली close/दूसरी open तक · ऊपर का: हरी→लाल, close/open से high तक)।
+    Gap: पहली close ↔ दूसरी open।"""
+    out: List[dict] = []
+    for htf, letter, _days in HTF_AREA_TFS:
+        df = frames.get(htf)
+        if df is None or len(df) < 2:
+            continue
+        o = df["open"].to_numpy(dtype="float64")
+        h = df["high"].to_numpy(dtype="float64")
+        l = df["low"].to_numpy(dtype="float64")
+        c = df["close"].to_numpy(dtype="float64")
+        t = _ms_index(df)
+        for i in range(len(df) - 1):
+            j = i + 1
+            red1, green1 = c[i] < o[i], c[i] > o[i]
+            red2, green2 = c[j] < o[j], c[j] > o[j]
+            if red1 and green2:
+                out.append(dict(tf=htf, letter=letter, kind="Pivot", lo=float(min(l[i], l[j])),
+                                hi=float(max(c[i], o[j])), t=int(t[j])))
+            elif green1 and red2:
+                out.append(dict(tf=htf, letter=letter, kind="Pivot", lo=float(min(c[i], o[j])),
+                                hi=float(max(h[i], h[j])), t=int(t[j])))
+            if o[j] != c[i]:
+                out.append(dict(tf=htf, letter=letter, kind="Gap", lo=float(min(c[i], o[j])),
+                                hi=float(max(c[i], o[j])), t=int(t[j])))
+    return out
+
+
+def htf_hits(z: dict, tf: str, areas: List[dict], per_tf: Dict[str, List[dict]]) -> List[str]:
+    """इस ज़ोन (छोटे TF) के ऊपर कौन-कौन से बड़े TF के area / ज़ोन हैं — जैसे D-Pivot, W-Gap, 1h ज़ोन।"""
+    zlo, zhi = min(z["prox"], z["dist"]), max(z["prox"], z["dist"])
+    sec = TF_SECONDS.get(tf, 0)
+    zt = int(z.get("start_time") or z.get("time") or 0)
+    found: List[str] = []
+    for a in areas:
+        if TF_SECONDS.get(a["tf"], 0) <= sec:
+            continue
+        days = next(d for t_, _, d in HTF_AREA_TFS if t_ == a["tf"])
+        if a["t"] > zt or a["t"] < zt - days * 86_400_000:
+            continue
+        if a["lo"] <= zhi and a["hi"] >= zlo:
+            lab = f'{a["letter"]}-{a["kind"]}'
+            if lab not in found:
+                found.append(lab)
+    for tf2, zs in per_tf.items():
+        if TF_SECONDS.get(tf2, 0) <= sec:
+            continue
+        for b in zs:
+            blo, bhi = min(b["prox"], b["sl"]), max(b["prox"], b["sl"])
+            if blo <= zhi and bhi >= zlo:
+                lab = f"{tf2} ज़ोन"
+                if lab not in found:
+                    found.append(lab)
+                break
+    return found
+
+
 def scan_symbol(symbol: str,
                 frames: Dict[str, pd.DataFrame],
                 daily: Optional[pd.DataFrame],
@@ -1649,6 +1719,10 @@ def scan_symbol(symbol: str,
 
     rows: List[dict] = []
     px = ltp if ltp else _last_close(frames, tfs)
+    try:
+        areas = htf_areas(frames)
+    except Exception:                                          # noqa: BLE001
+        areas = []
     for tf in tfs:
         cx = ctxs.get(tf) or {}
         for z in per_tf[tf]:
@@ -1660,6 +1734,11 @@ def scan_symbol(symbol: str,
             else:
                 z["mtf_n"], z["mtf_tfs"] = 0, []
             z["mtf"] = z["mtf_n"] >= 1
+            # ---- Multi-TF Highlight (जानकारी): D/W/M Pivot · Gap · बड़े TF का ज़ोन ----
+            try:
+                z["htf_hits"] = htf_hits(z, tf, areas, per_tf)
+            except Exception:                                  # noqa: BLE001
+                z["htf_hits"] = []
             # ---- Pulse / Trend (25× ट्रेंड TF) — सिर्फ़ जानकारी ----
             z["action_ok"] = bool(cx.get("action_long") if dem else cx.get("action_short"))
             z["trend_tf"] = cx.get("trend_tf", "")
@@ -1762,7 +1841,7 @@ def htf_conf(spans: Optional[dict], demand: bool, top: float, bot: float, ts: pd
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v49 · टेबल से T1 · XRPT · Boring · Leg-out · Entries · Range Low/High हटाए · 2026-10-29"
+APP_BUILD = "v50 · Multi-TF Highlight: D/W/M Pivot · Gap · बड़े TF का ज़ोन · 2026-10-29"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -2346,9 +2425,14 @@ def sheet_html(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0, extra=False,
                 f'{"Demand" if dem else "Supply"}</span>')
         state = str(r["state"])
         mtf_n = int(r.get("mtf_n", 0) or 0)
-        mtf_cell = (f'<span title="पुष्टि करने वाले TF: {r.get("mtf_tfs", "")}">'
-                    f'<span class="gs-star">★</span> Multi-TF ({mtf_n}×)</span>'
-                    if mtf_n >= 1 else '<span class="gs-sm">—</span>')
+        hh = list(r.get("htf_hits") or []) if isinstance(r.get("htf_hits"), (list, tuple)) else []
+        mparts = []
+        if mtf_n >= 1:
+            mparts.append(f'<span title="पुष्टि करने वाले TF: {r.get("mtf_tfs", "")}">'
+                          f'<span class="gs-star">★</span> Multi-TF ({mtf_n}×)</span>')
+        if hh:
+            mparts.append('<b style="color:#BA7517">' + " · ".join(hh) + '</b>')
+        mtf_cell = " ".join(mparts) if mparts else '<span class="gs-sm">—</span>' 
         ltp = float(r["ltp"]) if pd.notna(r.get("ltp")) else float("nan")
         ltp_txt = f"₹{ltp:,.2f}" if np.isfinite(ltp) else "—"
         cells = [
@@ -2385,7 +2469,7 @@ def sheet_html(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0, extra=False,
                     f'{2 * int(fl) + int(sw)} {rest}' if parts else "~"),
                 _td(f'{"⚡ " if r.get("best") else ""}1:{float(r.get("xrr", 0)):.1f}',
                     float(r.get("xrr", 0)), "ctr" + (" gs-star" if r.get("best") else "")),
-                _td(mtf_cell, mtf_n),
+                _td(mtf_cell, mtf_n + 10 * len(hh)),
                 _td(f'{float(r["entry"]):,.2f}', float(r["entry"]), "num"),
                 _td(f'{float(r["sl"]):,.2f}', float(r["sl"]), "num"),
                 _td(f'<b>{float(r["t3"]):,.2f}</b>', float(r["t3"]), "num"),
@@ -2425,7 +2509,8 @@ def zone_table(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0) -> pd.DataFra
         "XRPT (1:x)": df["xrr"].round(1),
         "★ HQ": df["hq"].map(lambda v: "★" if v else ""),
         "Pulse·Trend": df["pulse"].astype(str) + " " + df["trend"].astype(str),
-        "MTF": df["mtf_n"].map(lambda n: f"★{int(n)}" if n else "–"),
+        "MTF": [(" ".join(([f"★{int(n)}"] if n else []) + (list(h) if isinstance(h, (list, tuple)) else [])) or "–")
+                for n, h in zip(df["mtf_n"], df["htf_hits"] if "htf_hits" in df.columns else [None] * len(df))],
         "स्थिति": df["state"],
         "मात्रा": df["qty"].astype(int),
         "बना (IST)": df["created_ist"],

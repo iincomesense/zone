@@ -1,0 +1,624 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © iincomesense
+//
+// Zone MTF (KTP rules) — v24
+// Dr. Ravi R. Kumar (Know The Pulse / Super Trader) कोर्स के demand-supply ज़ोन नियम।
+//
+// v24 में बदलाव (स्क्रीनशॉट के अनुसार):
+//   • हटाए: Covered leg-out · Zone maturity · Gap bonus · Overnight gap bonus · Min valid score ·
+//           HQ score threshold · Max chart zones (अब अंदर तय: 200 ज़ोन)
+//   • Formation of leg-out (DBR/RBD): leg-out की open, leg-in की BODY के अंदर — कोई tolerance नहीं
+//   • White area: leg-out की body boring की पूरी WICK (high–low) को न ढके
+//   • Quality score सिर्फ़ रैंकिंग के लिए (0–100); ज़ोन को रोकता नहीं। ★ = दोनों HQ शर्तें पूरी
+//   • Confirmed swing: bars on left / right — NSE चार्ट के अध्ययन से default (tools/swing_study.py)
+//
+// ज़ोन बनने का क्रम (bar 0 = आख़िरी leg-out candle):
+//   CBLI → Leg-in → Boring (1–3) → Leg-out (1–3) → 1-2-4 → Formation → White area → Volume/Imbalance (optional)
+// Entry = Proximal (boring wick-to-wick), SL = Distal − buffer, T1 = Entry ± Risk × Target RR,
+// XRPT = leg-out की body का छोर (Extreme Reward Point), Qty = Capital × Risk% ÷ Risk
+
+//@version=6
+indicator("Zone MTF (KTP rules)", shorttitle="Zone MTF KTP", overlay=true, max_bars_back=5000, max_boxes_count=500, max_labels_count=500, max_lines_count=60)
+
+const int MAX_ZONES = 200            // पहले "Max chart zones" input था — अब तय (TradingView box सीमा 500)
+
+// ============================================================ INPUTS
+G0 = "0 · Capital · Risk · SL buffer"
+accountCapital = input.float(25000.0, "Account Capital (₹)", minval=1, group=G0)
+riskPct = input.float(0.5, "Risk % per trade (course: 0.5)", minval=0.01, step=0.05, group=G0)
+targetRR = input.float(5.0, "Target RR (course minimum 1:5)", minval=1, step=0.5, group=G0)
+traderTypeIn = input.string("Auto", "Trader type", options=["Auto", "Aggressive", "Hourly", "Daily", "Weekly/Swing", "Monthly"], group=G0, tooltip="Auto = चार्ट TF से: ≤1m Aggressive · ≤5m Hourly · ≤30m Daily · <1D Weekly/Swing · 1D+ Monthly। इसी से DATR buffer % चुना जाता है।")
+bufferMode = input.string("Chart ATR ×", "SL buffer method", options=["DATR % (course)", "Chart ATR ×"], group=G0)
+bufAggrPct = input.float(2.0, "Buffer % of DATR — Aggressive/Hourly", minval=0, group=G0)
+bufDailyPct = input.float(2.0, "Buffer % of DATR — Daily", minval=0, group=G0)
+bufSwingPct = input.float(2.0, "Buffer % of DATR — Weekly/Monthly", minval=0, group=G0)
+slBufferAtr = input.float(0.5, "SL Buffer × chart ATR (if 'Chart ATR ×' or DATR missing)", minval=0, step=0.05, group=G0)
+
+G1 = "1 · Leg-in / Boring / Leg-out (1-2-4)"
+atrPeriod = input.int(14, "ATR Period (course: 14)", minval=1, group=G1)
+minBaseCountIn = input.int(1, "Min boring candles", minval=1, maxval=4, group=G1)
+maxBaseCountIn = input.int(3, "Max boring candles (course: >4 = trap)", minval=1, maxval=4, group=G1)
+boringAtrMult = input.float(1.0, "Boring: TR must be ≤ ATR ×", minval=0.1, step=0.05, group=G1)
+legInAtrMult = input.float(1.0, "Leg-in: TR ≥ ATR ×", minval=0, step=0.05, group=G1)
+legInMinBody = input.float(0.5, "Leg-in: min body % (Filled = body > wick)", minval=0, maxval=1, step=0.05, group=G1)
+legInMaxCloseWick = input.float(0.2, "Leg-in: max closing-side wick %", minval=0, maxval=1, step=0.05, group=G1, tooltip="Bull leg-in: (High − Close) ÷ Range · Bear leg-in: (Close − Low) ÷ Range")
+legInToBase = input.float(1.6, "1-2-4: Leg-in ≥ boring ×", minval=1, step=0.1, group=G1, tooltip="Leg-in की range (high–low) ≥ boring की range (wick से wick) × यह")
+legOutToBase = input.float(2.6, "1-2-4: Leg-out ≥ boring ×", minval=1, step=0.1, group=G1, tooltip="सभी leg-out की body (पहली open से आख़िरी close) ≥ boring range × यह")
+maxLegOut = input.int(3, "Max leg-out candles counted (course: 3)", minval=1, maxval=3, group=G1)
+legOutJoinTol = input.float(0.25, "Leg-out 2/3: |open − prev close| ≤ ATR ×", minval=0, step=0.05, group=G1)
+legOutAtrMult = input.float(1.2, "First leg-out: TR ≥ ATR ×", minval=0, step=0.05, group=G1)
+legOutMaxWick = input.float(0.3, "First leg-out: max wick %", minval=0, maxval=1, step=0.05, group=G1)
+
+G2 = "2 · Validation rules"
+useCBLI = input.bool(true, "CBLI: reject if candle behind leg-in is opposite colour", group=G2)
+cbliMaxBody = input.float(0.5, "CBLI: max body vs leg-in body", minval=0, maxval=5, step=0.05, group=G2, tooltip="उल्टे रंग की पिछली candle की body ≤ leg-in body × यह हो तो ज़ोन मान्य")
+useFormation = input.bool(true, "Formation of leg-out (DBR/RBD: leg-out open inside leg-in body)", group=G2, tooltip="कोई tolerance नहीं — open ठीक leg-in की body (open–close) के अंदर हो")
+useWhiteArea = input.bool(false, "White area (leg-out body must not cover whole boring wick)", group=G2, tooltip="पहली leg-out की body, boring के High से Low (wick से wick) तक पूरी न ढके")
+maxEntries = input.int(3, "Max entries before zone is exhausted (course: 1–3)", minval=1, maxval=10, group=G2)
+distalMode = input.string("Pattern lowest/highest (course)", "Distal (SL) line", options=["Pattern lowest/highest (course)", "Boring only"], group=G2)
+reqVolume = input.bool(false, "Require leg-out volume > leg-in volume (optional)", group=G2)
+reqImbalance = input.bool(false, "Require imbalance: gap or close beyond leg-in extreme (optional)", group=G2)
+
+G3 = "3 · Quality score (ranking only)"
+volSmaPeriod = input.int(20, "Volume SMA Period", minval=1, group=G3)
+hqLegOutMult = input.float(2.0, "HQ: leg-out TR ≥ leg-in TR ×", minval=0, step=0.1, group=G3)
+hqLegInAtr = input.float(1.1, "HQ: leg-in TR ≥ ATR ×", minval=0, step=0.05, group=G3)
+bodyHeavyPct = input.float(0.6, "Leg-out body-heavy %", minval=0, maxval=1, step=0.05, group=G3)
+
+G4 = "4 · Display"
+showInfo = input.bool(true, "Show zone info label (entry, SL, T1, XRPT, qty)", group=G4)
+showMcap = input.bool(true, "Show market-cap check table", group=G4)
+minMcapCr = input.float(50000, "Min market cap (₹ Cr)", minval=0, group=G4)
+
+G5 = "5 · MTF lines"
+showMTF = input.bool(true, "Show other-TF proximal lines", group=G5)
+filterDistantMTF = input.bool(true, "Hide distant MTF lines (display only)", group=G5)
+mtfNearPct = input.float(8.0, "Show lines within % of last price", minval=0.1, maxval=100.0, step=0.5, group=G5)
+tf1 = input.timeframe("3", "TF 1", group=G5)
+tf2 = input.timeframe("5", "TF 2", group=G5)
+tf3 = input.timeframe("10", "TF 3", group=G5)
+tf4 = input.timeframe("15", "TF 4", group=G5)
+tf5 = input.timeframe("30", "TF 5", group=G5)
+tf6 = input.timeframe("60", "TF 6", group=G5)
+tf7 = input.timeframe("75", "TF 7", group=G5, tooltip="75 मिनट सिर्फ़ उन्हीं प्लान पर जिनमें custom timeframe है")
+tf8 = input.timeframe("120", "TF 8", group=G5)
+tf9 = input.timeframe("D", "TF 9", group=G5)
+
+G6 = "6 · Shadows & swings"
+showShadow = input.bool(true, "Shadow when prior zone behind / broken / swing broken", group=G6)
+showFlags = input.bool(true, "Show BASE BREAK / SWING labels", group=G6)
+shadowAtr = input.float(0.08, "Shadow padding × ATR", minval=0, maxval=1, step=0.01, group=G6)
+swingLeft = input.int(6, "Confirmed swing: bars on left", minval=1, maxval=30, group=G6, tooltip="NSE अध्ययन (40 F&O stocks, 5m–1W): ATR×2 वाले swings से सबसे अच्छा मेल N = 6 (हर TF पर 5–6)")
+swingRight = input.int(6, "Confirmed swing: bars on right", minval=1, maxval=30, group=G6, tooltip="ज़्यादा = swing पक्का, पर देर से मार्क होगा")
+
+// ============================================================ COMMON SERIES
+int minBaseCount = math.max(1, math.min(minBaseCountIn, maxBaseCountIn))
+int maxBaseCount = math.max(minBaseCount, maxBaseCountIn)
+float tr_s = ta.tr(true)
+float atr_val = ta.rma(tr_s, atrPeriod)
+float vol_sma = ta.sma(nz(volume), volSmaPeriod)
+float chartSec = timeframe.in_seconds(timeframe.period)
+
+f_type(float sec) =>
+    sec <= 60 ? 1 : sec <= 300 ? 2 : sec <= 1800 ? 3 : sec < 86400 ? 4 : 5
+int ttype = traderTypeIn == "Auto" ? f_type(chartSec) : traderTypeIn == "Aggressive" ? 1 : traderTypeIn == "Hourly" ? 2 : traderTypeIn == "Daily" ? 3 : traderTypeIn == "Weekly/Swing" ? 4 : 5
+float bufPct = ttype <= 2 ? bufAggrPct : ttype == 3 ? bufDailyPct : bufSwingPct
+// DATR = पिछले पूरे दिन का Daily ATR (repaint नहीं)
+float dAtr = request.security(syminfo.tickerid, "D", ta.rma(ta.tr(true), atrPeriod)[1], lookahead=barmerge.lookahead_on)
+
+// ============================================================ CANDIDATE (bar 0 = last leg-out)
+type Candidate
+    bool valid = false
+    string reason = ""
+    bool demand = false
+    string pattern = ""
+    bool reversal = false
+    int bc = 0
+    int nOut = 0
+    float prox = na
+    float dist = na
+    float xrpt = na
+    int score = 0
+    bool hq = false
+
+f_candidate(int bc, int nOut) =>
+    Candidate c = Candidate.new()
+    c.bc := bc
+    c.nOut := nOut
+    int fo = nOut - 1                // पहली leg-out
+    int b0 = nOut                    // सबसे नई boring
+    int bl = nOut + bc - 1           // सबसे पुरानी boring
+    int li = nOut + bc               // leg-in
+    int pi = li + 1                  // leg-in के पीछे वाली candle (CBLI)
+    bool ok = bar_index > pi + 1 and not na(atr_val[pi]) and not na(atr_val[fo])
+    string why = ok ? "" : "data"
+    // ---- Leg-in: filled · TR ≥ ATR × · closing-side wick छोटी
+    float inH = high[li]
+    float inL = low[li]
+    float inO = open[li]
+    float inC = close[li]
+    float inRange = inH - inL
+    bool inBull = inC > inO
+    bool inBear = inC < inO
+    float inBody = math.abs(inC - inO)
+    float inBodyHi = math.max(inO, inC)
+    float inBodyLo = math.min(inO, inC)
+    if ok and (inRange <= 0 or not (inBull or inBear))
+        ok := false
+        why := "Leg-in doji"
+    if ok and inBody / inRange < legInMinBody
+        ok := false
+        why := "Leg-in not filled"
+    if ok and tr_s[li] < legInAtrMult * atr_val[li]
+        ok := false
+        why := "Leg-in TR < ATR"
+    if ok and (inBull ? inH - inC : inC - inL) / inRange > legInMaxCloseWick
+        ok := false
+        why := "Leg-in closing wick"
+    // ---- CBLI: उल्टे रंग की पिछली candle की body बड़ी = trap
+    if ok and useCBLI
+        bool opp = inBull ? close[pi] < open[pi] : close[pi] > open[pi]
+        if opp and math.abs(close[pi] - open[pi]) > cbliMaxBody * inBody
+            ok := false
+            why := "CBLI"
+    // ---- Boring: हर candle TR ≤ ATR ×
+    float baseH = -1e20
+    float baseL = 1e20
+    bool anyBull = false
+    bool anyBear = false
+    if ok
+        for k = b0 to bl
+            if na(atr_val[k]) or tr_s[k] > boringAtrMult * atr_val[k]
+                ok := false
+                why := "Boring TR > ATR"
+                break
+            baseH := math.max(baseH, high[k])
+            baseL := math.min(baseL, low[k])
+            anyBull := anyBull or close[k] > open[k]
+            anyBear := anyBear or close[k] < open[k]
+    float baseRange = baseH - baseL
+    if ok and baseRange <= 0
+        ok := false
+        why := "Boring size 0"
+    // ---- पहली leg-out: रंग = दिशा · TR ≥ ATR × · wick छोटी
+    bool demand = close[fo] > open[fo]
+    bool supply = close[fo] < open[fo]
+    float foRange = high[fo] - low[fo]
+    if ok and not (demand or supply)
+        ok := false
+        why := "Leg-out doji"
+    if ok and tr_s[fo] < legOutAtrMult * atr_val[fo]
+        ok := false
+        why := "Leg-out TR < ATR"
+    if ok and (foRange <= 0 or (foRange - math.abs(close[fo] - open[fo])) / foRange > legOutMaxWick)
+        ok := false
+        why := "Leg-out wick"
+    // ---- Leg-out 2/3: उसी रंग की, open ≈ पिछली close
+    float outH = high[fo]
+    float outL = low[fo]
+    float obHi = math.max(open[fo], close[fo])
+    float obLo = math.min(open[fo], close[fo])
+    if ok and nOut > 1
+        for k = fo - 1 to 0
+            bool same = demand ? close[k] > open[k] : close[k] < open[k]
+            if not same or math.abs(open[k] - close[k + 1]) > legOutJoinTol * atr_val[k + 1]
+                ok := false
+                why := "Leg-outs not continuous"
+                break
+            outH := math.max(outH, high[k])
+            outL := math.min(outL, low[k])
+            obHi := math.max(obHi, open[k], close[k])
+            obLo := math.min(obLo, open[k], close[k])
+    // ---- 1-2-4
+    if ok and inRange < legInToBase * baseRange
+        ok := false
+        why := "1-2-4 leg-in"
+    if ok and (obHi - obLo) < legOutToBase * baseRange
+        ok := false
+        why := "1-2-4 leg-out"
+    string pat = demand ? (inBull ? "RBR" : "DBR") : (inBear ? "DBD" : "RBD")
+    bool reversal = pat == "DBR" or pat == "RBD"
+    // ---- Formation (DBR/RBD): leg-out open, leg-in body के अंदर — कोई tolerance नहीं
+    if ok and useFormation and reversal and (open[fo] > inBodyHi or open[fo] < inBodyLo)
+        ok := false
+        why := "Formation"
+    // ---- White area: पहली leg-out की body, boring की पूरी wick (high–low) न ढके
+    float foBodyHi = math.max(open[fo], close[fo])
+    float foBodyLo = math.min(open[fo], close[fo])
+    bool whiteOK = not (foBodyLo <= baseL and foBodyHi >= baseH)
+    if ok and useWhiteArea and not whiteOK
+        ok := false
+        why := "No white area"
+    // ---- Optional: volume · imbalance
+    if ok and reqVolume and not (nz(volume[fo]) > nz(volume[li]))
+        ok := false
+        why := "Leg-out volume ≤ leg-in"
+    bool imbalance = demand ? (low[fo] > baseH or obHi > inH) : (high[fo] < baseL or obLo < inL)
+    if ok and reqImbalance and not imbalance
+        ok := false
+        why := "No imbalance"
+    if ok
+        c.valid := true
+        c.demand := demand
+        c.pattern := pat
+        c.reversal := reversal
+        c.prox := demand ? baseH : baseL
+        bool course = distalMode == "Pattern lowest/highest (course)"
+        c.dist := demand ? (course ? (reversal ? math.min(baseL, inL, outL) : math.min(baseL, outL)) : baseL) : (course ? (reversal ? math.max(baseH, inH, outH) : math.max(baseH, outH)) : baseH)
+        c.xrpt := demand ? obHi : obLo
+        // ---- Quality score (0–100, सिर्फ़ रैंकिंग)
+        bool hqIn = tr_s[li] >= hqLegInAtr * atr_val[li]
+        bool hqOut = tr_s[fo] >= hqLegOutMult * tr_s[li]
+        int s = bc == 1 ? 15 : bc == 2 ? 10 : 5
+        s += hqIn ? 15 : 0
+        s += hqOut ? 20 : 0
+        s += (not na(vol_sma[fo]) and nz(volume[fo]) > vol_sma[fo]) ? 15 : 0
+        s += (foRange > 0 and math.abs(close[fo] - open[fo]) / foRange >= bodyHeavyPct) ? 15 : 0
+        s += (demand ? anyBear : anyBull) ? 10 : 0
+        s += imbalance ? 10 : 0
+        c.score := s
+        c.hq := hqIn and hqOut
+    c.reason := why
+    c
+
+f_find() =>
+    Candidate best = Candidate.new()
+    bool found = false
+    for n = 1 to maxLegOut
+        if found
+            break
+        for bc = minBaseCount to maxBaseCount
+            Candidate c = f_candidate(bc, n)
+            if c.valid
+                best := c
+                found := true
+                break
+    best
+
+// ============================================================ MTF ENGINE (other timeframes)
+type MtfZone
+    float prox
+    float sl
+    bool demand
+    int entries = 0
+    bool outside = false
+    bool tested = false
+    int startTime
+    int createdBar
+
+f_mtf_engine() =>
+    var array<MtfZone> mz = array.new<MtfZone>()
+    if bar_index >= math.max(atrPeriod, maxBaseCount + maxLegOut + 3, 11) and not na(atr_val)
+        Candidate c = f_find()
+        if c.valid
+            bool dup = false
+            int checked = 0
+            if array.size(mz) > 0
+                for j = array.size(mz) - 1 to 0
+                    MtfZone old = array.get(mz, j)
+                    if old.demand == c.demand and math.abs(old.prox - c.prox) < atr_val * 0.25
+                        dup := true
+                        break
+                    checked += 1
+                    if checked >= 11
+                        break
+            if not dup
+                array.push(mz, MtfZone.new(c.prox, c.dist, c.demand, 0, false, false, time[c.bc + c.nOut], bar_index))
+                if array.size(mz) > MAX_ZONES
+                    array.shift(mz)
+    if array.size(mz) > 0
+        for j = array.size(mz) - 1 to 0
+            MtfZone z = array.get(mz, j)
+            bool dead = false
+            if bar_index > z.createdBar
+                bool touch = z.demand ? low <= z.prox : high >= z.prox
+                bool brk = z.demand ? low <= z.sl : high >= z.sl
+                if brk
+                    dead := true
+                else if not z.tested
+                    if touch
+                        z.tested := true
+                        z.entries := 1
+                        z.outside := false
+                else
+                    if not touch
+                        z.outside := true
+                    else if z.outside
+                        z.entries += 1
+                        z.outside := false
+                        dead := z.entries > maxEntries
+            if dead
+                array.remove(mz, j)
+    float latestD = na
+    float latestS = na
+    int dTime = na
+    int sTime = na
+    if array.size(mz) > 0
+        for j = array.size(mz) - 1 to 0
+            MtfZone z = array.get(mz, j)
+            if z.demand and na(latestD)
+                latestD := z.prox
+                dTime := z.startTime
+            if not z.demand and na(latestS)
+                latestS := z.prox
+                sTime := z.startTime
+            if not na(latestD) and not na(latestS)
+                break
+    [latestD, latestS, dTime, sTime]
+
+f_mtf_confirmed() =>
+    [d, s, dt, st] = f_mtf_engine()
+    [na(d[1]) ? 1e100 : d[1], na(s[1]) ? 1e100 : s[1], na(dt[1]) ? 0 : dt[1], na(st[1]) ? 0 : st[1]]
+
+f_lower(string tf) =>
+    [a, b, at, bt] = request.security_lower_tf(syminfo.tickerid, tf, f_mtf_confirmed(), calc_bars_count=5000)
+    int n = array.size(a)
+    float demand = n > 0 ? array.get(a, n - 1) : 1e100
+    float supply = n > 0 ? array.get(b, n - 1) : 1e100
+    int dTime = n > 0 ? array.get(at, n - 1) : 0
+    int sTime = n > 0 ? array.get(bt, n - 1) : 0
+    [demand, supply, dTime, sTime]
+
+f_higher(string tf) =>
+    request.security(syminfo.tickerid, tf, f_mtf_confirmed(), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on, calc_bars_count=5000)
+
+f_remote(string tf) =>
+    float demand = 1e100
+    float supply = 1e100
+    int dTime = 0
+    int sTime = 0
+    float targetSec = timeframe.in_seconds(tf)
+    if showMTF and not na(chartSec) and not na(targetSec)
+        if targetSec > chartSec
+            [a, b, at, bt] = f_higher(tf)
+            demand := a
+            supply := b
+            dTime := at
+            sTime := bt
+        else if targetSec < chartSec
+            [a, b, at, bt] = f_lower(tf)
+            demand := a
+            supply := b
+            dTime := at
+            sTime := bt
+    [demand == 1e100 ? na : demand, supply == 1e100 ? na : supply, dTime, sTime]
+
+[d1, s1, dt1, st1] = f_remote(tf1)
+[d2, s2, dt2, st2] = f_remote(tf2)
+[d3, s3, dt3, st3] = f_remote(tf3)
+[d4, s4, dt4, st4] = f_remote(tf4)
+[d5, s5, dt5, st5] = f_remote(tf5)
+[d6, s6, dt6, st6] = f_remote(tf6)
+[d7, s7, dt7, st7] = f_remote(tf7)
+[d8, s8, dt8, st8] = f_remote(tf8)
+[d9, s9, dt9, st9] = f_remote(tf9)
+
+// ============================================================ CHART ZONES
+type Zone
+    float prox
+    float dist
+    float entry
+    float sl
+    float tp
+    float xrpt
+    float xrr
+    int qty
+    bool demand
+    string pattern
+    int bc
+    int score
+    bool hq
+    string state = "Fresh"
+    int entries = 0
+    bool outside = false
+    int createdBar
+    int brokenAt = na
+    box zoneBox
+    box shadowBox
+    label infoLabel
+    label tagLabel
+
+var array<Zone> zones = array.new<Zone>()
+var int zonesCreated = 0
+
+f_alive(Zone z) => z.state == "Fresh" or z.state == "Tested"
+f_fmt(float v) => str.tostring(v, format.mintick)
+f_info(Zone z) =>
+    z.pattern + " · " + str.tostring(z.bc) + " boring · Score " + str.tostring(z.score) + (z.hq ? " ★" : "") +
+     "\nEntry " + f_fmt(z.entry) + "  SL " + f_fmt(z.sl) +
+     "\nT1 1:" + str.tostring(targetRR) + " " + f_fmt(z.tp) +
+     "\nXRPT " + f_fmt(z.xrpt) + " (1:" + str.tostring(z.xrr, "#.#") + ")" +
+     "\nQty " + str.tostring(z.qty) + " · " + z.state + (z.entries > 0 ? " " + str.tostring(z.entries) + "/" + str.tostring(maxEntries) : "")
+
+f_paint(Zone z) =>
+    color base = z.demand ? color.green : color.red
+    if z.state == "Fresh"
+        box.set_bgcolor(z.zoneBox, color.new(base, 80))
+        box.set_border_color(z.zoneBox, base)
+        box.set_border_style(z.zoneBox, line.style_solid)
+        box.set_border_width(z.zoneBox, z.hq ? 2 : 1)
+    else if z.state == "Tested"
+        box.set_bgcolor(z.zoneBox, color.new(base, 70))
+        box.set_border_color(z.zoneBox, base)
+        box.set_border_style(z.zoneBox, line.style_dashed)
+        box.set_border_width(z.zoneBox, 2)
+    else
+        color dead = z.state == "Exhausted" ? color.orange : color.gray
+        box.set_bgcolor(z.zoneBox, color.new(dead, 93))
+        box.set_border_color(z.zoneBox, color.new(dead, 70))
+        box.set_border_style(z.zoneBox, line.style_dotted)
+        box.set_border_width(z.zoneBox, 1)
+        if not na(z.shadowBox)
+            box.set_bgcolor(z.shadowBox, color.new(color.gray, 96))
+            box.set_border_color(z.shadowBox, color.new(color.gray, 88))
+    if not na(z.infoLabel)
+        if f_alive(z)
+            label.set_text(z.infoLabel, f_info(z))
+        else
+            label.delete(z.infoLabel)
+            z.infoLabel := na
+    true
+
+// ---- Confirmed swings (ta.pivothigh/low) — chart पर निशान + swing break
+float ph = ta.pivothigh(high, swingLeft, swingRight)
+float pl = ta.pivotlow(low, swingLeft, swingRight)
+plotshape(showFlags and not na(ph), "Swing high", shape.triangledown, location.abovebar, color.new(color.red, 30), offset=-swingRight, size=size.tiny)
+plotshape(showFlags and not na(pl), "Swing low", shape.triangleup, location.belowbar, color.new(color.green, 30), offset=-swingRight, size=size.tiny)
+var float lastSwingHigh = na
+var float lastSwingLow = na
+var int lastSwingHighBar = na
+var int lastSwingLowBar = na
+var int highBreakAt = na
+var int lowBreakAt = na
+if not na(ph)
+    lastSwingHigh := ph
+    lastSwingHighBar := bar_index - swingRight
+    highBreakAt := na
+if not na(pl)
+    lastSwingLow := pl
+    lastSwingLowBar := bar_index - swingRight
+    lowBreakAt := na
+if not na(lastSwingHigh) and na(highBreakAt) and close > lastSwingHigh
+    highBreakAt := bar_index
+if not na(lastSwingLow) and na(lowBreakAt) and close < lastSwingLow
+    lowBreakAt := bar_index
+
+// ---- नया ज़ोन (सिर्फ़ पूरी बनी candle पर)
+if bar_index >= math.max(atrPeriod, maxBaseCount + maxLegOut + 3, 11) and not na(atr_val) and barstate.isconfirmed
+    Candidate c = f_find()
+    if c.valid
+        bool dup = false
+        int checked = 0
+        if array.size(zones) > 0
+            for j = array.size(zones) - 1 to 0
+                Zone old = array.get(zones, j)
+                if f_alive(old) and old.demand == c.demand and math.abs(old.prox - c.prox) < atr_val * 0.25
+                    dup := true
+                    break
+                checked += 1
+                if checked >= 11
+                    break
+        float slBuf = bufferMode == "DATR % (course)" and not na(dAtr) ? dAtr * bufPct / 100 : slBufferAtr * atr_val
+        float sl = c.demand ? c.dist - slBuf : c.dist + slBuf
+        float entry = c.prox
+        float risk = math.abs(entry - sl)
+        if not dup and risk > 0
+            int bLeg = c.nOut + c.bc                 // leg-in offset
+            float tp = c.demand ? entry + risk * targetRR : entry - risk * targetRR
+            float xrr = (c.demand ? c.xrpt - entry : entry - c.xrpt) / risk
+            int qty = int(math.floor(accountCapital * riskPct / 100 / risk))
+            // ---- पुराने ज़ोन: पीछे ज़ोन (behind) · उल्टा ज़ोन तोड़ा (BASE BREAK) · swing break
+            bool behind = false
+            bool baseBreak = false
+            if array.size(zones) > 0
+                for j = array.size(zones) - 1 to 0
+                    Zone old = array.get(zones, j)
+                    if old.createdBar < bar_index - bLeg
+                        if f_alive(old)
+                            behind := true
+                        if old.demand != c.demand and (f_alive(old) or (old.state == "Broken" and not na(old.brokenAt) and old.brokenAt >= bar_index - (c.nOut - 1)))
+                            for k = 0 to c.nOut - 1
+                                if (c.demand and close[k] > old.dist) or (not c.demand and close[k] < old.dist)
+                                    baseBreak := true
+                                    break
+            bool swingBreak = c.demand ? (not na(highBreakAt) and lastSwingHighBar < bar_index - bLeg and highBreakAt >= bar_index - bLeg) : (not na(lowBreakAt) and lastSwingLowBar < bar_index - bLeg and lowBreakAt >= bar_index - bLeg)
+            int leftBar = bar_index - bLeg
+            color zc = c.demand ? color.green : color.red
+            box halo = na
+            if showShadow and (behind or baseBreak or swingBreak)
+                color hc = baseBreak ? color.orange : swingBreak ? color.yellow : color.gray
+                halo := box.new(leftBar, math.max(c.prox, sl) + shadowAtr * atr_val, bar_index + 15, math.min(c.prox, sl) - shadowAtr * atr_val, border_color=color.new(hc, baseBreak ? 15 : 55), border_width=baseBreak ? 3 : swingBreak ? 2 : 1, bgcolor=color.new(hc, baseBreak ? 75 : swingBreak ? 84 : 92))
+            box zb = box.new(leftBar, math.max(c.prox, c.dist), bar_index + 15, math.min(c.prox, c.dist), border_color=zc, bgcolor=color.new(zc, 80))
+            label tag = na
+            if showFlags and (baseBreak or swingBreak)
+                string msg = (baseBreak ? "BASE BREAK" : "") + (baseBreak and swingBreak ? " + " : "") + (swingBreak ? "SWING" : "")
+                tag := label.new(bar_index, c.dist, msg, style=c.demand ? label.style_label_up : label.style_label_down, color=baseBreak ? color.orange : color.yellow, textcolor=color.black, size=size.tiny)
+            label infoLbl = na
+            Zone z = Zone.new(c.prox, c.dist, entry, sl, tp, c.xrpt, xrr, qty, c.demand, c.pattern, c.bc, c.score, c.hq, "Fresh", 0, false, bar_index, na, zb, halo, infoLbl, tag)
+            if showInfo
+                z.infoLabel := label.new(bar_index + 2, c.prox, f_info(z), style=label.style_label_left, color=color.new(zc, 85), textcolor=chart.fg_color, size=size.tiny)
+            f_paint(z)
+            array.push(zones, z)
+            zonesCreated += 1
+            alert(syminfo.ticker + " " + timeframe.period + " नया " + (c.demand ? "Demand" : "Supply") + " ज़ोन " + c.pattern + " · Entry " + f_fmt(entry) + " SL " + f_fmt(sl) + " Score " + str.tostring(c.score), alert.freq_once_per_bar_close)
+            if array.size(zones) > MAX_ZONES
+                Zone gone = array.shift(zones)
+                box.delete(gone.zoneBox)
+                if not na(gone.shadowBox)
+                    box.delete(gone.shadowBox)
+                if not na(gone.infoLabel)
+                    label.delete(gone.infoLabel)
+                if not na(gone.tagLabel)
+                    label.delete(gone.tagLabel)
+
+// ---- State update: Fresh → Tested (entry) → … → Exhausted / Broken (SL)
+if array.size(zones) > 0
+    for j = array.size(zones) - 1 to 0
+        Zone z = array.get(zones, j)
+        if f_alive(z) and bar_index > z.createdBar
+            string before = z.state
+            bool touch = z.demand ? low <= z.entry : high >= z.entry
+            bool hitSL = z.demand ? low <= z.sl : high >= z.sl
+            if hitSL
+                z.state := "Broken"
+                z.brokenAt := bar_index
+            else if z.state == "Fresh"
+                if touch
+                    z.state := "Tested"
+                    z.entries := 1
+                    z.outside := false
+                    alert(syminfo.ticker + " " + timeframe.period + " Entry टच · " + (z.demand ? "Demand" : "Supply") + " " + f_fmt(z.entry), alert.freq_once_per_bar)
+            else
+                if not touch
+                    z.outside := true
+                else if z.outside
+                    z.entries += 1
+                    z.outside := false
+                    if z.entries > maxEntries
+                        z.state := "Exhausted"
+            if f_alive(z)
+                box.set_right(z.zoneBox, bar_index + 15)
+                if not na(z.shadowBox)
+                    box.set_right(z.shadowBox, bar_index + 15)
+                if not na(z.infoLabel)
+                    label.set_x(z.infoLabel, bar_index + 2)
+            if z.state != before or (barstate.islast and f_alive(z))
+                f_paint(z)
+
+// ============================================================ MTF LINES
+var array<line> mtfLines = array.new<line>(18)
+if barstate.islast
+    array<float> levels = array.from(d1, s1, d2, s2, d3, s3, d4, s4, d5, s5, d6, s6, d7, s7, d8, s8, d9, s9)
+    array<int> starts = array.from(dt1, st1, dt2, st2, dt3, st3, dt4, st4, dt5, st5, dt6, st6, dt7, st7, dt8, st8, dt9, st9)
+    array<string> names = array.from(tf1, tf1, tf2, tf2, tf3, tf3, tf4, tf4, tf5, tf5, tf6, tf6, tf7, tf7, tf8, tf8, tf9, tf9)
+    for k = 0 to 17
+        line oldLine = array.get(mtfLines, k)
+        if not na(oldLine)
+            line.delete(oldLine)
+            array.set(mtfLines, k, na)
+        float level = array.get(levels, k)
+        int origin = array.get(starts, k)
+        int endTime = na(time_close) ? time + 60000 : time_close
+        bool nearby = not filterDistantMTF or (close != 0 and math.abs(level - close) / math.abs(close) * 100 <= mtfNearPct)
+        if showMTF and not na(level) and origin > 0 and origin < endTime and nearby
+            color lc = k % 2 == 0 ? color.new(color.teal, 20) : color.new(color.maroon, 20)
+            array.set(mtfLines, k, line.new(origin, level, endTime, level, xloc=xloc.bar_time, color=lc, width=1, style=line.style_dashed))
+
+// ============================================================ MARKET-CAP TABLE
+float sharesOut = request.financial(syminfo.tickerid, "TOTAL_SHARES_OUTSTANDING", "FQ", ignore_invalid_symbol=true)
+var table mcTable = table.new(position.top_right, 2, 3, bgcolor=color.new(color.gray, 90), border_width=0)
+if barstate.islast and showMcap
+    float mcapCr = na(sharesOut) ? na : sharesOut * close / 1.0e7
+    int alive = 0
+    if array.size(zones) > 0
+        for j = 0 to array.size(zones) - 1
+            if f_alive(array.get(zones, j))
+                alive += 1
+    table.cell(mcTable, 0, 0, "Market cap", text_size=size.tiny)
+    table.cell(mcTable, 1, 0, na(mcapCr) ? "n/a" : str.tostring(math.round(mcapCr)) + " Cr " + (mcapCr >= minMcapCr ? "✓" : "✗"), text_size=size.tiny, text_color=na(mcapCr) ? chart.fg_color : mcapCr >= minMcapCr ? color.green : color.red)
+    table.cell(mcTable, 0, 1, "Min", text_size=size.tiny)
+    table.cell(mcTable, 1, 1, str.tostring(minMcapCr) + " Cr", text_size=size.tiny)
+    table.cell(mcTable, 0, 2, "Zones live", text_size=size.tiny)
+    table.cell(mcTable, 1, 2, str.tostring(alive) + " / " + str.tostring(zonesCreated), text_size=size.tiny)
+
+plot(close, "Close Price", display=display.none)

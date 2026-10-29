@@ -2069,7 +2069,7 @@ def htf_conf(spans: Optional[dict], demand: bool, top: float, bot: float, ts: pd
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v32 · ज़ोन स्कैनर · समय-इकाई bug ठीक (ज़्यादातर स्टॉक फेल हो रहे थे) · 2026-10-29"
+APP_BUILD = "v32 · ज़ोन स्कैनर · समय-इकाई bug ठीक + रेंज default सभी · 2026-10-29"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -2080,7 +2080,7 @@ SIDE_HI = {"Demand": "मांग (Demand)", "Supply": "आपूर्ति (
 CAT_HI = {"Reversal": "पलटाव", "Continuation": "निरंतरता"}
 
 UNIVERSES = ["NSE All Futures", "NIFTY 50", "Global Instruments", "Futures + Global"]
-BANDS = ["Daily (EOD)", "Weekly (EOD)", "Monthly (EOD)"]
+BANDS = ["सभी (बैंड नहीं)", "Daily (EOD)", "Weekly (EOD)", "Monthly (EOD)"]
 BAND_TF = {"Daily (EOD)": "1d", "Weekly (EOD)": "1w", "Monthly (EOD)": "1M"}
 TV_TF = {"3m": "3", "5m": "5", "10m": "10", "15m": "15", "30m": "30", "75m": "75",
          "1h": "60", "2h": "120", "4h": "240", "6h": "360", "1d": "D", "1w": "W",
@@ -2567,9 +2567,9 @@ def _scan_all(symbols, inp, opts):
                 for k, v in (r.get("rej") or {}).items():
                     rej_all[k] = rej_all.get(k, 0) + int(v)
 
-    btf = BAND_TF.get(opts.get("band", "Weekly (EOD)"), "1w")
+    btf = BAND_TF.get(opts.get("band") or "")
     bands = {}
-    for s in symbols:
+    for s in (symbols if btf else []):
         b = eod_band(frames.get(s, {}).get(btf), btf, inp.atrPeriod)
         if b:
             bands[s] = b

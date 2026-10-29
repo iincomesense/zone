@@ -2069,7 +2069,7 @@ def htf_conf(spans: Optional[dict], demand: bool, top: float, bot: float, ts: pd
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v34 · EOD रेंज Daily/Weekly/Monthly (default Weekly) · सभी 13 TF · 2026-10-29"
+APP_BUILD = "v35 · Weekly EOD रेंज (default) · चुने TF ही · 2026-10-29"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -2956,7 +2956,7 @@ def _main():
 
     # ── स्कैन रेंज: EOD candle का High+ATR14 … Low−ATR14 बैंड ──
     bands3 = res.get("bands3") or {}
-    sel_band = (res.get("opts") or {}).get("band") or "Weekly (EOD)"
+    sel_band = tb.get("band") or "Weekly (EOD)"                 # ऊपर जो रेंज चुनी है, वही तुरंत लागू
     n_before = len(df_all)
     if bands3:
         def _eod_tags(r):
@@ -2978,6 +2978,8 @@ def _main():
         return
 
     f = df_all.copy()
+    if tb.get("tfs"):                                           # ऊपर चुने TF ही दिखें
+        f = f[f["tf"].isin(list(tb["tfs"]))]
     if tb["side"] != "All":
         f = f[f["side"] == tb["side"]]
     if tb["status"] != "All":
@@ -3007,8 +3009,8 @@ def _main():
         file_name=f"zone_mtf_{datetime.now(IST):%Y%m%d_%H%M}.tsv",
         mime="text/tab-separated-values")
 
-    st.caption(f"ज़ोन दिख रहे: {len(f)} · बने (सभी TF): {res.get('created', 0)} · "
-               f"Dhan future: {res.get('dhan') or 'not configured'}" + _diag_text(res))
+    st.caption(f"**{sel_band} रेंज में ज़ोन: {len(f)}** · TF: {', '.join(tb.get('tfs') or ALL_TFS)} · "
+               f"रेंज से बाहर (छिपे): {max(0, n_before - len(df_all))}" + _diag_text(res))
     if not f.empty:
         try:
             scale = float(max(1.0, f["dist_pct"].quantile(0.90)))

@@ -4,7 +4,7 @@
 // This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
 // © iincomesense
 //
-// Zone MTF (KTP rules) — v24.8 (FLIP: टूटे उल्टे ज़ोन की shadow में boring = High quality · shadow सिर्फ़ टूटने तक · Break zone ग्रे shadow साफ़ दिखे · v24.4 पर: ज़ोन बॉक्स SL/buffer तक · 1:3 टार्गेट लाइन · leg-out में 1:5 वाले ज़ोन ⚡ हाइलाइट)
+// Zone MTF (KTP rules) — v24.9 (FLIP: उल्टे ज़ोन की shadow में boring + leg-out उसे तोड़े = High quality · shadow सिर्फ़ टूटने तक · Break zone ग्रे shadow साफ़ दिखे · v24.4 पर: ज़ोन बॉक्स SL/buffer तक · 1:3 टार्गेट लाइन · leg-out में 1:5 वाले ज़ोन ⚡ हाइलाइट)
 // Dr. Ravi R. Kumar (Know The Pulse / Super Trader) कोर्स के demand-supply ज़ोन नियम।
 //
 // v24 में बदलाव (स्क्रीनशॉट के अनुसार):
@@ -481,7 +481,7 @@ var int zonesCreated = 0
 f_alive(Zone z) => z.state == "Fresh" or z.state == "Tested"
 f_fmt(float v) => str.tostring(v, format.mintick)
 f_info(Zone z) =>
-    (z.flip ? "🔁 FLIP: टूटे " + (z.demand ? "Supply" : "Demand") + " ज़ोन की shadow में boring — High quality\n" : "") +
+    (z.flip ? "🔁 FLIP: " + (z.demand ? "Supply" : "Demand") + " ज़ोन की shadow में boring, leg-out ने उसे तोड़ा — High quality\n" : "") +
      (z.best ? "⚡ Power 1:5+ (leg-out में)\n" : "") +
      z.pattern + " · " + str.tostring(z.bc) + " boring · Score " + str.tostring(z.score) + (z.hq ? " ★" : "") +
      "\nEntry " + f_fmt(z.entry) + "  SL " + f_fmt(z.sl) +
@@ -616,16 +616,23 @@ if bar_index >= math.max(atrPeriod, maxBaseCount + maxLegOut + 3, 11) and not na
             label infoLbl = na
             Zone z = Zone.new(c.prox, c.dist, entry, sl, tp, c.xrpt, xrr, qty, c.demand, c.pattern, c.bc, c.score, c.hq, "Fresh", 0, false, bar_index, na, zb, halo, infoLbl, tag)
             z.best := xrr >= POWER_BEST_RR
-            // ---- FLIP (High quality): उल्टा ज़ोन SL तोड़कर टूटा, फिर उसकी shadow (Proximal–SL ± padding) में
-            //      boring बनी — Supply तोड़कर Demand / Demand तोड़कर Supply
+            // ---- FLIP (High quality): boring उल्टे ज़ोन की shadow (Proximal–SL ± padding) के अंदर बनी और
+            //      leg-out ने उसी उल्टे ज़ोन का SL तोड़ा — Supply तोड़कर Demand / Demand तोड़कर Supply
             if array.size(zones) > 0
-                int oldestBoring = bar_index - (c.nOut + c.bc - 1)
+                float loHi = high[0]
+                float loLo = low[0]
+                for k = 0 to c.nOut - 1
+                    loHi := math.max(loHi, high[k])
+                    loLo := math.min(loLo, low[k])
                 for j = array.size(zones) - 1 to 0
                     Zone old = array.get(zones, j)
-                    if old.demand != c.demand and old.state == "Broken" and old.slHit and not na(old.brokenAt) and old.brokenAt <= oldestBoring
+                    bool oldOK = old.demand != c.demand and old.createdBar < bar_index - bLeg and (f_alive(old) or (old.state == "Broken" and old.slHit and not na(old.brokenAt) and old.brokenAt >= bar_index - (c.nOut - 1)))
+                    if oldOK
                         float sTop = math.max(old.prox, old.sl) + shadowAtr * atr_val
                         float sBot = math.min(old.prox, old.sl) - shadowAtr * atr_val
-                        if c.baseLo <= sTop and c.baseHi >= sBot
+                        bool baseIn = c.baseLo <= sTop and c.baseHi >= sBot
+                        bool outBreaks = c.demand ? loHi >= old.sl : loLo <= old.sl
+                        if baseIn and outBreaks
                             z.flip := true
                             break
             if showInfo

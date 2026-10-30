@@ -2024,7 +2024,7 @@ def htf_conf(spans: Optional[dict], demand: bool, top: float, bot: float, ts: pd
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v54 · Future symbol का रंग = Premium/Discount/Neutral · स्कैन संख्या · 2026-10-30"
+APP_BUILD = "v55 · स्कैन संख्या: स्टॉक + इंडेक्स अलग · 2026-10-30"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -2459,7 +2459,7 @@ def _scan_all(symbols, inp, opts):
             lambda ms: datetime.fromtimestamp(ms / 1000, IST).strftime("%d-%b %H:%M") if ms else "—")
         df = df.sort_values(["dist_pct", "score"], ascending=[True, False]).reset_index(drop=True)
     return dict(rows=df, snaps=snaps, atr=atrs, ltp=ltps, errs=errs, bands=bands, bands3=bands3,
-                band_tf=btf, at=datetime.now(IST), scanned=len(jobs),
+                band_tf=btf, at=datetime.now(IST), scanned=len(jobs), scanned_syms=[s for s, _ in jobs],
                 rej=rej_all, created=created_all, dhan=_DHAN_STATUS.get("status", ""))
 
 
@@ -2902,7 +2902,13 @@ def _main():
         file_name=f"zone_mtf_{datetime.now(IST):%Y%m%d_%H%M}.tsv",
         mime="text/tab-separated-values")
 
-    st.caption(f"**{sel_band} रेंज के अंदर ज़ोन: {int(res.get('scanned') or 0)} / {len(f)}** · TF: {', '.join(tb.get('tfs') or ALL_TFS)}"
+    _ss = list(res.get("scanned_syms") or [])
+    _n_idx = sum(1 for x in _ss if str(x).upper() in IDX_SYMBOLS or str(x).upper().startswith("NIFTY"))
+    _nod = sorted(k for k, v in (res.get("errs") or {}).items() if v == "डेटा नहीं मिला")
+    st.caption(f"**{sel_band} रेंज के अंदर ज़ोन: {int(res.get('scanned') or 0)} / {len(f)}**"
+               + (f" (स्कैन: स्टॉक {len(_ss) - _n_idx} + इंडेक्स {_n_idx}"
+                  + (f" · डेटा नहीं: {', '.join(_nod[:6])}" if _nod else "") + ")" if _ss else "")
+               + f" · TF: {', '.join(tb.get('tfs') or ALL_TFS)}"
                + (f" · Future ज़ोन: {_fut_src}" if _fut_src
                   else f" · Future ज़ोन: डेटा नहीं मिला ({_TV_STATUS.get('status') or _dst or 'not configured'})"))
     if not f.empty:

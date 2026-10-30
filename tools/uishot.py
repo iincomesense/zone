@@ -1,4 +1,4 @@
-"""Streamlit ऐप का tablet-चौड़ाई पर screenshot (⚙️ इनपुट खोलकर)।"""
+"""Streamlit ऐप का tablet-चौड़ाई पर screenshot (⚙️ popover खोलकर)।"""
 import os
 from playwright.sync_api import sync_playwright
 os.makedirs("shots", exist_ok=True)
@@ -10,18 +10,9 @@ with sync_playwright() as p:
         pg.wait_for_timeout(8000)
         pg.screenshot(path=f"shots/{nm}_top.png", full_page=False)
         try:
-            q = pg.locator('div[data-testid="stExpander"]').nth(1)
-            q.screenshot(path=f"shots/{nm}_qbt.png")
-        except Exception as e:  # noqa: BLE001
-            open(f"shots/{nm}_qbt_err.txt", "w").write(repr(e))
-        try:
-            pg.get_by_text("⚙️ इनपुट").first.click()
+            pg.get_by_role("button", name="⚙️").first.click()
             pg.wait_for_timeout(2500)
-            exp = pg.locator('div[data-testid="stExpander"]').first
-            exp.screenshot(path=f"shots/{nm}_inputs.png")
-            for i, tab in enumerate(pg.locator('div[data-testid="stExpander"] button[role="tab"]').all()[:6]):
-                tab.click(); pg.wait_for_timeout(800)
-                exp.screenshot(path=f"shots/{nm}_tab{i}.png")
+            pg.screenshot(path=f"shots/{nm}_inputs.png", full_page=False)
         except Exception as e:  # noqa: BLE001
             open(f"shots/{nm}_err.txt", "w").write(repr(e))
         pg.close()

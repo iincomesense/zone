@@ -2057,7 +2057,7 @@ def htf_conf(spans: Optional[dict], demand: bool, top: float, bot: float, ts: pd
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v56 · यूनिवर्स: NSE All Futures (स्टॉक) · Index (Nifty, BankNifty, GIFT Nifty) · Global · 2026-10-30"
+APP_BUILD = "v57 · ⚙️ ऊपर · कॉलम/CSV/TSV हटाए · Proximal/Entry · Distal/SL · T 1:3 · Qty · 2026-10-30"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -2263,7 +2263,7 @@ def preset_loose():
 # 1 · ऊपर की एक पंक्ति
 # ---------------------------------------------------------------------------
 def top_bar():
-    c = cols([1.5, 2.0, .8, .85, 1.05, 1.15, .95])
+    c = cols([1.5, 2.0, .8, .85, 1.05, .55, 1.15, .95])
     if st.session_state.get("in_band") not in BANDS:          # पुराना विकल्प (v33) → default Weekly
         st.session_state.pop("in_band", None)
     if st.session_state.get("in_uni") not in UNIVERSES:      # पुराना विकल्प (NIFTY 50 / Futures + Global)
@@ -2277,11 +2277,11 @@ def top_bar():
                             label_visibility="collapsed")
     band = c[4].selectbox("EOD रेंज", BANDS, index=1, key="in_band",
                           label_visibility="collapsed")
-    sym_txt = c[5].text_input("स्क्रिप्ट", key="in_symtxt", label_visibility="collapsed",
+    sym_txt = c[6].text_input("स्क्रिप्ट", key="in_symtxt", label_visibility="collapsed",
                               placeholder="RELIANCE, SBIN…")
-    go = put(c[6], "button", "⚡ Scan", type="primary", key="btn_scan")
+    go = put(c[7], "button", "⚡ Scan", type="primary", key="btn_scan")
     return dict(universe=uni, tfs=tuple(tfs), side=side, status=status, band=band,
-                symbols_txt=sym_txt.strip(), go=go)
+                symbols_txt=sym_txt.strip(), go=go, settings_slot=c[5])
 
 
 # ---------------------------------------------------------------------------
@@ -2291,7 +2291,16 @@ def pine_panel(slot=None):
     """Pine "Zone MTF (KTP rules)" v24 के इनपुट — वही क्रम, वही नाम, वही default।"""
     host = slot if slot is not None else st
     D = PineInputs()
-    with host.expander("⚙️ इनपुट", expanded=False):
+    try:
+        box = host.popover("⚙️", help="इनपुट (Pine settings)", width="stretch")
+    except TypeError:
+        try:
+            box = host.popover("⚙️", help="इनपुट (Pine settings)", use_container_width=True)
+        except Exception:                                      # noqa: BLE001
+            box = host.expander("⚙️ इनपुट", expanded=False)
+    except Exception:                                          # noqa: BLE001  (पुराना streamlit)
+        box = host.expander("⚙️ इनपुट", expanded=False)
+    with box:
         b1, b2, b3, _ = st.columns([1, 1, 1.15, 3])
         put(b1, "button", "↺ Pine default", on_click=reset_inputs)
         put(b2, "button", "🔓 ढीला", on_click=preset_loose)
@@ -2625,12 +2634,11 @@ def sheet_html(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0, extra=False,
     heads += [
         _th("Equity (Cash)"), _th("Current-Month Future"),
         _th("TF"), _th("Zone Side"), _th("Pattern"), _th("Status"),
-        _th("Proximal (₹)"), _th("Distal (₹)"), _th("Current LTP"),
-        _th("Distance", dir0="asc"),
+        _th("Proximal / Entry (₹)"), _th("Distal / SL (₹)"), _th("T 1:3"), _th("Qty"),
+        _th("Current LTP"), _th("Distance", dir0="asc"),
     ]
     if extra:
-        heads += [_th("FLIP · निशान"), _th("XRPT (1:x)"), _th("Multi-TF Highlight"),
-                  _th("Entry"), _th("SL"), _th("T 1:3"), _th("Qty"), _th("Pulse · Trend")]
+        heads += [_th("FLIP · निशान"), _th("Multi-TF Highlight"), _th("Pulse · Trend")]
         if show_mcap:
             heads += [_th("Mkt Cap (₹Cr)")]
     body = []
@@ -2672,8 +2680,11 @@ def sheet_html(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0, extra=False,
             _td(str(r["pattern"]), r["pattern"], "ctr"),
             _td(f'<span class="{_STATE_CLS.get(state, "")}">{state}</span>',
                 _STATE_ORDER.get(state, 9)),
-            _td(f'{float(r["prox"]):,.2f}', float(r["prox"]), "num"),
-            _td(f'{float(r["dist"]):,.2f}', float(r["dist"]), "num"),
+            _td(f'{float(r["entry"]):,.2f}', float(r["entry"]), "num"),
+            _td(f'<span title="Distal {float(r["dist"]):,.2f} + buffer">{float(r["sl"]):,.2f}</span>',
+                float(r["sl"]), "num"),
+            _td(f'<b>{float(r["t3"]):,.2f}</b>', float(r["t3"]), "num"),
+            _td(f'{int(r["qty"])}', int(r["qty"]), "num"),
             _td(ltp_txt, ltp if np.isfinite(ltp) else -1e18, "num"),
             _td(_dist_bar(float(r["dist_pct"]), range_pct), float(r["dist_pct"])),
         ]
@@ -2691,13 +2702,7 @@ def sheet_html(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0, extra=False,
             cells += [
                 _td(" ".join(parts) if parts else '<span class="gs-sm">—</span>',
                     f'{2 * int(fl) + int(sw)} {rest}' if parts else "~"),
-                _td(f'{"⚡ " if r.get("best") else ""}1:{float(r.get("xrr", 0)):.1f}',
-                    float(r.get("xrr", 0)), "ctr" + (" gs-star" if r.get("best") else "")),
                 _td(mtf_cell, len(hh)),
-                _td(f'{float(r["entry"]):,.2f}', float(r["entry"]), "num"),
-                _td(f'{float(r["sl"]):,.2f}', float(r["sl"]), "num"),
-                _td(f'<b>{float(r["t3"]):,.2f}</b>', float(r["t3"]), "num"),
-                _td(f'{int(r["qty"])}', int(r["qty"]), "num"),
                 _td(f'{r.get("trend_tf", "")} {r.get("pulse", "")} {r.get("trend", "")}',
                     str(r.get("pulse", "")), "ctr " + ("gs-ok" if r.get("action_ok") else "gs-sm")),
             ]
@@ -2827,8 +2832,7 @@ def _main():
         return
 
     tb = top_bar()
-    ctrl = cols([.01, .85, .7, .7, 4.9])
-    inp, uo = pine_panel(None)          # ⚙️ इनपुट पूरी चौड़ाई में (tablet पर साफ़ दिखे)
+    inp, uo = pine_panel(tb.get("settings_slot"))   # ⚙️ इनपुट: ऊपर की पंक्ति में (EOD रेंज और स्क्रिप्ट के बीच)
 
     # ── स्कैन ────────────────────────────────────────────────────────────
     if tb["go"]:
@@ -2890,11 +2894,10 @@ def _main():
     if tb["status"] != "All":
         f = f[f["state"] == tb["status"]]
 
-    with ctrl[1]:
-        extra_cols = st.toggle("➕ कॉलम", value=bool(uo.get("show_info", True)), key="in_extra")
+    extra_cols = True
     if not _JS_SORT:
-        with ctrl[4]:
-            s1, s2 = st.columns([2.3, 1])
+        s1, s2, _ = st.columns([2.3, 1, 6])
+        if True:
             _sc = s1.selectbox("क्रम", SORT_COLS, key="srt_col",
                                label_visibility="collapsed")
             _sd = s2.selectbox("दिशा", ["▲", "▼"], key="srt_dir",
@@ -2928,14 +2931,6 @@ def _main():
         f = f.copy()
         f["fut_rel"], f["fut_prox"] = rels, fps
         _fut_src = "TradingView" if any(fz_map.values()) else ""
-    tbl = zone_table(f)
-    put(ctrl[2], "download_button", "⬇️ CSV",
-        tbl.to_csv(index=False).encode("utf-8-sig"),
-        file_name=f"zone_mtf_{datetime.now(IST):%Y%m%d_%H%M}.csv", mime="text/csv")
-    put(ctrl[3], "download_button", "⬇️ TSV",
-        tbl.to_csv(index=False, sep="\t").encode("utf-8-sig"),
-        file_name=f"zone_mtf_{datetime.now(IST):%Y%m%d_%H%M}.tsv",
-        mime="text/tab-separated-values")
 
     _ss = list(res.get("scanned_syms") or [])
     _n_idx = sum(1 for x in _ss if str(x).upper() in IDX_SYMBOLS or str(x).upper().startswith("NIFTY"))

@@ -1556,7 +1556,7 @@ def eod_band(df: Optional[pd.DataFrame], tf: str, atr_period: int = 14) -> Optio
 # ---------------------------------------------------------------------------
 _EMPTY_SNAP = {"demand": None, "supply": None, "demand_time": 0, "supply_time": 0}
 _ZCACHE: Dict[tuple, tuple] = {}
-_ZVER = "z28"           # इंजन बदले तो बढ़ाएँ — पुराना कैश अपने आप बेकार
+_ZVER = "z29"           # इंजन बदले तो बढ़ाएँ — पुराना कैश अपने आप बेकार
 
 
 def _inputs_hash(I: PineInputs) -> str:
@@ -1682,6 +1682,9 @@ def htf_hits(z: dict, tf: str, areas: List[dict], zones_all: Dict[str, List[dict
     return found
 
 
+FUT_NEUTRAL_PCT = 0.05     # Future ज़ोन का भाव cash से इतने % के भीतर = Neutral (सिर्फ़ जानकारी)
+
+
 def scan_symbol(symbol: str,
                 frames: Dict[str, pd.DataFrame],
                 daily: Optional[pd.DataFrame],
@@ -1739,6 +1742,7 @@ def scan_symbol(symbol: str,
 
     # ---- Future चार्ट के ज़ोन (Dhan) → उसी TF, उसी दिन, उसी तरफ़ = C+F (सिर्फ़ निशान) ----
     fut_days: Dict[str, set] = {}
+    fut_zs: Dict[str, List[dict]] = {}
     for tf in tfs:
         fdf = (fut_frames or {}).get(tf)
         if fdf is None or len(fdf) < 30:
@@ -1752,6 +1756,7 @@ def scan_symbol(symbol: str,
             fz = engine(fdf, I, tf, htf_daily=(fut_frames or {}).get("1d"), return_all=True)
             _ZCACHE[fkey] = (bid, fz, None, None)
         fut_days[tf] = {(z["demand"], datetime.fromtimestamp(z["time"] / 1000, IST).date()) for z in fz}
+        fut_zs[tf] = list(fz)
 
     rows: List[dict] = []
     px = ltp if ltp else _last_close(frames, tfs)
@@ -1782,6 +1787,17 @@ def scan_symbol(symbol: str,
             z["trend"] = "T↑" if cx.get("trend_up") else "T↓" if cx.get("trend_down") else "T→"
             z["verdict"] = verdict(z)
             z["cf"] = (dem, datetime.fromtimestamp(z["time"] / 1000, IST).date()) in fut_days.get(tf, set())
+            # ---- Future में वही ज़ोन (उसी TF, उसी तरफ़, उसी दिन, सबसे नज़दीकी समय) → Premium / Discount / Neutral ----
+            z["fut_prox"], z["fut_rel"] = None, ""
+            zday = datetime.fromtimestamp(z["time"] / 1000, IST).date()
+            cands = [f for f in fut_zs.get(tf, []) if f["demand"] == dem
+                     and datetime.fromtimestamp(f["time"] / 1000, IST).date() == zday]
+            if cands:
+                fz_ = min(cands, key=lambda f: abs(f["time"] - z["time"]))
+                fp = float(fz_["prox"])
+                diff = (fp - z["prox"]) / z["prox"] * 100.0 if z["prox"] else 0.0
+                z["fut_prox"] = fp
+                z["fut_rel"] = "Neutral" if abs(diff) <= FUT_NEUTRAL_PCT else ("Premium" if diff > 0 else "Discount")
             extra = [t for t, on in (("C+F", z["cf"]), ("MTF", z["mtf"])) if on]
             z["tags"] = " ".join([t for t in [z.get("tags", "")] + extra if t])
             z["dist_pct"] = abs(z["prox"] - px) / px * 100.0 if px else None
@@ -1877,7 +1893,7 @@ def htf_conf(spans: Optional[dict], demand: bool, top: float, bot: float, ts: pd
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v51 · Multi-TF: 1H/2H/4H/D/W/M Pivot (engulf) · Gap · ZIZ · 2026-10-30"
+APP_BUILD = "v52 · Future कॉलम: Premium / Discount / Neutral · 2026-10-30"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -2430,6 +2446,9 @@ def _td(inner: str, dv=None, cls: str = "", style: str = "") -> str:
     return f'<td{c}{st} data-v="{dv}">{inner}</td>'
 
 
+_FUT_COL = {"Premium": "#1D9E75", "Discount": "#E24B4A", "Neutral": "#888780"}
+
+
 def sheet_html(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0, extra=False,
                range_pct: float = 3.0, max_rows: int = 600) -> str:
     """Google-Sheets जैसी टेबल — हर हेडर पर क्लिक करते ही उस कॉलम पर सॉर्ट (▲/▼)।"""
@@ -2474,7 +2493,11 @@ def sheet_html(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0, extra=False,
                 f'title="TradingView · {meta.get("cash")} · {r["tf"]}">{r["symbol"]}</a>',
                 r["symbol"]),
             (_td(f'<a class="fut" href="{u_fut}" target="_blank" rel="noopener" '
-                 f'title="TradingView · {meta.get("fut")} · {r["tf"]}">{fut_lbl}</a>', fut_lbl)
+                 f'title="TradingView · {meta.get("fut")} · {r["tf"]}">{fut_lbl}</a>'
+                 + (f' <span style="color:{_FUT_COL.get(str(r.get("fut_rel")), "inherit")};font-weight:500" '
+                    f'title="Future ज़ोन proximal ₹{float(r["fut_prox"]):,.2f}">{r.get("fut_rel")}</span>'
+                    if r.get("fut_rel") and pd.notna(r.get("fut_prox")) else ""),
+                 f'{str(r.get("fut_rel") or "~")} {fut_lbl}')
              if meta.get("fut") else _td('<span class="gs-sm">—</span>', "~")),
             _td(str(r["tf"]), TF_SECONDS.get(str(r["tf"]), 0)),
             _td(side, "Demand" if dem else "Supply"),
@@ -2532,6 +2555,9 @@ def zone_table(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0) -> pd.DataFra
         "पक्ष": df["side_hi"],
         "पैटर्न": df["pattern"],
         "Proximal": df["prox"].round(2),
+        "Future ज़ोन": [(f"{r} {float(fp):.2f}" if r and fp is not None and pd.notna(fp) else "")
+                        for r, fp in zip(df["fut_rel"] if "fut_rel" in df.columns else [""] * len(df),
+                                         df["fut_prox"] if "fut_prox" in df.columns else [None] * len(df))],
         "एंट्री": df["entry"].round(2),
         "डिस्टल": df["dist"].round(2),
         "SL": df["sl"].round(2),
@@ -2720,7 +2746,9 @@ def _main():
         file_name=f"zone_mtf_{datetime.now(IST):%Y%m%d_%H%M}.tsv",
         mime="text/tab-separated-values")
 
-    st.caption(f"**{sel_band} रेंज के अंदर ज़ोन: {len(f)}** · TF: {', '.join(tb.get('tfs') or ALL_TFS)}")
+    _dst = str(res.get("dhan") or "")
+    st.caption(f"**{sel_band} रेंज के अंदर ज़ोन: {len(f)}** · TF: {', '.join(tb.get('tfs') or ALL_TFS)}"
+               + ("" if _dst.startswith("ok") else f" · Future ज़ोन: Dhan data नहीं ({_dst or 'not configured'})"))
     if not f.empty:
         try:
             scale = float(max(1.0, f["dist_pct"].quantile(0.90)))

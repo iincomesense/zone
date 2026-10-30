@@ -681,6 +681,109 @@ def load_future_frames(symbols: Sequence[str], tfs: Sequence[str]) -> Dict[str, 
 
 
 # ═══════════════════════════════════════════════════════════════════════
+#  भाग 2b-2 · Future candles — TradingView (अनौपचारिक, बिना login) fallback
+#   जब तक Dhan data API नहीं जुड़ा, current-month future (NSE:XYZ1!) की candles यहीं से।
+#   सिर्फ़ टेबल में दिखने वाले ज़ोन के लिए (कम requests), 30 मिनट कैश।
+# ═══════════════════════════════════════════════════════════════════════
+TV_WS_URL = "wss://data.tradingview.com/socket.io/websocket"
+TV_BASE_INTERVAL = {"1m": "1", "5m": "5", "15m": "15", "30m": "30", "60m": "60",
+                    "1d": "1D", "1wk": "1W", "1mo": "1M"}
+_TV_STATUS: Dict[str, str] = {}
+
+
+def _tv_msg(func: str, params: list) -> str:
+    body = json.dumps({"m": func, "p": params}, separators=(",", ":"))
+    return f"~m~{len(body)}~m~{body}"
+
+
+def tv_candles(tv_symbol: str, base: str, n_bars: int = 3000, timeout: float = 12.0) -> Optional[pd.DataFrame]:
+    """TradingView websocket से OHLCV (UTC seconds → IST)। न मिले तो None।"""
+    interval = TV_BASE_INTERVAL.get(base)
+    if not interval:
+        return None
+    try:
+        import random
+        import re
+        import string
+        import websocket                                        # websocket-client
+    except Exception:                                           # noqa: BLE001
+        _TV_STATUS["status"] = "websocket-client package नहीं"
+        return None
+    rnd = "".join(random.choice(string.ascii_lowercase) for _ in range(12))
+    cs = "cs_" + rnd
+    ws = None
+    try:
+        ws = websocket.create_connection(TV_WS_URL, timeout=timeout,
+                                         header=["Origin: https://data.tradingview.com"])
+        sym_json = json.dumps({"symbol": tv_symbol, "adjustment": "splits", "session": "regular"},
+                              separators=(",", ":"))
+        for m in (_tv_msg("set_auth_token", ["unauthorized_user_token"]),
+                  _tv_msg("chart_create_session", [cs, ""]),
+                  _tv_msg("resolve_symbol", [cs, "symbol_1", "=" + sym_json]),
+                  _tv_msg("create_series", [cs, "s1", "s1", "symbol_1", interval, int(n_bars)])):
+            ws.send(m)
+        raw = ""
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            msg = ws.recv()
+            if not msg:
+                continue
+            for hb in re.findall(r"~m~\d+~m~(~h~\d+)", msg):
+                ws.send(f"~m~{len(hb)}~m~{hb}")
+            raw += msg
+            if "series_completed" in msg or "symbol_error" in msg or "series_error" in msg:
+                break
+        if "symbol_error" in raw or "series_error" in raw:
+            _TV_STATUS["status"] = "symbol error"
+            return None
+        rows = []
+        for m in re.finditer(r'"s":\[(.*?)\],"ns"', raw):
+            for b in re.finditer(r'"v":\[([^\]]+)\]', m.group(1)):
+                v = [float(x) for x in b.group(1).split(",")]
+                if len(v) >= 5:
+                    rows.append(v[:6] if len(v) >= 6 else v[:5] + [0.0])
+        if not rows:
+            _TV_STATUS["status"] = "no data"
+            return None
+        df = pd.DataFrame(rows, columns=["t", "open", "high", "low", "close", "volume"])
+        df = df.drop_duplicates("t").sort_values("t")
+        idx = pd.to_datetime(df["t"].astype("int64"), unit="s", utc=True).dt.tz_convert("Asia/Kolkata")
+        df.index = pd.DatetimeIndex(idx)
+        df = df.drop(columns=["t"])
+        if base in ("1d", "1wk", "1mo"):
+            df.index = df.index.normalize()
+        _TV_STATUS["status"] = "ok"
+        return df
+    except Exception as e:                                      # noqa: BLE001
+        _TV_STATUS["status"] = f"error: {type(e).__name__}"
+        return None
+    finally:
+        try:
+            if ws is not None:
+                ws.close()
+        except Exception:                                       # noqa: BLE001
+            pass
+
+
+def tv_future_frame(symbol: str, tf: str) -> Optional[pd.DataFrame]:
+    """current-month future का एक TF (cash जैसे ही base + session resample)।"""
+    fut = (sym_meta(symbol) or {}).get("fut")
+    spec = TF_FETCH.get(tf)
+    if not fut or not spec:
+        return None
+    base, rule = spec
+    key = _ckey("tvfut", fut, base)
+    df = _load(key, min(_bar_ttl(base), 1800))
+    if df is None:
+        df = tv_candles(fut, base)
+        if df is not None and len(df):
+            _save(key, df)
+    if df is None or df.empty:
+        return None
+    return _resample_session(df, rule) if rule else df
+
+
+# ═══════════════════════════════════════════════════════════════════════
 #  भाग 2c · Dhan API — NSE CASH (equity) intraday का लंबा इतिहास (बैकटेस्ट के लिए)
 #   Dhan: 1, 5, 15, 25, 60 मिनट · पिछले 5 साल तक · एक बार में ≤ 90 दिन
 # ═══════════════════════════════════════════════════════════════════════
@@ -1685,6 +1788,34 @@ def htf_hits(z: dict, tf: str, areas: List[dict], zones_all: Dict[str, List[dict
 FUT_NEUTRAL_PCT = 0.05     # Future ज़ोन का भाव cash से इतने % के भीतर = Neutral (सिर्फ़ जानकारी)
 
 
+def fut_rel_of(dem: bool, prox: float, t_ms: int, fzs: List[dict]) -> Tuple[str, Optional[float]]:
+    """उसी तरफ़, उसी दिन, सबसे नज़दीकी समय का future ज़ोन → (Premium/Discount/Neutral, future proximal)।"""
+    zday = datetime.fromtimestamp(t_ms / 1000, IST).date()
+    cands = [f for f in fzs if f["demand"] == dem and datetime.fromtimestamp(f["time"] / 1000, IST).date() == zday]
+    if not cands or not prox:
+        return "", None
+    fz_ = min(cands, key=lambda f: abs(f["time"] - t_ms))
+    fp = float(fz_["prox"])
+    diff = (fp - prox) / prox * 100.0
+    return ("Neutral" if abs(diff) <= FUT_NEUTRAL_PCT else ("Premium" if diff > 0 else "Discount")), fp
+
+
+def tv_future_zones(symbol: str, tf: str, I: "PineInputs") -> List[dict]:
+    """TradingView future candles पर वही इंजन (cash जैसे ही inputs) — कैश के साथ।"""
+    fdf = tv_future_frame(symbol, tf)
+    if fdf is None or len(fdf) < 30:
+        return []
+    ihash = _inputs_hash(I)
+    key = (symbol + "|TVFUT", tf, ihash)
+    bid = _bar_id(fdf)
+    mem = _ZCACHE.get(key)
+    if mem and mem[0] == bid:
+        return mem[1]
+    fz = engine(fdf, I, tf, htf_daily=tv_future_frame(symbol, "1d"), return_all=True)
+    _ZCACHE[key] = (bid, fz, None, None)
+    return fz
+
+
 def scan_symbol(symbol: str,
                 frames: Dict[str, pd.DataFrame],
                 daily: Optional[pd.DataFrame],
@@ -1893,7 +2024,7 @@ def htf_conf(spans: Optional[dict], demand: bool, top: float, bot: float, ts: pd
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v52 · Future कॉलम: Premium / Discount / Neutral · 2026-10-30"
+APP_BUILD = "v53 · Future कॉलम: Dhan न हो तो TradingView से · 2026-10-30"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -2737,6 +2868,29 @@ def _main():
             f["mcap_cr"] = f["symbol"].map(cached_caps(tuple(sorted(f["symbol"].unique())[:120])))
         except Exception:                                        # noqa: BLE001
             f["mcap_cr"] = np.nan
+    _dst = str(res.get("dhan") or "")
+    _fut_src = "Dhan" if _dst.startswith("ok") else ""
+    if not f.empty and not _dst.startswith("ok"):
+        I_ = res.get("inputs") or inp
+        pairs = sorted({(str(a), str(b)) for a, b in zip(f["symbol"], f["tf"])})
+        fz_map: Dict[tuple, List[dict]] = {}
+        with st.spinner(f"Future ज़ोन (TradingView) · {len(pairs)} स्क्रिप्ट/TF…"):
+            with ThreadPoolExecutor(max_workers=6) as ex:
+                futs = {ex.submit(tv_future_zones, a, b, I_): (a, b) for a, b in pairs}
+                for fu in as_completed(futs):
+                    try:
+                        fz_map[futs[fu]] = fu.result()
+                    except Exception:                          # noqa: BLE001
+                        fz_map[futs[fu]] = []
+        rels, fps = [], []
+        for _, r in f.iterrows():
+            rel, fp = fut_rel_of(bool(r["demand"]), float(r["prox"]), int(r["time"]),
+                                 fz_map.get((str(r["symbol"]), str(r["tf"])), []))
+            rels.append(rel)
+            fps.append(fp)
+        f = f.copy()
+        f["fut_rel"], f["fut_prox"] = rels, fps
+        _fut_src = "TradingView" if any(fz_map.values()) else ""
     tbl = zone_table(f)
     put(ctrl[2], "download_button", "⬇️ CSV",
         tbl.to_csv(index=False).encode("utf-8-sig"),
@@ -2746,9 +2900,9 @@ def _main():
         file_name=f"zone_mtf_{datetime.now(IST):%Y%m%d_%H%M}.tsv",
         mime="text/tab-separated-values")
 
-    _dst = str(res.get("dhan") or "")
     st.caption(f"**{sel_band} रेंज के अंदर ज़ोन: {len(f)}** · TF: {', '.join(tb.get('tfs') or ALL_TFS)}"
-               + ("" if _dst.startswith("ok") else f" · Future ज़ोन: Dhan data नहीं ({_dst or 'not configured'})"))
+               + (f" · Future ज़ोन: {_fut_src}" if _fut_src
+                  else f" · Future ज़ोन: डेटा नहीं मिला ({_TV_STATUS.get('status') or _dst or 'not configured'})"))
     if not f.empty:
         try:
             scale = float(max(1.0, f["dist_pct"].quantile(0.90)))

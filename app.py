@@ -148,7 +148,6 @@ GLOBAL_INSTRUMENTS = [
     ("000001",     "000001.SS", "SSE:000001"),
     ("XIN9",       "2823.HK",   "SGX:CN1!"),
     ("JP225",      "^N225",     "TVC:NI225"),
-    ("NIFTY1!",    "^NSEI",     "NSE:NIFTY1!"),
     ("FTSE100",    "^FTSE",     "TVC:UKX"),
     ("DAX",        "^GDAXI",    "XETR:DAX"),
     ("Copper",     "HG=F",      "COMEX:HG1!"),
@@ -165,6 +164,9 @@ GLOBAL_INSTRUMENTS = [
 GLOBAL_MAP = {name.upper(): dict(name=name, yahoo=y, cash=tv, fut=None)
               for name, y, tv in GLOBAL_INSTRUMENTS}
 GLOBAL_SYMBOLS = [g[0] for g in GLOBAL_INSTRUMENTS]
+# Yahoo पर नहीं मिलते — candles TradingView से (पहला न मिले तो अगला)
+TV_ONLY = {"NIFTY1!": ("NSEIX:NIFTY1!", "NSE:NIFTY1!")}           # GIFT NIFTY 50 index futures
+INDEX_UNIVERSE = ["NIFTY", "BANKNIFTY", "NIFTY1!"]                   # Nifty 50 · Nifty Bank · GIFT Nifty
 
 
 def sym_meta(sym: str) -> dict:
@@ -173,6 +175,8 @@ def sym_meta(sym: str) -> dict:
     m = GLOBAL_MAP.get(up)
     if m:
         return m
+    if up in TV_ONLY:
+        return dict(name=sym, yahoo=None, cash=TV_ONLY[up][0], fut=None, tv=TV_ONLY[up])
     if up in IDX_SYMBOLS:                       # सूचकांक (cash index + futures दोनों)
         return dict(name=sym, yahoo=IDX_YAHOO.get(up, "^NSEI"),
                     cash=IDX_CASH_TV.get(up, IDX_TV.get(up)), fut=IDX_TV.get(up))
@@ -292,7 +296,17 @@ def live_fno_universe(timeout: int = 20) -> List[str]:
         except Exception:                                      # noqa: BLE001
             out = []
     if not out:
-        out = list(FALLBACK_FNO)
+        try:
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "fno_list.json"),
+                      encoding="utf-8") as fh:
+                saved = json.load(fh)
+            out = sorted({str(x).strip().upper() for x in (saved.get("symbols") or []) if str(x).strip()})
+        except Exception:                                      # noqa: BLE001
+            out = []
+        if out:
+            _save(key, out)
+            return out
+        return list(FALLBACK_FNO)
     _save(key, out)
     return out
 
@@ -425,11 +439,14 @@ def _resample_session(df: pd.DataFrame, rule: str) -> pd.DataFrame:
 def _download_base(symbols: Sequence[str], base: str) -> Dict[str, pd.DataFrame]:
     """Ek base interval ke liye bulk download (yahi sabse tez raasta hai)."""
     interval, period = BASE_SPEC[base]
+    symbols = [x for x in symbols if _ticker(x)]
     key = _ckey("dl", base, period, tuple(sorted(_ticker(x) for x in symbols)))
     cached = _load(key, _bar_ttl(base))
     if cached is not None:
         return cached
     if yf is None:
+        return {}
+    if not symbols:
         return {}
     tick = {s: _ticker(s) for s in symbols}
     tickers = list(dict.fromkeys(tick.values()))
@@ -490,6 +507,22 @@ def load_frames(symbols: Sequence[str], tfs: Sequence[str], progress=None
                 progress(i, len(bases), base)
             raw[base] = _download_base(symbols, base)
 
+    # TradingView-only symbols (जैसे GIFT NIFTY)
+    for sym in [x for x in symbols if x in TV_ONLY]:
+        for base in bases:
+            key = _ckey("tvonly", sym, base)
+            df = _load(key, min(_bar_ttl(base), 1800))
+            if df is None:
+                for tvs in TV_ONLY[sym]:
+                    try:
+                        df = tv_candles(tvs, base, n_bars=5000)
+                    except Exception:                          # noqa: BLE001
+                        df = None
+                    if df is not None and len(df):
+                        _save(key, df)
+                        break
+            if df is not None and len(df):
+                raw.setdefault(base, {})[sym] = df
     result: Dict[str, Dict[str, pd.DataFrame]] = {}
     for sym in symbols:
         per: Dict[str, pd.DataFrame] = {}
@@ -2024,7 +2057,7 @@ def htf_conf(spans: Optional[dict], demand: bool, top: float, bot: float, ts: pd
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v55 · स्कैन संख्या: स्टॉक + इंडेक्स अलग · 2026-10-30"
+APP_BUILD = "v56 · यूनिवर्स: NSE All Futures (स्टॉक) · Index (Nifty, BankNifty, GIFT Nifty) · Global · 2026-10-30"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -2034,7 +2067,7 @@ ALL_STATES = ["Fresh", "Tested"]
 SIDE_HI = {"Demand": "मांग (Demand)", "Supply": "आपूर्ति (Supply)"}
 CAT_HI = {"Reversal": "पलटाव", "Continuation": "निरंतरता"}
 
-UNIVERSES = ["NSE All Futures", "NIFTY 50", "Global Instruments", "Futures + Global"]
+UNIVERSES = ["NSE All Futures", "Index", "Global Instruments"]
 BANDS = ["Daily (EOD)", "Weekly (EOD)", "Monthly (EOD)"]
 BAND_LETTER = {"1d": "D", "1w": "W", "1M": "M"}
 BAND_TF = {"Daily (EOD)": "1d", "Weekly (EOD)": "1w", "Monthly (EOD)": "1M"}
@@ -2233,6 +2266,8 @@ def top_bar():
     c = cols([1.5, 2.0, .8, .85, 1.05, 1.15, .95])
     if st.session_state.get("in_band") not in BANDS:          # पुराना विकल्प (v33) → default Weekly
         st.session_state.pop("in_band", None)
+    if st.session_state.get("in_uni") not in UNIVERSES:      # पुराना विकल्प (NIFTY 50 / Futures + Global)
+        st.session_state.pop("in_uni", None)
     uni = c[0].selectbox("यूनिवर्स", UNIVERSES, key="in_uni", label_visibility="collapsed")
     tfs = c[1].multiselect("TF", list(ALL_TFS), default=list(ALL_TFS),
                            key="in_tfs", label_visibility="collapsed")
@@ -2744,13 +2779,13 @@ def pick_symbols(tb: dict):
     if txt:
         return [s.strip().upper() for s in txt.replace("\n", ",").split(",") if s.strip()]
     uni = tb["universe"]
-    if uni == "NIFTY 50":
-        return list(dict.fromkeys(NIFTY50))
-    if uni == "Global Instruments":
-        return list(dict.fromkeys(GLOBAL_SYMBOLS))
-    if uni == "Futures + Global":
-        return list(dict.fromkeys(cached_fno() + GLOBAL_SYMBOLS))
-    return list(dict.fromkeys(cached_fno()))
+    if uni == "Index":
+        return list(INDEX_UNIVERSE)
+    if uni == "Global Instruments":                          # load_frames नाम बड़े अक्षरों में रखता है
+        return list(dict.fromkeys(g.upper() for g in GLOBAL_SYMBOLS))
+    # NSE All Futures = सिर्फ़ F&O स्टॉक (इंडेक्स "Index" में)
+    return [x for x in dict.fromkeys(cached_fno())
+            if x not in IDX_SYMBOLS and not str(x).upper().startswith("NIFTY")]
 
 
 # ---------------------------------------------------------------------------

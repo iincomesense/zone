@@ -626,7 +626,14 @@ def _dhan_post(endpoint: str, payload: dict, cid: str, tok: str) -> Optional[pd.
             if r.status_code in (401, 403):
                 _DHAN_STATUS["status"] = "token गलत या पुराना (Dhan में नया token बनाएँ)"
                 return None
-            r.raise_for_status()
+            if r.status_code >= 400:
+                try:
+                    ej = r.json()
+                    msg = f'{ej.get("errorCode", "")} {ej.get("errorMessage", "") or ej.get("message", "")}'.strip()
+                except Exception:                              # noqa: BLE001
+                    msg = r.text[:120]
+                _DHAN_STATUS["status"] = f"Dhan {r.status_code}: {msg}"[:160]
+                return None
             js = r.json()
             data = js.get("data", js) if isinstance(js, dict) else {}
             ts = data.get("timestamp") or []
@@ -666,8 +673,9 @@ def _dhan_base_frame(sec_id: str, base: str, cid: str, tok: str) -> Optional[pd.
         while start <= today:                       # Dhan intraday: एक बार में ≤ 90 दिन
             end = min(start + timedelta(days=89), today + timedelta(days=1))
             part = _dhan_post("/charts/intraday",
-                              dict(common, interval=interval, fromDate=start.isoformat(),
-                                   toDate=end.isoformat()), cid, tok)
+                              dict(common, interval=str(interval),
+                                   fromDate=f"{start.isoformat()} 09:15:00",
+                                   toDate=f"{end.isoformat()} 15:30:00"), cid, tok)
             if part is not None and len(part):
                 parts.append(part)
             start = end + timedelta(days=1)
@@ -678,6 +686,21 @@ def _dhan_base_frame(sec_id: str, base: str, cid: str, tok: str) -> Optional[pd.
     if df is not None and len(df):
         _save(key, df)
     return df
+
+
+def dhan_future_frame(symbol: str, tf: str, sec_id: Optional[str]) -> Optional[pd.DataFrame]:
+    """Dhan से current-month future का एक TF (cash जैसे ही base + session resample)।"""
+    cid, tok = dhan_creds()
+    spec = TF_FETCH.get(tf)
+    if not cid or not tok or not sec_id or not spec:
+        return None
+    base, rule = spec
+    if base not in _DHAN_BASE:
+        return None
+    df = _dhan_base_frame(sec_id, base, cid, tok)
+    if df is None or df.empty:
+        return None
+    return _resample_session(df, rule) if rule else df
 
 
 def load_future_frames(symbols: Sequence[str], tfs: Sequence[str]) -> Dict[str, Dict[str, pd.DataFrame]]:
@@ -1833,6 +1856,21 @@ def fut_rel_of(dem: bool, prox: float, t_ms: int, fzs: List[dict]) -> Tuple[str,
     return ("Neutral" if abs(diff) <= FUT_NEUTRAL_PCT else ("Premium" if diff > 0 else "Discount")), fp
 
 
+def dhan_future_zones(symbol: str, tf: str, I: "PineInputs", sec_id: Optional[str]) -> List[dict]:
+    """Dhan future candles पर वही इंजन — कैश के साथ।"""
+    fdf = dhan_future_frame(symbol, tf, sec_id)
+    if fdf is None or len(fdf) < 30:
+        return []
+    key = (symbol + "|DHFUT", tf, _inputs_hash(I))
+    bid = _bar_id(fdf)
+    mem = _ZCACHE.get(key)
+    if mem and mem[0] == bid:
+        return mem[1]
+    fz = engine(fdf, I, tf, htf_daily=dhan_future_frame(symbol, "1d", sec_id), return_all=True)
+    _ZCACHE[key] = (bid, fz, None, None)
+    return fz
+
+
 def tv_future_zones(symbol: str, tf: str, I: "PineInputs") -> List[dict]:
     """TradingView future candles पर वही इंजन (cash जैसे ही inputs) — कैश के साथ।"""
     fdf = tv_future_frame(symbol, tf)
@@ -2057,7 +2095,7 @@ def htf_conf(spans: Optional[dict], demand: bool, top: float, bot: float, ts: pd
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v57 · ⚙️ ऊपर · कॉलम/CSV/TSV हटाए · Proximal/Entry · Distal/SL · T 1:3 · Qty · 2026-10-30"
+APP_BUILD = "v58 · Future: Dhan (टेबल की पंक्तियाँ) → न मिले तो TradingView · Dhan status दिखे · 2026-10-30"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -2454,7 +2492,7 @@ def _scan_all(symbols, inp, opts):
     tfs = list(opts["tfs"]) or list(ALL_TFS)
     need = list(dict.fromkeys(list(tfs) + ["75m", "1h", "2h", "4h", "1d", "1w", "1M"]))
     frames = cached_frames(tuple(symbols), tuple(need))
-    fut_all = cached_fut_frames(tuple(symbols), tuple(tfs)) if all(dhan_creds()) else {}
+    fut_all: Dict[str, Dict[str, pd.DataFrame]] = {}       # future ज़ोन अब सिर्फ़ टेबल वाली पंक्तियों के लिए (_main)
     rows, snaps, atrs, ltps, errs = [], {}, {}, {}, {}
     rej_all: Dict[str, int] = {}
     created_all = 0
@@ -2908,29 +2946,59 @@ def _main():
             f["mcap_cr"] = f["symbol"].map(cached_caps(tuple(sorted(f["symbol"].unique())[:120])))
         except Exception:                                        # noqa: BLE001
             f["mcap_cr"] = np.nan
-    _dst = str(res.get("dhan") or "")
-    _fut_src = "Dhan" if _dst.startswith("ok") else ""
-    if not f.empty and not _dst.startswith("ok"):
+    _fut_src = ""
+    _dh_cid, _dh_tok = dhan_creds()
+    if not f.empty:
         I_ = res.get("inputs") or inp
         pairs = sorted({(str(a), str(b)) for a, b in zip(f["symbol"], f["tf"])})
         fz_map: Dict[tuple, List[dict]] = {}
-        with st.spinner(f"Future ज़ोन (TradingView) · {len(pairs)} स्क्रिप्ट/TF…"):
-            with ThreadPoolExecutor(max_workers=6) as ex:
-                futs = {ex.submit(tv_future_zones, a, b, I_): (a, b) for a, b in pairs}
-                for fu in as_completed(futs):
-                    try:
-                        fz_map[futs[fu]] = fu.result()
-                    except Exception:                          # noqa: BLE001
-                        fz_map[futs[fu]] = []
-        rels, fps = [], []
+        srcs = set()
+        if _dh_cid and _dh_tok:
+            stk = sorted({a for a, _ in pairs if a not in IDX_SYMBOLS and a not in GLOBAL_MAP and a not in TV_ONLY})
+            with st.spinner(f"Future ज़ोन (Dhan) · {len(pairs)} स्क्रिप्ट/TF…"):
+                try:
+                    ids = _dhan_future_ids(stk) if stk else {}
+                except Exception:                              # noqa: BLE001
+                    ids = {}
+                if stk and not ids:
+                    _DHAN_STATUS.setdefault("status", "future security id नहीं मिले")
+                with ThreadPoolExecutor(max_workers=3) as ex:
+                    futs = {ex.submit(dhan_future_zones, a, b, I_, ids.get(a)): (a, b) for a, b in pairs if ids.get(a)}
+                    for fu in as_completed(futs):
+                        try:
+                            zz = fu.result()
+                        except Exception:                      # noqa: BLE001
+                            zz = []
+                        if zz:
+                            fz_map[futs[fu]] = zz
+            if fz_map:
+                srcs.add("Dhan")
+        rest = [pq for pq in pairs if pq not in fz_map]
+        if rest:
+            with st.spinner(f"Future ज़ोन (TradingView) · {len(rest)} स्क्रिप्ट/TF…"):
+                with ThreadPoolExecutor(max_workers=6) as ex:
+                    futs = {ex.submit(tv_future_zones, a, b, I_): (a, b) for a, b in rest}
+                    got = False
+                    for fu in as_completed(futs):
+                        try:
+                            zz = fu.result()
+                        except Exception:                      # noqa: BLE001
+                            zz = []
+                        fz_map[futs[fu]] = zz
+                        got = got or bool(zz)
+            if got:
+                srcs.add("TradingView")
+        rels, fps, tgs = [], [], []
         for _, r in f.iterrows():
             rel, fp = fut_rel_of(bool(r["demand"]), float(r["prox"]), int(r["time"]),
                                  fz_map.get((str(r["symbol"]), str(r["tf"])), []))
             rels.append(rel)
             fps.append(fp)
+            t0 = str(r.get("tags") or "")
+            tgs.append((t0 + " C+F").strip() if rel and "C+F" not in t0.split() else t0)
         f = f.copy()
-        f["fut_rel"], f["fut_prox"] = rels, fps
-        _fut_src = "TradingView" if any(fz_map.values()) else ""
+        f["fut_rel"], f["fut_prox"], f["tags"] = rels, fps, tgs
+        _fut_src = " + ".join(x for x in ("Dhan", "TradingView") if x in srcs)
 
     _ss = list(res.get("scanned_syms") or [])
     _n_idx = sum(1 for x in _ss if str(x).upper() in IDX_SYMBOLS or str(x).upper().startswith("NIFTY"))
@@ -2940,7 +3008,9 @@ def _main():
                   + (f" · डेटा नहीं: {', '.join(_nod[:6])}" if _nod else "") + ")" if _ss else "")
                + f" · TF: {', '.join(tb.get('tfs') or ALL_TFS)}"
                + (f" · Future ज़ोन: {_fut_src}" if _fut_src
-                  else f" · Future ज़ोन: डेटा नहीं मिला ({_TV_STATUS.get('status') or _dst or 'not configured'})"))
+                  else f" · Future ज़ोन: डेटा नहीं मिला ({_TV_STATUS.get('status') or 'no data'})")
+               + (f" · Dhan: {'ok' if 'Dhan' in _fut_src else (_DHAN_STATUS.get('status') or 'no data')}"
+                  if (_dh_cid and _dh_tok) else " · Dhan: not configured"))
     if not f.empty:
         try:
             scale = float(max(1.0, f["dist_pct"].quantile(0.90)))

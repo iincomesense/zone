@@ -14,7 +14,7 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -r requirements.txt
-      - run: python tools/tv_fut_test.py
+      - run: python tools/fno_check.py
       - name: save
         run: |
           git config user.name "diag-bot"

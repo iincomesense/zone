@@ -2024,7 +2024,7 @@ def htf_conf(spans: Optional[dict], demand: bool, top: float, bot: float, ts: pd
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v53 · Future कॉलम: Dhan न हो तो TradingView से · 2026-10-30"
+APP_BUILD = "v54 · Future symbol का रंग = Premium/Discount/Neutral · स्कैन संख्या · 2026-10-30"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -2623,11 +2623,13 @@ def sheet_html(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0, extra=False,
             _td(f'<a href="{u_cash}" target="_blank" rel="noopener" '
                 f'title="TradingView · {meta.get("cash")} · {r["tf"]}">{r["symbol"]}</a>',
                 r["symbol"]),
-            (_td(f'<a class="fut" href="{u_fut}" target="_blank" rel="noopener" '
-                 f'title="TradingView · {meta.get("fut")} · {r["tf"]}">{fut_lbl}</a>'
-                 + (f' <span style="color:{_FUT_COL.get(str(r.get("fut_rel")), "inherit")};font-weight:500" '
-                    f'title="Future ज़ोन proximal ₹{float(r["fut_prox"]):,.2f}">{r.get("fut_rel")}</span>'
-                    if r.get("fut_rel") and pd.notna(r.get("fut_prox")) else ""),
+            (_td(f'<a class="fut" href="{u_fut}" target="_blank" rel="noopener"'
+                 + (f' style="color:{_FUT_COL[str(r.get("fut_rel"))]} !important"'
+                    if str(r.get("fut_rel") or "") in _FUT_COL else "")
+                 + f' title="TradingView · {meta.get("fut")} · {r["tf"]}'
+                 + (f' · {r.get("fut_rel")} · Future ज़ोन ₹{float(r["fut_prox"]):,.2f}'
+                    if r.get("fut_rel") and pd.notna(r.get("fut_prox")) else "")
+                 + f'">{fut_lbl}</a>',
                  f'{str(r.get("fut_rel") or "~")} {fut_lbl}')
              if meta.get("fut") else _td('<span class="gs-sm">—</span>', "~")),
             _td(str(r["tf"]), TF_SECONDS.get(str(r["tf"]), 0)),
@@ -2900,7 +2902,7 @@ def _main():
         file_name=f"zone_mtf_{datetime.now(IST):%Y%m%d_%H%M}.tsv",
         mime="text/tab-separated-values")
 
-    st.caption(f"**{sel_band} रेंज के अंदर ज़ोन: {len(f)}** · TF: {', '.join(tb.get('tfs') or ALL_TFS)}"
+    st.caption(f"**{sel_band} रेंज के अंदर ज़ोन: {int(res.get('scanned') or 0)} / {len(f)}** · TF: {', '.join(tb.get('tfs') or ALL_TFS)}"
                + (f" · Future ज़ोन: {_fut_src}" if _fut_src
                   else f" · Future ज़ोन: डेटा नहीं मिला ({_TV_STATUS.get('status') or _dst or 'not configured'})"))
     if not f.empty:

@@ -1890,7 +1890,8 @@ def htf_areas(frames: Dict[str, pd.DataFrame]) -> List[dict]:
                     ऊपर — पहली हरी, दूसरी लाल और लाल की close < हरी की open।
       Area दोनों candles की wick तक (नीचे: सबसे नीचा low ↔ पहली close/दूसरी open · ऊपर: close/open ↔ सबसे ऊँचा high)।
     Gap: पहली candle की body और दूसरी की body के बीच की खाली जगह (bodies आपस में न छुएँ),
-      कम से कम ATR × GAP_MIN_ATR।"""
+      कम से कम ATR × GAP_MIN_ATR।
+    दिशा: नीचे का pivot और gap-up = Demand ज़ोन के लिए · ऊपर का pivot और gap-down = Supply ज़ोन के लिए।"""
     out: List[dict] = []
     for htf, name, _days in HTF_AREA_TFS:
         df = frames.get(htf)
@@ -1908,19 +1909,19 @@ def htf_areas(frames: Dict[str, pd.DataFrame]) -> List[dict]:
             end = int(t[j]) + sec * 1000                       # दूसरी candle पूरी होने का समय
             if c[i] < o[i] and c[j] > o[j] and c[j] > o[i]:
                 out.append(dict(tf=htf, name=name, kind="Pivot", lo=float(min(l[i], l[j])),
-                                hi=float(max(c[i], o[j])), t=int(t[j]), end=end))
+                                hi=float(max(c[i], o[j])), t=int(t[j]), end=end, demand=True))
             elif c[i] > o[i] and c[j] < o[j] and c[j] < o[i]:
                 out.append(dict(tf=htf, name=name, kind="Pivot", lo=float(min(c[i], o[j])),
-                                hi=float(max(h[i], h[j])), t=int(t[j]), end=end))
+                                hi=float(max(h[i], h[j])), t=int(t[j]), end=end, demand=False))
             bi_hi, bi_lo = max(o[i], c[i]), min(o[i], c[i])
             bj_hi, bj_lo = max(o[j], c[j]), min(o[j], c[j])
             a_ = atr[j] if np.isfinite(atr[j]) else (atr[i] if np.isfinite(atr[i]) else 0.0)
             if bj_lo > bi_hi and bj_lo - bi_hi >= GAP_MIN_ATR * a_:          # gap-up
                 out.append(dict(tf=htf, name=name, kind="Gap", lo=float(bi_hi), hi=float(bj_lo),
-                                t=int(t[j]), end=end))
+                                t=int(t[j]), end=end, demand=True))
             elif bj_hi < bi_lo and bi_lo - bj_hi >= GAP_MIN_ATR * a_:        # gap-down
                 out.append(dict(tf=htf, name=name, kind="Gap", lo=float(bj_hi), hi=float(bi_lo),
-                                t=int(t[j]), end=end))
+                                t=int(t[j]), end=end, demand=False))
         # area तभी तक मान्य जब तक भाव पहली बार उसमें लौटे — ज़ोन उसी पहली वापसी पर बना हो
         idx_by_t = {int(x): k for k, x in enumerate(t)}
         for a in out:
@@ -1965,8 +1966,8 @@ def htf_hits(z: dict, tf: str, areas: List[dict], zones_all: Dict[str, List[dict
     for kind in ("Pivot", "Gap"):
         best = None
         for a in areas:
-            if a["kind"] != kind:
-                continue
+            if a["kind"] != kind or bool(a.get("demand", z.get("demand"))) != bool(z.get("demand")):
+                continue                                        # Demand ज़ोन ↔ नीचे का pivot / gap-up · Supply ↔ ऊपर का pivot / gap-down
             asec = TF_SECONDS.get(a["tf"], 0)
             if asec <= sec:
                 continue
@@ -2325,7 +2326,7 @@ def htf_conf(spans: Optional[dict], demand: bool, top: float, bot: float, ts: pd
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v61 · Pivot/Gap: boring की body area के अंदर, area के बाद · Gap = body gap ≥ 0.2 ATR · symbol ✓ हटाया · 2026-10-31"
+APP_BUILD = "v62 · Pivot/Gap की दिशा: Demand ↔ नीचे का pivot / gap-up · Supply ↔ ऊपर का pivot / gap-down · 2026-10-31"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")

@@ -1921,6 +1921,21 @@ def htf_areas(frames: Dict[str, pd.DataFrame]) -> List[dict]:
             elif bj_hi < bi_lo and bi_lo - bj_hi >= GAP_MIN_ATR * a_:        # gap-down
                 out.append(dict(tf=htf, name=name, kind="Gap", lo=float(bj_hi), hi=float(bi_lo),
                                 t=int(t[j]), end=end))
+        # area तभी तक मान्य जब तक भाव पहली बार उसमें लौटे — ज़ोन उसी पहली वापसी पर बना हो
+        idx_by_t = {int(x): k for k, x in enumerate(t)}
+        for a in out:
+            if a["tf"] != htf or "till" in a:
+                continue
+            j = idx_by_t.get(int(a["t"]))
+            if j is None or j + 1 >= len(df):
+                a["till"] = None                                # अभी तक भाव नहीं लौटा
+                continue
+            hit = (l[j + 1:] <= a["hi"]) & (h[j + 1:] >= a["lo"])
+            if hit.any():
+                k = j + 1 + int(np.argmax(hit))
+                a["till"] = int(t[k]) + sec * 1000              # पहली वापसी वाली candle का अंत
+            else:
+                a["till"] = None
     return out
 
 
@@ -1958,6 +1973,8 @@ def htf_hits(z: dict, tf: str, areas: List[dict], zones_all: Dict[str, List[dict
             days = next(d for t_, _, d in HTF_AREA_TFS if t_ == a["tf"])
             if int(a.get("end", a["t"])) > zt or a["t"] < zt - days * 86_400_000:
                 continue                                        # area पहले पूरा बना हो, ज़ोन उसके सामने
+            if a.get("till") is not None and zt > int(a["till"]):
+                continue                                        # भाव पहले ही area में लौट चुका — पुराना area
             if a["lo"] <= blo and bhi <= a["hi"] and (best is None or asec < best[0]):
                 best = (asec, f'{a["name"]}-{kind}')
         if best:

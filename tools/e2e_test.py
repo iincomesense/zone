@@ -20,8 +20,10 @@ pairs = sorted({(z["symbol"], z["tf"]) for z in rows})
 t1 = time.time()
 from concurrent.futures import ThreadPoolExecutor
 with ThreadPoolExecutor(8) as ex:
-    res = dict(zip(pairs, ex.map(lambda pq: A.tv_cash_zones(pq[0], pq[1], I), pairs)))
-    fres = dict(zip(pairs, ex.map(lambda pq: A.tv_future_zones(pq[0], pq[1], I), pairs)))
+    fc = {pq: ex.submit(A.tv_cash_zones, pq[0], pq[1], I) for pq in pairs}
+    ff = {pq: ex.submit(A.tv_future_zones, pq[0], pq[1], I) for pq in pairs}
+    res = {k: v.result() for k, v in fc.items()}
+    fres = {k: v.result() for k, v in ff.items()}
 out.append(f"TradingView cash+future check {len(pairs)} pairs: {time.time()-t1:.1f}s")
 ok = 0
 for z in rows:

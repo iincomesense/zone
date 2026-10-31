@@ -2326,7 +2326,7 @@ def htf_conf(spans: Optional[dict], demand: bool, top: float, bot: float, ts: pd
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v62 · Pivot/Gap की दिशा: Demand ↔ नीचे का pivot / gap-up · Supply ↔ ऊपर का pivot / gap-down · 2026-10-31"
+APP_BUILD = "v63 · निशान + Multi-TF एक कॉलम · ▲▼ क्रम बटन · टेबल अपने-आप फिट · 2026-10-31"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -2421,9 +2421,16 @@ def is_dark() -> bool:
 SHEET_CSS = r"""
 .gs-wrap{border-radius:6px;overflow:hidden;}
 .gs-scroll{max-height:min(72vh,760px);overflow:auto;}
-table.gs{border-collapse:separate;border-spacing:0;width:100%;
+table.gs{border-collapse:separate;border-spacing:0;width:max-content;min-width:100%;
          font-family:Roboto,'Noto Sans Devanagari',Arial,sans-serif;font-size:12.5px;}
-table.gs th,table.gs td{padding:4px 9px;white-space:nowrap;vertical-align:middle;}
+table.gs th,table.gs td{padding:4px 8px;white-space:nowrap;vertical-align:middle;}
+table.gs td.gs-tags{white-space:normal;max-width:260px;min-width:90px;line-height:1.55;}
+.gs-chip{display:inline-block;padding:0 6px;margin:1px 3px 1px 0;border-radius:9px;font-size:11px;
+         font-weight:600;border:1px solid currentColor;line-height:16px;white-space:nowrap;}
+.gs-lbl{vertical-align:middle;}
+.gs-ar{display:inline-flex;flex-direction:column;margin-left:5px;vertical-align:middle;line-height:8px;}
+.gs-ar b{font-size:8px;opacity:.35;cursor:pointer;padding:0 2px;}
+.gs-ar b:hover{opacity:1;}
 table.gs thead th{position:sticky;top:0;font-weight:600;text-align:left;z-index:2;
          padding-top:7px;padding-bottom:7px;}
 table.gs th.gs-rn,table.gs td.gs-rn{position:sticky;left:0;z-index:1;
@@ -2442,9 +2449,7 @@ table.gs a.fut{font-weight:700;}
 .gs-sm{font-size:11px;opacity:.85;}
 table.gs thead th.srt{cursor:pointer;}
 table.gs thead th.srt:hover{filter:brightness(1.18);}
-table.gs thead th.srt::after{content:"\21C5";font-size:9px;opacity:.40;margin-left:5px;}
-table.gs thead th.srt.s-asc::after{content:"\25B2";opacity:.95;}
-table.gs thead th.srt.s-desc::after{content:"\25BC";opacity:.95;}
+table.gs thead th.srt.s-asc .ar-a,table.gs thead th.srt.s-desc .ar-d{opacity:1;color:#e3b341;}
 """
 
 SHEET_CSS_DARK = """
@@ -2844,8 +2849,11 @@ _SORT_JS = r"""
     if(!tb) return;
     ths.forEach(function(th, idx){
       if(!th.hasAttribute('data-sort')) return;
-      th.addEventListener('click', function(){
+      th.addEventListener('click', function(ev){
         var dir = th.classList.contains('s-asc') ? 'desc' : 'asc';
+        var tg = ev && ev.target;
+        if(tg && tg.classList && tg.classList.contains('ar-a')) dir = 'asc';
+        if(tg && tg.classList && tg.classList.contains('ar-d')) dir = 'desc';
         ths.forEach(function(o){ o.classList.remove('s-asc','s-desc'); });
         th.classList.add(dir === 'asc' ? 's-asc' : 's-desc');
         var rows = Array.prototype.slice.call(tb.querySelectorAll('tr'));
@@ -2881,7 +2889,9 @@ def _th(label: str, sortable: bool = True, dir0: str = "") -> str:
         return f"<th>{label}</th>"
     cls = "srt" + (f" s-{dir0}" if dir0 else "")
     d = f' data-dir="{dir0}"' if dir0 else ""
-    return f'<th class="{cls}" data-sort="1"{d}>{label}</th>'
+    return (f'<th class="{cls}" data-sort="1"{d}><span class="gs-lbl">{label}</span>'
+            '<span class="gs-ar"><b class="ar-a" title="बढ़ता क्रम (छोटा → बड़ा)">▲</b>'
+            '<b class="ar-d" title="घटता क्रम (बड़ा → छोटा)">▼</b></span></th>')
 
 
 def _td(inner: str, dv=None, cls: str = "", style: str = "") -> str:
@@ -2911,7 +2921,7 @@ def sheet_html(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0, extra=False,
         _th("Current LTP"), _th("Distance", dir0="asc"),
     ]
     if extra:
-        heads += [_th("FLIP · निशान"), _th("Multi-TF Highlight"), _th("Pulse · Trend")]
+        heads += [_th("निशान · Multi-TF"), _th("Pulse · Trend")]
         if show_mcap:
             heads += [_th("Mkt Cap (₹Cr)")]
     body = []
@@ -2928,10 +2938,6 @@ def sheet_html(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0, extra=False,
         state = str(r["state"])
         mtf_n = int(r.get("mtf_n", 0) or 0)
         hh = list(r.get("htf_hits") or []) if isinstance(r.get("htf_hits"), (list, tuple)) else []
-        mparts = []
-        if hh:
-            mparts.append('<b style="color:#BA7517">' + " · ".join(hh) + '</b>')
-        mtf_cell = " ".join(mparts) if mparts else '<span class="gs-sm">—</span>' 
         ltp = float(r["ltp"]) if pd.notna(r.get("ltp")) else float("nan")
         ltp_txt = f"₹{ltp:,.2f}" if np.isfinite(ltp) else "—"
         cells = [
@@ -2947,7 +2953,7 @@ def sheet_html(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0, extra=False,
                     if r.get("fut_rel") and pd.notna(r.get("fut_prox")) else "")
                  + f'">{fut_lbl}</a>',
                  f'{str(r.get("fut_rel") or "~")} {fut_lbl}')
-             if meta.get("fut") else _td('<span class="gs-sm">—</span>', "~")),
+             if meta.get("fut") else _td("", "~")),
             _td(str(r["tf"]), TF_SECONDS.get(str(r["tf"]), 0)),
             _td(side, "Demand" if dem else "Supply"),
             _td(str(r["pattern"]), r["pattern"], "ctr"),
@@ -2964,25 +2970,26 @@ def sheet_html(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0, extra=False,
         if extra:
             fl = bool(r.get("flip"))
             sw = bool(r.get("sw_brk"))
-            rest = " ".join(t for t in str(r.get("tags") or "").split() if t not in ("🔁FLIP", "SW-BRK"))
-            parts = []
+            rest = [t for t in str(r.get("tags") or "").split() if t not in ("🔁FLIP", "SW-BRK")]
+            chips = []
             if fl:
-                parts.append('<b style="color:#7F77DD">🔁 FLIP</b>')
+                chips.append('<span class="gs-chip" style="color:#9b8cff">🔁 FLIP</span>')
             if sw:
-                parts.append(f'<b style="color:#1D9E75">{"🔺" if r["demand"] else "🔻"} SW-BRK</b>')
-            if rest:
-                parts.append(f'<span class="gs-star">{rest}</span>')
+                chips.append(f'<span class="gs-chip" style="color:#1D9E75">{"🔺" if r["demand"] else "🔻"} SW-BRK</span>')
+            for t in hh:
+                chips.append(f'<span class="gs-chip" style="color:#e08a1e">{t}</span>')
+            for t in rest:
+                chips.append(f'<span class="gs-chip gs-star">{t}</span>')
+            score_tag = 100 * int(fl) + 50 * int(sw) + 10 * len(hh) + len(rest)
             cells += [
-                _td(" ".join(parts) if parts else '<span class="gs-sm">—</span>',
-                    f'{2 * int(fl) + int(sw)} {rest}' if parts else "~"),
-                _td(mtf_cell, len(hh)),
+                _td(" ".join(chips), score_tag, "gs-tags"),
                 _td(f'{r.get("trend_tf", "")} {r.get("pulse", "")} {r.get("trend", "")}',
                     str(r.get("pulse", "")), "ctr " + ("gs-ok" if r.get("action_ok") else "gs-sm")),
             ]
             if show_mcap:
                 mv = r.get("mcap_cr", float("nan"))
                 if mv is None or (isinstance(mv, float) and pd.isna(mv)):
-                    cells.append(_td('<span class="gs-sm">—</span>', -1e18, "num gs-sm"))
+                    cells.append(_td("", -1e18, "num gs-sm"))
                 else:
                     ok = float(mv) >= float(min_mcap)
                     cells.append(_td(
@@ -3009,13 +3016,14 @@ def zone_table(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0) -> pd.DataFra
         "SL": df["sl"].round(2),
         "T 1:3": df["t3"].round(2),
         "दूरी %": df["dist_pct"].round(2),
-        "FLIP · निशान": df["tags"].fillna(""),
+        "निशान · Multi-TF": [" · ".join([x for x in str(t or "").split()]
+                                         + (list(h) if isinstance(h, (list, tuple)) else []))
+                             for t, h in zip(df["tags"].fillna(""),
+                                             df["htf_hits"] if "htf_hits" in df.columns else [None] * len(df))],
         "फ़ैसला": df["verdict"],
         "XRPT (1:x)": df["xrr"].round(1),
         "★ HQ": df["hq"].map(lambda v: "★" if v else ""),
         "Pulse·Trend": df["pulse"].astype(str) + " " + df["trend"].astype(str),
-        "Multi-TF": [(" · ".join(h) if isinstance(h, (list, tuple)) and h else "–")
-                     for h in (df["htf_hits"] if "htf_hits" in df.columns else [None] * len(df))],
         "स्थिति": df["state"],
         "मात्रा": df["qty"].astype(int),
         "बना (IST)": df["created_ist"],

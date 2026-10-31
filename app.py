@@ -902,11 +902,18 @@ def tv_candles(tv_symbol: str, base: str, n_bars: int = 3000, timeout: float = 1
             pass
 
 
+import threading as _tv_threading
+_TV_SEM = _tv_threading.Semaphore(4)          # TradingView एक साथ बहुत connections पर मना कर देता है
+
+
 def _tv_fetch(tvs: str, base: str, n_bars: int) -> Optional[pd.DataFrame]:
-    """TradingView से candles — धीमा जवाब हो तो दूसरी बार कम bars और ज़्यादा समय के साथ।"""
-    df = tv_candles(tvs, base, n_bars=n_bars, timeout=20.0)
+    """TradingView से candles — एक साथ अधिकतम 4; न मिले तो रुककर कम bars के साथ दोबारा।"""
+    with _TV_SEM:
+        df = tv_candles(tvs, base, n_bars=n_bars, timeout=20.0)
     if df is None or df.empty:
-        df = tv_candles(tvs, base, n_bars=min(n_bars, 2500), timeout=30.0)
+        time.sleep(1.0)
+        with _TV_SEM:
+            df = tv_candles(tvs, base, n_bars=min(n_bars, 2500), timeout=30.0)
     return df
 
 

@@ -902,6 +902,14 @@ def tv_candles(tv_symbol: str, base: str, n_bars: int = 3000, timeout: float = 1
             pass
 
 
+def _tv_fetch(tvs: str, base: str, n_bars: int) -> Optional[pd.DataFrame]:
+    """TradingView से candles — धीमा जवाब हो तो दूसरी बार कम bars और ज़्यादा समय के साथ।"""
+    df = tv_candles(tvs, base, n_bars=n_bars, timeout=20.0)
+    if df is None or df.empty:
+        df = tv_candles(tvs, base, n_bars=min(n_bars, 2500), timeout=30.0)
+    return df
+
+
 def tv_cash_frame(symbol: str, tf: str) -> Optional[pd.DataFrame]:
     """cash चार्ट (जो Pine में खुलता है — जैसे NSE:LTF) का एक TF, cash जैसे ही base + session resample।"""
     meta = sym_meta(symbol) or {}
@@ -913,7 +921,7 @@ def tv_cash_frame(symbol: str, tf: str) -> Optional[pd.DataFrame]:
     key = _ckey("tvcash", tvs, base)
     df = _load(key, min(_bar_ttl(base), 1800))
     if df is None:
-        df = tv_candles(tvs, base, n_bars=5000)
+        df = _tv_fetch(tvs, base, 5000)
         if df is not None and len(df):
             _save(key, df)
     if df is None or df.empty:
@@ -931,7 +939,7 @@ def tv_future_frame(symbol: str, tf: str) -> Optional[pd.DataFrame]:
     key = _ckey("tvfut", fut, base)
     df = _load(key, min(_bar_ttl(base), 1800))
     if df is None:
-        df = tv_candles(fut, base)
+        df = _tv_fetch(fut, base, 3000)
         if df is not None and len(df):
             _save(key, df)
     if df is None or df.empty:

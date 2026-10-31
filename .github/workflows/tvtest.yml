@@ -1,0 +1,28 @@
+name: tv-test
+on:
+  push:
+    branches: [tv-test3]
+permissions:
+  contents: write
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - run: python tools/cmp_test.py
+      - name: save
+        run: |
+          git config user.name "diag-bot"
+          git config user.email "diag-bot@users.noreply.github.com"
+          cp results/tv_fut_test.md /tmp/tv.md
+          git checkout --orphan tv-test-results
+          git rm -rq --cached . || true
+          mkdir -p results && cp /tmp/tv.md results/tv_fut_test.md
+          git add -f results/tv_fut_test.md
+          git commit -m "tv test ${GITHUB_SHA::7}"
+          git push -f origin tv-test-results

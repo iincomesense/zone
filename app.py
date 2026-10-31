@@ -585,16 +585,76 @@ _DHAN_STATUS: Dict[str, str] = {"status": "not configured"}
 
 
 def dhan_creds() -> Tuple[str, str]:
+    """Streamlit Secrets: DHAN_CLIENT_ID / DHAN_ACCESS_TOKEN (या [dhan] section में client_id / access_token)।"""
     cid = tok = ""
+
+    def _pick(d, names):
+        for n in names:
+            try:
+                v = d.get(n)
+            except Exception:                                  # noqa: BLE001
+                v = None
+            if v not in (None, "") and not isinstance(v, dict):
+                return str(v)
+        return ""
+
     try:
         import streamlit as _st
-        cid = str(_st.secrets.get("DHAN_CLIENT_ID", "") or "")
-        tok = str(_st.secrets.get("DHAN_ACCESS_TOKEN", "") or "")
+        sec = _st.secrets
+        cid = _pick(sec, ("DHAN_CLIENT_ID", "dhan_client_id", "CLIENT_ID", "client_id"))
+        tok = _pick(sec, ("DHAN_ACCESS_TOKEN", "dhan_access_token", "ACCESS_TOKEN", "access_token"))
+        for sect in ("dhan", "DHAN", "Dhan"):
+            try:
+                sub = sec.get(sect)
+            except Exception:                                  # noqa: BLE001
+                sub = None
+            if sub:
+                cid = cid or _pick(sub, ("client_id", "CLIENT_ID", "DHAN_CLIENT_ID", "clientId"))
+                tok = tok or _pick(sub, ("access_token", "ACCESS_TOKEN", "DHAN_ACCESS_TOKEN", "token", "accessToken"))
     except Exception:                                          # noqa: BLE001
         pass
     cid = cid or os.environ.get("DHAN_CLIENT_ID", "")
     tok = tok or os.environ.get("DHAN_ACCESS_TOKEN", "")
-    return cid.strip(), tok.strip()
+    return cid.strip().strip('"').strip("'"), tok.strip().strip('"').strip("'")
+
+
+_DHAN_PROFILE: Dict[str, object] = {}
+
+
+def dhan_profile() -> dict:
+    """Dhan /profile — token कब तक valid और Data API चालू है या नहीं (10 मिनट कैश)।"""
+    cid, tok = dhan_creds()
+    if not cid or not tok:
+        return {"ok": False, "data": False, "msg": "not configured"}
+    hit = _DHAN_PROFILE.get("v")
+    if isinstance(hit, dict) and time.time() - float(_DHAN_PROFILE.get("t", 0)) < 600:
+        return hit
+    out = {"ok": False, "data": False, "msg": ""}
+    try:
+        r = requests.get(DHAN_BASE + "/profile", headers={"access-token": tok, "client-id": cid,
+                                                          "Accept": "application/json"}, timeout=12)
+        if r.status_code == 200:
+            js = r.json() if r.content else {}
+            plan = str(js.get("dataPlan", "") or "")
+            till = str(js.get("tokenValidity", "") or "")
+            dval = str(js.get("dataValidity", "") or "")
+            out["ok"] = True
+            out["data"] = plan.lower() in ("active", "true", "yes", "") if plan else True
+            out["msg"] = (f"token {till}" if till else "token ok") + \
+                         (f" · Data API {plan}" + (f" ({dval})" if dval else "") if plan else "")
+            if plan and not out["data"]:
+                out["msg"] += " — Data API चालू नहीं, इसलिए candles TradingView से"
+        else:
+            try:
+                ej = r.json()
+                det = f'{ej.get("errorCode", "")} {ej.get("errorMessage", "") or ej.get("message", "")}'.strip()
+            except Exception:                                  # noqa: BLE001
+                det = r.text[:80]
+            out["msg"] = f"Dhan {r.status_code}: {det} — token गलत या पुराना (Dhan में नया token बनाकर Secrets में डालें)"
+    except Exception as e:                                     # noqa: BLE001
+        out["msg"] = f"Dhan नहीं पहुँचा ({type(e).__name__})"
+    _DHAN_PROFILE.update(v=out, t=time.time())
+    return out
 
 
 def _dhan_future_ids(symbols: Sequence[str]) -> Dict[str, str]:
@@ -614,10 +674,25 @@ def _dhan_future_ids(symbols: Sequence[str]) -> Dict[str, str]:
     return out
 
 
+import threading as _threading
+_DHAN_LOCK = _threading.Lock()
+_DHAN_LAST = [0.0]
+
+
+def _dhan_wait() -> None:
+    """Dhan Data API: 5 requests/second — हर request के बीच कम से कम 0.21 सेकंड।"""
+    with _DHAN_LOCK:
+        gap = 0.21 - (time.time() - _DHAN_LAST[0])
+        if gap > 0:
+            time.sleep(gap)
+        _DHAN_LAST[0] = time.time()
+
+
 def _dhan_post(endpoint: str, payload: dict, cid: str, tok: str) -> Optional[pd.DataFrame]:
     headers = {"access-token": tok, "client-id": cid, "Accept": "application/json",
                "Content-Type": "application/json"}
     for attempt in range(3):
+        _dhan_wait()
         try:
             r = requests.post(DHAN_BASE + endpoint, json=payload, headers=headers, timeout=20)
             if r.status_code == 429:
@@ -902,12 +977,12 @@ def _dhan_eq_base(sec_id: str, base: str, cid: str, tok: str, days: Optional[int
     parts, start = [], today - timedelta(days=days)
     while start <= today:
         end = min(start + timedelta(days=89), today + timedelta(days=1))
-        part = _dhan_post("/charts/intraday", dict(common, interval=interval, fromDate=start.isoformat(),
-                                                    toDate=end.isoformat()), cid, tok)
+        part = _dhan_post("/charts/intraday", dict(common, interval=str(interval),
+                                                    fromDate=f"{start.isoformat()} 09:15:00",
+                                                    toDate=f"{end.isoformat()} 15:30:00"), cid, tok)
         if part is not None and len(part):
             parts.append(part)
         start = end + timedelta(days=1)
-        time.sleep(0.22)
     if not parts:
         return None
     df = pd.concat(parts).sort_index()
@@ -1912,6 +1987,50 @@ def tv_cash_zones(symbol: str, tf: str, I: "PineInputs") -> Optional[List[dict]]
     return zz
 
 
+def dhan_cash_frame(symbol: str, tf: str, sec_id: Optional[str]) -> Optional[pd.DataFrame]:
+    """Dhan से cash (NSE_EQ) का एक TF — उतना ही इतिहास जितना future के लिए (तेज़)।"""
+    cid, tok = dhan_creds()
+    spec = TF_FETCH.get(tf)
+    if not cid or not tok or not sec_id or not spec:
+        return None
+    base, rule = spec
+    if base == "1d":
+        key = _ckey("dhan_eq_d", sec_id, datetime.now(IST).date().isoformat())
+        df = _load(key, _bar_ttl("1d"))
+        if df is None:
+            today = datetime.now(IST).date()
+            df = _dhan_post("/charts/historical",
+                            {"securityId": str(sec_id), "exchangeSegment": "NSE_EQ", "instrument": "EQUITY",
+                             "expiryCode": 0, "oi": False, "fromDate": (today - timedelta(days=730)).isoformat(),
+                             "toDate": (today + timedelta(days=1)).isoformat()}, cid, tok)
+            if df is not None and len(df):
+                df.index = pd.DatetimeIndex(df.index).normalize()
+                _save(key, df)
+    elif base in DHAN_EQ_INTERVAL and base in _DHAN_BASE:
+        df = _dhan_eq_base(sec_id, base, cid, tok, _DHAN_BASE[base][1])
+    else:
+        return None
+    if df is None or df.empty:
+        return None
+    return _resample_session(df, rule) if rule else df
+
+
+def dhan_cash_zones(symbol: str, tf: str, I: "PineInputs", sec_id: Optional[str]) -> Optional[List[dict]]:
+    """Dhan cash candles पर वही इंजन। डेटा न मिले तो None।"""
+    fdf = dhan_cash_frame(symbol, tf, sec_id)
+    if fdf is None or len(fdf) < 30:
+        return None
+    key = (symbol + "|DHCASH", tf, _inputs_hash(I))
+    bid = _bar_id(fdf)
+    mem = _ZCACHE.get(key)
+    if mem and mem[0] == bid:
+        return mem[1]
+    daily = dhan_cash_frame(symbol, "1d", sec_id) if I.bufferMode == BUFFER_MODES[0] else None
+    zz = engine(fdf, I, tf, htf_daily=daily, return_all=True)
+    _ZCACHE[key] = (bid, zz, None, None)
+    return zz
+
+
 def tv_match(z: dict, tzs: List[dict]) -> bool:
     """TradingView पर भी वही ज़ोन — उसी तरफ़, उसी दिन, proximal 0.15% के भीतर, और अभी live।"""
     zday = datetime.fromtimestamp(int(z["time"]) / 1000, IST).date()
@@ -2148,7 +2267,7 @@ def htf_conf(spans: Optional[dict], demand: bool, top: float, bot: float, ts: pd
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v59 · TV ✓: ज़ोन TradingView candles पर दोबारा जाँचे · 2026-10-31"
+APP_BUILD = "v60 · ✓ जाँच + Future: Dhan (चालू हो) → TradingView · Dhan token/Data API status · तेज़ · 2026-10-31"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -2760,9 +2879,9 @@ def sheet_html(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0, extra=False,
             _td(str(n), n, "gs-rn"),
             _td(f'<a href="{u_cash}" target="_blank" rel="noopener" '
                 f'title="TradingView · {meta.get("cash")} · {r["tf"]}">{r["symbol"]}</a>'
-                + ({"✓": ' <span title="TradingView पर भी यही ज़ोन (Pine से मेल)" style="color:#1D9E75">✓</span>',
-                    "✗": ' <span title="TradingView की candles पर यह ज़ोन नहीं बनता" style="color:#E24B4A">✗</span>',
-                    "?": ' <span title="TradingView डेटा नहीं मिला" class="gs-sm">?</span>'}
+                + ({"✓": f' <span title="{r.get("chk_src") or "TradingView"} की candles पर भी यही ज़ोन (Pine से मेल)" style="color:#1D9E75">✓</span>',
+                    "✗": f' <span title="{r.get("chk_src") or "TradingView"} की candles पर यह ज़ोन नहीं बनता" style="color:#E24B4A">✗</span>',
+                    "?": ' <span title="Dhan / TradingView डेटा नहीं मिला" class="gs-sm">?</span>'}
                    .get(str(r.get("tv_ok") or ""), "")),
                 r["symbol"]),
             (_td(f'<a class="fut" href="{u_fut}" target="_blank" rel="noopener"'
@@ -2994,24 +3113,70 @@ def _main():
         f = f[f["state"] == tb["status"]]
 
     extra_cols = True
-    # ── TV ✓: टेबल के ज़ोन TradingView की cash candles पर भी बनते हैं? (Pine से मेल) ──
-    _tv_total, _tv_ok, _tv_na = len(f), 0, 0
+    # ── ✓ जाँच + Future ज़ोन: Dhan (चालू हो) → न मिले तो TradingView · एक साथ, नतीजा session में याद ──
+    _dh_cid, _dh_tok = dhan_creds()
+    _dprof = dhan_profile() if (_dh_cid and _dh_tok) else {"ok": False, "data": False, "msg": "not configured"}
+    _use_dhan = bool(_dprof.get("ok") and _dprof.get("data"))
+    _tv_total, _tv_ok, _tv_na, _chk_src, _fut_src = len(f), 0, 0, {}, ""
     if not f.empty:
-        I_tv = res.get("inputs") or inp
-        pairs_tv = sorted({(str(a), str(b)) for a, b in zip(f["symbol"], f["tf"])
-                           if str(a).upper() not in GLOBAL_MAP and str(a).upper() not in TV_ONLY})
-        tvz: Dict[tuple, Optional[List[dict]]] = {}
-        with st.spinner(f"TradingView जाँच · {len(pairs_tv)} स्क्रिप्ट/TF…"):
-            with ThreadPoolExecutor(max_workers=8) as ex:
-                futs = {ex.submit(tv_cash_zones, a, b, I_tv): (a, b) for a, b in pairs_tv}
-                for fu in as_completed(futs):
-                    try:
-                        tvz[futs[fu]] = fu.result()
-                    except Exception:                          # noqa: BLE001
-                        tvz[futs[fu]] = None
-        marks = []
+        I_ = res.get("inputs") or inp
+        pairs = sorted({(str(a), str(b)) for a, b in zip(f["symbol"], f["tf"])})
+        ekey = (str(res.get("at")), _inputs_hash(I_), tuple(pairs), _use_dhan)
+        cache = st.session_state.setdefault("_enrich", {})
+        if ekey not in cache:
+            stk = sorted({a for a, _ in pairs if a.upper() not in IDX_SYMBOLS and a.upper() not in GLOBAL_MAP
+                          and a.upper() not in TV_ONLY})
+            eq_ids, fut_ids = {}, {}
+            if _use_dhan and stk:
+                try:
+                    eq_ids = _dhan_eq_ids(stk) or {}
+                except Exception:                              # noqa: BLE001
+                    eq_ids = {}
+                try:
+                    fut_ids = _dhan_future_ids(stk) or {}
+                except Exception:                              # noqa: BLE001
+                    fut_ids = {}
+
+            def _cash(a, b):
+                if a.upper() in GLOBAL_MAP or a.upper() in TV_ONLY:
+                    return "", None
+                if eq_ids.get(a):
+                    zz = dhan_cash_zones(a, b, I_, eq_ids.get(a))
+                    if zz is not None:
+                        return "Dhan", zz
+                return "TradingView", tv_cash_zones(a, b, I_)
+
+            def _fut(a, b):
+                if fut_ids.get(a):
+                    zz = dhan_future_zones(a, b, I_, fut_ids.get(a))
+                    if zz:
+                        return "Dhan", zz
+                zz = tv_future_zones(a, b, I_)
+                return ("TradingView" if zz else ""), zz
+
+            chk: Dict[tuple, tuple] = {}
+            fzm: Dict[tuple, tuple] = {}
+            with st.spinner(f"{'Dhan + ' if _use_dhan else ''}TradingView से जाँच · {len(pairs)} स्क्रिप्ट/TF…"):
+                with ThreadPoolExecutor(max_workers=8) as ex:
+                    jobs = {}
+                    for pq in pairs:
+                        jobs[ex.submit(_cash, *pq)] = ("c", pq)
+                        jobs[ex.submit(_fut, *pq)] = ("f", pq)
+                    for fu in as_completed(jobs):
+                        kind, pq = jobs[fu]
+                        try:
+                            val = fu.result()
+                        except Exception:                      # noqa: BLE001
+                            val = ("", None)
+                        (chk if kind == "c" else fzm)[pq] = val
+            cache.clear()
+            cache[ekey] = (chk, fzm)
+        chk, fzm = cache[ekey]
+        marks, srcs_c = [], []
+        rels, fps, tgs = [], [], []
         for _, r in f.iterrows():
-            zz = tvz.get((str(r["symbol"]), str(r["tf"])))
+            pq = (str(r["symbol"]), str(r["tf"]))
+            src, zz = chk.get(pq, ("", None))
             if str(r["symbol"]).upper() in TV_ONLY:
                 marks.append("✓")                              # डेटा पहले से TradingView का
             elif str(r["symbol"]).upper() in GLOBAL_MAP:
@@ -3020,12 +3185,25 @@ def _main():
                 marks.append("?")
             else:
                 marks.append("✓" if tv_match(r, zz) else "✗")
+            srcs_c.append(src)
+            fsrc, fz = fzm.get(pq, ("", []))
+            rel, fp = fut_rel_of(bool(r["demand"]), float(r["prox"]), int(r["time"]), fz or [])
+            rels.append(rel)
+            fps.append(fp)
+            t0 = str(r.get("tags") or "")
+            tgs.append((t0 + " C+F").strip() if rel and "C+F" not in t0.split() else t0)
         f = f.copy()
-        f["tv_ok"] = marks
+        f["tv_ok"], f["chk_src"] = marks, srcs_c
+        f["fut_rel"], f["fut_prox"], f["tags"] = rels, fps, tgs
         _tv_ok = marks.count("✓")
         _tv_na = marks.count("?")
         _tv_total = len([m for m in marks if m])
-        if uo.get("tv_only", True) and _tv_na < _tv_total:   # TradingView बिल्कुल न मिले तो कुछ न छिपाएँ
+        for m, sname in zip(marks, srcs_c):
+            if m in ("✓", "✗") and sname:
+                _chk_src[sname] = _chk_src.get(sname, 0) + 1
+        fsrcs = {v[0] for v in fzm.values() if v and v[0]}
+        _fut_src = " + ".join(x for x in ("Dhan", "TradingView") if x in fsrcs)
+        if uo.get("tv_only", True) and _tv_na < _tv_total:   # कुछ भी डेटा न मिले तो कुछ न छिपाएँ
             f = f[f["tv_ok"] != "✗"]
     if not _JS_SORT:
         s1, s2, _ = st.columns([2.3, 1, 6])
@@ -3040,71 +3218,22 @@ def _main():
             f["mcap_cr"] = f["symbol"].map(cached_caps(tuple(sorted(f["symbol"].unique())[:120])))
         except Exception:                                        # noqa: BLE001
             f["mcap_cr"] = np.nan
-    _fut_src = ""
-    _dh_cid, _dh_tok = dhan_creds()
-    if not f.empty:
-        I_ = res.get("inputs") or inp
-        pairs = sorted({(str(a), str(b)) for a, b in zip(f["symbol"], f["tf"])})
-        fz_map: Dict[tuple, List[dict]] = {}
-        srcs = set()
-        if _dh_cid and _dh_tok:
-            stk = sorted({a for a, _ in pairs if a not in IDX_SYMBOLS and a not in GLOBAL_MAP and a not in TV_ONLY})
-            with st.spinner(f"Future ज़ोन (Dhan) · {len(pairs)} स्क्रिप्ट/TF…"):
-                try:
-                    ids = _dhan_future_ids(stk) if stk else {}
-                except Exception:                              # noqa: BLE001
-                    ids = {}
-                if stk and not ids:
-                    _DHAN_STATUS.setdefault("status", "future security id नहीं मिले")
-                with ThreadPoolExecutor(max_workers=3) as ex:
-                    futs = {ex.submit(dhan_future_zones, a, b, I_, ids.get(a)): (a, b) for a, b in pairs if ids.get(a)}
-                    for fu in as_completed(futs):
-                        try:
-                            zz = fu.result()
-                        except Exception:                      # noqa: BLE001
-                            zz = []
-                        if zz:
-                            fz_map[futs[fu]] = zz
-            if fz_map:
-                srcs.add("Dhan")
-        rest = [pq for pq in pairs if pq not in fz_map]
-        if rest:
-            with st.spinner(f"Future ज़ोन (TradingView) · {len(rest)} स्क्रिप्ट/TF…"):
-                with ThreadPoolExecutor(max_workers=6) as ex:
-                    futs = {ex.submit(tv_future_zones, a, b, I_): (a, b) for a, b in rest}
-                    got = False
-                    for fu in as_completed(futs):
-                        try:
-                            zz = fu.result()
-                        except Exception:                      # noqa: BLE001
-                            zz = []
-                        fz_map[futs[fu]] = zz
-                        got = got or bool(zz)
-            if got:
-                srcs.add("TradingView")
-        rels, fps, tgs = [], [], []
-        for _, r in f.iterrows():
-            rel, fp = fut_rel_of(bool(r["demand"]), float(r["prox"]), int(r["time"]),
-                                 fz_map.get((str(r["symbol"]), str(r["tf"])), []))
-            rels.append(rel)
-            fps.append(fp)
-            t0 = str(r.get("tags") or "")
-            tgs.append((t0 + " C+F").strip() if rel and "C+F" not in t0.split() else t0)
-        f = f.copy()
-        f["fut_rel"], f["fut_prox"], f["tags"] = rels, fps, tgs
-        _fut_src = " + ".join(x for x in ("Dhan", "TradingView") if x in srcs)
 
     _ss = list(res.get("scanned_syms") or [])
     _n_idx = sum(1 for x in _ss if str(x).upper() in IDX_SYMBOLS or str(x).upper().startswith("NIFTY"))
     _nod = sorted(k for k, v in (res.get("errs") or {}).items() if v == "डेटा नहीं मिला")
     st.caption(f"**{sel_band} रेंज के अंदर ज़ोन: {int(res.get('scanned') or 0)} / {len(f)}**"
-               + (f" · TV ✓ {_tv_ok}/{_tv_total}" + (f" (? {_tv_na})" if _tv_na else "") if _tv_total else "")
+               + (f" · ✓ {_tv_ok}/{_tv_total}"
+                  + (" (" + " · ".join(f"{k} {v}" for k, v in _chk_src.items()) + ")" if _chk_src else "")
+                  + (f" (? {_tv_na})" if _tv_na else "") if _tv_total else "")
                + (f" (स्कैन: स्टॉक {len(_ss) - _n_idx} + इंडेक्स {_n_idx}"
                   + (f" · डेटा नहीं: {', '.join(_nod[:6])}" if _nod else "") + ")" if _ss else "")
                + f" · TF: {', '.join(tb.get('tfs') or ALL_TFS)}"
                + (f" · Future ज़ोन: {_fut_src}" if _fut_src
                   else f" · Future ज़ोन: डेटा नहीं मिला ({_TV_STATUS.get('status') or 'no data'})")
-               + (f" · Dhan: {'ok' if 'Dhan' in _fut_src else (_DHAN_STATUS.get('status') or 'no data')}"
+               + (f" · Dhan: {_dprof.get('msg') or 'ok'}"
+                  + ("" if (not _use_dhan or "Dhan" in _fut_src or _chk_src.get("Dhan"))
+                     else f" · candles नहीं मिलीं ({_DHAN_STATUS.get('status') or 'no data'})")
                   if (_dh_cid and _dh_tok) else " · Dhan: not configured"))
     if not f.empty:
         try:

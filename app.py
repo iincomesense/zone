@@ -624,7 +624,13 @@ def _dhan_post(endpoint: str, payload: dict, cid: str, tok: str) -> Optional[pd.
                 time.sleep(1.5 * (attempt + 1))
                 continue
             if r.status_code in (401, 403):
-                _DHAN_STATUS["status"] = "token गलत या पुराना (Dhan में नया token बनाएँ)"
+                try:
+                    ej = r.json()
+                    det = f'{ej.get("errorCode", "")} {ej.get("errorMessage", "") or ej.get("message", "")}'.strip()
+                except Exception:                              # noqa: BLE001
+                    det = r.text[:100]
+                _DHAN_STATUS["status"] = (f"Dhan {r.status_code}: {det} — " if det else "") + \
+                    "token गलत/पुराना या Data API चालू नहीं (Dhan में नया token बनाएँ, Data API देखें)"
                 return None
             if r.status_code >= 400:
                 try:
@@ -819,6 +825,25 @@ def tv_candles(tv_symbol: str, base: str, n_bars: int = 3000, timeout: float = 1
                 ws.close()
         except Exception:                                       # noqa: BLE001
             pass
+
+
+def tv_cash_frame(symbol: str, tf: str) -> Optional[pd.DataFrame]:
+    """cash चार्ट (जो Pine में खुलता है — जैसे NSE:LTF) का एक TF, cash जैसे ही base + session resample।"""
+    meta = sym_meta(symbol) or {}
+    tvs = meta.get("cash")
+    spec = TF_FETCH.get(tf)
+    if not tvs or not spec:
+        return None
+    base, rule = spec
+    key = _ckey("tvcash", tvs, base)
+    df = _load(key, min(_bar_ttl(base), 1800))
+    if df is None:
+        df = tv_candles(tvs, base, n_bars=5000)
+        if df is not None and len(df):
+            _save(key, df)
+    if df is None or df.empty:
+        return None
+    return _resample_session(df, rule) if rule else df
 
 
 def tv_future_frame(symbol: str, tf: str) -> Optional[pd.DataFrame]:
@@ -1871,6 +1896,34 @@ def dhan_future_zones(symbol: str, tf: str, I: "PineInputs", sec_id: Optional[st
     return fz
 
 
+def tv_cash_zones(symbol: str, tf: str, I: "PineInputs") -> Optional[List[dict]]:
+    """TradingView cash candles पर वही इंजन (Pine जैसा डेटा)। डेटा न मिले तो None।"""
+    fdf = tv_cash_frame(symbol, tf)
+    if fdf is None or len(fdf) < 30:
+        return None
+    key = (symbol + "|TVCASH", tf, _inputs_hash(I))
+    bid = _bar_id(fdf)
+    mem = _ZCACHE.get(key)
+    if mem and mem[0] == bid:
+        return mem[1]
+    daily = tv_cash_frame(symbol, "1d") if I.bufferMode == BUFFER_MODES[0] else None
+    zz = engine(fdf, I, tf, htf_daily=daily, return_all=True)
+    _ZCACHE[key] = (bid, zz, None, None)
+    return zz
+
+
+def tv_match(z: dict, tzs: List[dict]) -> bool:
+    """TradingView पर भी वही ज़ोन — उसी तरफ़, उसी दिन, proximal 0.15% के भीतर, और अभी live।"""
+    zday = datetime.fromtimestamp(int(z["time"]) / 1000, IST).date()
+    px = float(z["prox"]) or 1.0
+    for t in tzs:
+        if (t["demand"] == bool(z["demand"]) and t["state"] in ALIVE_STATES
+                and abs(float(t["prox"]) - px) / px * 100.0 <= 0.15
+                and datetime.fromtimestamp(t["time"] / 1000, IST).date() == zday):
+            return True
+    return False
+
+
 def tv_future_zones(symbol: str, tf: str, I: "PineInputs") -> List[dict]:
     """TradingView future candles पर वही इंजन (cash जैसे ही inputs) — कैश के साथ।"""
     fdf = tv_future_frame(symbol, tf)
@@ -2095,7 +2148,7 @@ def htf_conf(spans: Optional[dict], demand: bool, top: float, bot: float, ts: pd
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v58 · Future: Dhan (टेबल की पंक्तियाँ) → न मिले तो TradingView · Dhan status दिखे · 2026-10-30"
+APP_BUILD = "v59 · TV ✓: ज़ोन TradingView candles पर दोबारा जाँचे · 2026-10-31"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -2418,6 +2471,10 @@ def pine_panel(slot=None):
             swl = d10.number_input("Confirmed swing: bars on left", 1, 30, D.swingLeft, 1, key="in_swl",
                                    help="NSE अध्ययन (40 F&O stocks, 5m–1W): best = 6")
             swr = d11.number_input("Confirmed swing: bars on right", 1, 30, D.swingRight, 1, key="in_swr")
+            d13, _, _, _ = st.columns(4)
+            tv_only = d13.checkbox("सिर्फ़ TV ✓ ज़ोन दिखाएँ (TradingView पर भी बने)", True, key="in_tvonly",
+                                   help="टेबल के हर ज़ोन को TradingView की candles पर उसी इंजन से दोबारा जाँचा जाता है — "
+                                        "जो Pine चार्ट पर भी बनता है उस पर ✓। सिर्फ़ दिखावा, नियम नहीं बदलते।")
 
     inp = PineInputs(
         accountCapital=float(cap), riskPct=float(risk), targetRR=float(rr), traderType=str(ttype),
@@ -2437,7 +2494,7 @@ def pine_panel(slot=None):
         swingLeft=int(swl), swingRight=int(swr), scanBars=int(scanbars),
     ).sanitized()
     uo = dict(max_syms=int(maxsyms), peers=tuple(ALL_TFS), show_mcap=bool(show_mcap),
-              min_mcap=float(min_mcap), show_info=bool(show_info))
+              min_mcap=float(min_mcap), show_info=bool(show_info), tv_only=bool(tv_only))
     return inp, uo
 
 
@@ -2702,7 +2759,11 @@ def sheet_html(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0, extra=False,
         cells = [
             _td(str(n), n, "gs-rn"),
             _td(f'<a href="{u_cash}" target="_blank" rel="noopener" '
-                f'title="TradingView · {meta.get("cash")} · {r["tf"]}">{r["symbol"]}</a>',
+                f'title="TradingView · {meta.get("cash")} · {r["tf"]}">{r["symbol"]}</a>'
+                + ({"✓": ' <span title="TradingView पर भी यही ज़ोन (Pine से मेल)" style="color:#1D9E75">✓</span>',
+                    "✗": ' <span title="TradingView की candles पर यह ज़ोन नहीं बनता" style="color:#E24B4A">✗</span>',
+                    "?": ' <span title="TradingView डेटा नहीं मिला" class="gs-sm">?</span>'}
+                   .get(str(r.get("tv_ok") or ""), "")),
                 r["symbol"]),
             (_td(f'<a class="fut" href="{u_fut}" target="_blank" rel="noopener"'
                  + (f' style="color:{_FUT_COL[str(r.get("fut_rel"))]} !important"'
@@ -2933,6 +2994,39 @@ def _main():
         f = f[f["state"] == tb["status"]]
 
     extra_cols = True
+    # ── TV ✓: टेबल के ज़ोन TradingView की cash candles पर भी बनते हैं? (Pine से मेल) ──
+    _tv_total, _tv_ok, _tv_na = len(f), 0, 0
+    if not f.empty:
+        I_tv = res.get("inputs") or inp
+        pairs_tv = sorted({(str(a), str(b)) for a, b in zip(f["symbol"], f["tf"])
+                           if str(a).upper() not in GLOBAL_MAP and str(a).upper() not in TV_ONLY})
+        tvz: Dict[tuple, Optional[List[dict]]] = {}
+        with st.spinner(f"TradingView जाँच · {len(pairs_tv)} स्क्रिप्ट/TF…"):
+            with ThreadPoolExecutor(max_workers=8) as ex:
+                futs = {ex.submit(tv_cash_zones, a, b, I_tv): (a, b) for a, b in pairs_tv}
+                for fu in as_completed(futs):
+                    try:
+                        tvz[futs[fu]] = fu.result()
+                    except Exception:                          # noqa: BLE001
+                        tvz[futs[fu]] = None
+        marks = []
+        for _, r in f.iterrows():
+            zz = tvz.get((str(r["symbol"]), str(r["tf"])))
+            if str(r["symbol"]).upper() in TV_ONLY:
+                marks.append("✓")                              # डेटा पहले से TradingView का
+            elif str(r["symbol"]).upper() in GLOBAL_MAP:
+                marks.append("")                               # Global: Yahoo और TradingView के symbol अलग (futures बनाम spot)
+            elif zz is None:
+                marks.append("?")
+            else:
+                marks.append("✓" if tv_match(r, zz) else "✗")
+        f = f.copy()
+        f["tv_ok"] = marks
+        _tv_ok = marks.count("✓")
+        _tv_na = marks.count("?")
+        _tv_total = len([m for m in marks if m])
+        if uo.get("tv_only", True) and _tv_na < _tv_total:   # TradingView बिल्कुल न मिले तो कुछ न छिपाएँ
+            f = f[f["tv_ok"] != "✗"]
     if not _JS_SORT:
         s1, s2, _ = st.columns([2.3, 1, 6])
         if True:
@@ -3004,6 +3098,7 @@ def _main():
     _n_idx = sum(1 for x in _ss if str(x).upper() in IDX_SYMBOLS or str(x).upper().startswith("NIFTY"))
     _nod = sorted(k for k, v in (res.get("errs") or {}).items() if v == "डेटा नहीं मिला")
     st.caption(f"**{sel_band} रेंज के अंदर ज़ोन: {int(res.get('scanned') or 0)} / {len(f)}**"
+               + (f" · TV ✓ {_tv_ok}/{_tv_total}" + (f" (? {_tv_na})" if _tv_na else "") if _tv_total else "")
                + (f" (स्कैन: स्टॉक {len(_ss) - _n_idx} + इंडेक्स {_n_idx}"
                   + (f" · डेटा नहीं: {', '.join(_nod[:6])}" if _nod else "") + ")" if _ss else "")
                + f" · TF: {', '.join(tb.get('tfs') or ALL_TFS)}"

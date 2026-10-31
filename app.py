@@ -1330,12 +1330,15 @@ def _candidate(p: int, bc: int, nout: int, S: _S, I: PineInputs):
             return (2, "CBLI")
     # ---- 3. Boring: हर candle TR ≤ ATR × ----
     base_h, base_l = -1e20, 1e20
+    body_h, body_l = -1e20, 1e20
     any_bull = any_bear = False
     for k in range(b0, bl - 1, -1):
         if not np.isfinite(atr[k]) or tr[k] > I.boringAtrMult * atr[k]:
             return (3, "Boring TR > ATR")
         base_h = max(base_h, h[k])
         base_l = min(base_l, l[k])
+        body_h = max(body_h, o[k], c[k])
+        body_l = min(body_l, o[k], c[k])
         any_bull = any_bull or c[k] > o[k]
         any_bear = any_bear or c[k] < o[k]
     base_range = base_h - base_l
@@ -1418,7 +1421,7 @@ def _candidate(p: int, bc: int, nout: int, S: _S, I: PineInputs):
         q_hq_in=bool(hq_in), q_hq_out=bool(hq_out), q_vol=vol_ok, q_heavy=heavy, q_fav=fav,
         m_in_atr=float(tr[li] / atr[li]), m_out_atr=float(tr[fo] / atr[fo]),
         m_li_ratio=float(in_range / base_range), m_lo_ratio=float((ob_hi - ob_lo) / base_range),
-        base_h=float(base_h), base_l=float(base_l),
+        base_h=float(base_h), base_l=float(base_l), body_h=float(body_h), body_l=float(body_l),
         b0=b0, bl=bl, li=li,
     )
 
@@ -1613,6 +1616,7 @@ def engine(df: pd.DataFrame, I: PineInputs, tf: str, htf_daily: Optional[pd.Data
                         created_bar=p, bar=p, atr_c=float(S.atr[p]),
                         left_bar=li, time=int(S.t[p]), start_time=int(S.t[li]),
                         base_h=float(cand["base_h"]), base_l=float(cand["base_l"]),
+                        body_h=float(cand.get("body_h", cand["base_h"])), body_l=float(cand.get("body_l", cand["base_l"])),
                         broken_at=None, prox_touches=0, prox_out=True, tf=tf, tf_sec=tf_sec, symbol=None,
                     )
                     zones.append(z)
@@ -1830,7 +1834,7 @@ def eod_band(df: Optional[pd.DataFrame], tf: str, atr_period: int = 14) -> Optio
 # ---------------------------------------------------------------------------
 _EMPTY_SNAP = {"demand": None, "supply": None, "demand_time": 0, "supply_time": 0}
 _ZCACHE: Dict[tuple, tuple] = {}
-_ZVER = "z29"           # इंजन बदले तो बढ़ाएँ — पुराना कैश अपने आप बेकार
+_ZVER = "z30"           # इंजन बदले तो बढ़ाएँ — पुराना कैश अपने आप बेकार
 
 
 def _inputs_hash(I: PineInputs) -> str:
@@ -1877,12 +1881,16 @@ def _ms_index(df: pd.DataFrame) -> np.ndarray:
     return idx.as_unit("ns").asi8 // 1_000_000
 
 
+GAP_MIN_ATR = 0.2          # Gap: दोनों candles की body के बीच कम से कम उस TF के ATR × 0.2 (पैसे भर का "gap" नहीं)
+
+
 def htf_areas(frames: Dict[str, pd.DataFrame]) -> List[dict]:
     """1H / 2H / 4H / D / W / M के Pivot और Gap area (सिर्फ़ Multi-TF Highlight कॉलम की जानकारी)।
     Pivot (engulf): नीचे — पहली लाल, दूसरी हरी और हरी की close > लाल की open ·
                     ऊपर — पहली हरी, दूसरी लाल और लाल की close < हरी की open।
       Area दोनों candles की wick तक (नीचे: सबसे नीचा low ↔ पहली close/दूसरी open · ऊपर: close/open ↔ सबसे ऊँचा high)।
-    Gap: पहली close ↔ दूसरी open।"""
+    Gap: पहली candle की body और दूसरी की body के बीच की खाली जगह (bodies आपस में न छुएँ),
+      कम से कम ATR × GAP_MIN_ATR।"""
     out: List[dict] = []
     for htf, name, _days in HTF_AREA_TFS:
         df = frames.get(htf)
@@ -1893,18 +1901,35 @@ def htf_areas(frames: Dict[str, pd.DataFrame]) -> List[dict]:
         l = df["low"].to_numpy(dtype="float64")
         c = df["close"].to_numpy(dtype="float64")
         t = _ms_index(df)
+        atr = _rma(_true_range(h, l, c), 14)
+        sec = TF_SECONDS.get(htf, 0)
         for i in range(len(df) - 1):
             j = i + 1
+            end = int(t[j]) + sec * 1000                       # दूसरी candle पूरी होने का समय
             if c[i] < o[i] and c[j] > o[j] and c[j] > o[i]:
                 out.append(dict(tf=htf, name=name, kind="Pivot", lo=float(min(l[i], l[j])),
-                                hi=float(max(c[i], o[j])), t=int(t[j])))
+                                hi=float(max(c[i], o[j])), t=int(t[j]), end=end))
             elif c[i] > o[i] and c[j] < o[j] and c[j] < o[i]:
                 out.append(dict(tf=htf, name=name, kind="Pivot", lo=float(min(c[i], o[j])),
-                                hi=float(max(h[i], h[j])), t=int(t[j])))
-            if o[j] != c[i]:
-                out.append(dict(tf=htf, name=name, kind="Gap", lo=float(min(c[i], o[j])),
-                                hi=float(max(c[i], o[j])), t=int(t[j])))
+                                hi=float(max(h[i], h[j])), t=int(t[j]), end=end))
+            bi_hi, bi_lo = max(o[i], c[i]), min(o[i], c[i])
+            bj_hi, bj_lo = max(o[j], c[j]), min(o[j], c[j])
+            a_ = atr[j] if np.isfinite(atr[j]) else (atr[i] if np.isfinite(atr[i]) else 0.0)
+            if bj_lo > bi_hi and bj_lo - bi_hi >= GAP_MIN_ATR * a_:          # gap-up
+                out.append(dict(tf=htf, name=name, kind="Gap", lo=float(bi_hi), hi=float(bj_lo),
+                                t=int(t[j]), end=end))
+            elif bj_hi < bi_lo and bi_lo - bj_hi >= GAP_MIN_ATR * a_:        # gap-down
+                out.append(dict(tf=htf, name=name, kind="Gap", lo=float(bj_hi), hi=float(bi_lo),
+                                t=int(t[j]), end=end))
     return out
+
+
+def _boring_body(z: dict) -> Tuple[float, float]:
+    """boring candles की body (open–close) — wick बाहर निकल सकती है।"""
+    lo, hi = z.get("body_l"), z.get("body_h")
+    if lo is None or hi is None:
+        return _boring(z)
+    return float(lo), float(hi)
 
 
 def _boring(z: dict) -> Tuple[float, float]:
@@ -1918,6 +1943,7 @@ def htf_hits(z: dict, tf: str, areas: List[dict], zones_all: Dict[str, List[dict
     """इस (सामने स्कैन हुए) ज़ोन की boring किस बड़े TF के Pivot / Gap area में है, और ZIZ।
     हर तरह का सिर्फ़ सबसे नज़दीकी TF — जैसे "1H-Pivot · D-Gap · 15m ZIZ"।"""
     zlo, zhi = _boring(z)
+    blo, bhi = _boring_body(z)
     sec = TF_SECONDS.get(tf, 0)
     zt = int(z.get("start_time") or z.get("time") or 0)
     found: List[str] = []
@@ -1930,9 +1956,9 @@ def htf_hits(z: dict, tf: str, areas: List[dict], zones_all: Dict[str, List[dict
             if asec <= sec:
                 continue
             days = next(d for t_, _, d in HTF_AREA_TFS if t_ == a["tf"])
-            if a["t"] > zt or a["t"] < zt - days * 86_400_000:
-                continue
-            if a["lo"] <= zhi and a["hi"] >= zlo and (best is None or asec < best[0]):
+            if int(a.get("end", a["t"])) > zt or a["t"] < zt - days * 86_400_000:
+                continue                                        # area पहले पूरा बना हो, ज़ोन उसके सामने
+            if a["lo"] <= blo and bhi <= a["hi"] and (best is None or asec < best[0]):
                 best = (asec, f'{a["name"]}-{kind}')
         if best:
             found.append(best[1])
@@ -2282,7 +2308,7 @@ def htf_conf(spans: Optional[dict], demand: bool, top: float, bot: float, ts: pd
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v60 · ✓ जाँच + Future: Dhan (चालू हो) → TradingView · Dhan token/Data API status · तेज़ · 2026-10-31"
+APP_BUILD = "v61 · Pivot/Gap: boring की body area के अंदर, area के बाद · Gap = body gap ≥ 0.2 ATR · symbol ✓ हटाया · 2026-10-31"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -2893,11 +2919,7 @@ def sheet_html(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0, extra=False,
         cells = [
             _td(str(n), n, "gs-rn"),
             _td(f'<a href="{u_cash}" target="_blank" rel="noopener" '
-                f'title="TradingView · {meta.get("cash")} · {r["tf"]}">{r["symbol"]}</a>'
-                + ({"✓": f' <span title="{r.get("chk_src") or "TradingView"} की candles पर भी यही ज़ोन (Pine से मेल)" style="color:#1D9E75">✓</span>',
-                    "✗": f' <span title="{r.get("chk_src") or "TradingView"} की candles पर यह ज़ोन नहीं बनता" style="color:#E24B4A">✗</span>',
-                    "?": ' <span title="Dhan / TradingView डेटा नहीं मिला" class="gs-sm">?</span>'}
-                   .get(str(r.get("tv_ok") or ""), "")),
+                f'title="TradingView · {meta.get("cash")} · {r["tf"]}">{r["symbol"]}</a>',
                 r["symbol"]),
             (_td(f'<a class="fut" href="{u_fut}" target="_blank" rel="noopener"'
                  + (f' style="color:{_FUT_COL[str(r.get("fut_rel"))]} !important"'

@@ -15,10 +15,11 @@ for sym in ["BANKBARODA", "ONGC", "SBILIFE", "RELIANCE", "LUPIN", "NTPC"]:
         out.append(f"## {sym} {z['tf']} {z['side']} prox {z['prox']:.2f} · boring wick {z['base_l']:.2f}–{z['base_h']:.2f} · body {z['body_l']:.2f}–{z['body_h']:.2f} · बना {pd.Timestamp(z['start_time'], unit='ms', tz='Asia/Kolkata')}")
         out.append(f"new Multi-TF: {z.get('htf_hits')}")
         zt = z["start_time"]
-        near = [a for a in areas if a["tf"] in ("1h", "2h", "4h", "1d") and a["end"] <= zt and a["t"] >= zt - 5*86400000
-                and a["lo"] <= z["base_h"] and a["hi"] >= z["base_l"]]
+        near = [a for a in areas if a["end"] <= zt and (a.get("till") is None or zt <= a["till"])
+                and a["lo"] <= z["body_l"] and z["body_h"] <= a["hi"] and A.TF_SECONDS[a["tf"]] > A.TF_SECONDS[z["tf"]]]
         for a in near[-6:]:
-            out.append(f"  - {a['name']} {a['kind']} {pd.Timestamp(a['t'], unit='ms', tz='Asia/Kolkata')} area {a['lo']:.2f}–{a['hi']:.2f}")
+            till = "—" if a.get("till") is None else pd.Timestamp(a["till"], unit="ms", tz="Asia/Kolkata")
+            out.append(f"  - match {a['name']} {a['kind']} {pd.Timestamp(a['t'], unit='ms', tz='Asia/Kolkata')} area {a['lo']:.2f}–{a['hi']:.2f} · पहली वापसी {till}")
     out.append("")
 os.makedirs(os.path.join(ROOT, "results"), exist_ok=True)
 open(os.path.join(ROOT, "results", "tv_fut_test.md"), "w").write("\n".join(out) + "\n")

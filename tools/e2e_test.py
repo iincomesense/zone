@@ -17,7 +17,7 @@ for z in r["rows"]:
     out.append(f"## {z['tf']} {z['side']} prox {z['prox']:.2f} · boring body {z['body_l']:.2f}–{z['body_h']:.2f} · leg-in {ts(zt)} · created {ts(z['time'])}")
     out.append(f"Multi-TF: {z.get('htf_hits')}")
     for a in areas:
-        if a["end"] <= zt and (a.get("till") is None or zt <= a["till"]) and a["lo"] <= z["body_l"] and z["body_h"] <= a["hi"] \
+        if a.get("demand") == z["demand"] and a["end"] <= zt and (a.get("till") is None or zt <= a["till"]) and a["lo"] <= z["body_l"] and z["body_h"] <= a["hi"] \
                 and A.TF_SECONDS[a["tf"]] > A.TF_SECONDS[z["tf"]]:
             days = next(d for t_, _, d in A.HTF_AREA_TFS if t_ == a["tf"])
             if a["t"] >= zt - days * 86400000:

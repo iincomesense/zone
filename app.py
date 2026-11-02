@@ -1407,6 +1407,13 @@ def _candidate(p: int, bc: int, nout: int, S: _S, I: PineInputs):
     p_rr = ((xrpt - prox) if demand else (prox - xrpt)) / p_risk if p_risk > 0 else 0.0
     if p_rr < POWER_MIN_RR:
         return (10, f"Power < 1:{POWER_MIN_RR:g}")
+    # ---- 2–3 leg-out पर: पहली candle की body बाकी से बड़ी हो, या पहली candle अकेले ≥ 1:3 दे ----
+    if nout > 1:
+        fo_body = abs(c[fo] - o[fo])
+        first_biggest = all(abs(c[k] - o[k]) < fo_body for k in range(fo + 1, p + 1))
+        first_rr = ((c[fo] - prox) if demand else (prox - c[fo])) / p_risk if p_risk > 0 else 0.0
+        if not (first_biggest or first_rr >= POWER_MIN_RR):
+            return (11, "पहली leg-out छोटी और < 1:3")
     # ---- Quality score (0–100, सिर्फ़ रैंकिंग) ----
     hq_in = tr[li] >= I.hqLegInAtr * atr[li]
     hq_out = tr[fo] >= I.hqLegOutMult * tr[li]
@@ -1837,7 +1844,7 @@ def eod_band(df: Optional[pd.DataFrame], tf: str, atr_period: int = 14) -> Optio
 # ---------------------------------------------------------------------------
 _EMPTY_SNAP = {"demand": None, "supply": None, "demand_time": 0, "supply_time": 0}
 _ZCACHE: Dict[tuple, tuple] = {}
-_ZVER = "z30"           # इंजन बदले तो बढ़ाएँ — पुराना कैश अपने आप बेकार
+_ZVER = "z31"           # इंजन बदले तो बढ़ाएँ — पुराना कैश अपने आप बेकार
 
 
 def _inputs_hash(I: PineInputs) -> str:

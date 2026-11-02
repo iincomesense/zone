@@ -1083,7 +1083,7 @@ class PineInputs:
     riskPct: float = 0.5                 # course: 0.5
     targetRR: float = 5.0                # course minimum 1:5
     traderType: str = "Auto"
-    bufferMode: str = "Chart ATR ×"
+    bufferMode: str = "DATR % (course)"
     bufAggrPct: float = 2.0
     bufDailyPct: float = 2.0
     bufSwingPct: float = 2.0

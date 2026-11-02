@@ -415,6 +415,9 @@ def _resample_session(df: pd.DataFrame, rule: str) -> pd.DataFrame:
         dser = pd.Series(secs).groupby(day)
         last_s = dser.transform("max").to_numpy()
         close_s = np.minimum(last_s + max(step, 60.0), np.where(last_s < 55800, 55800, last_s + max(step, 60.0)))
+        # TradingView की 60m feed में दिन की आख़िरी candle 14:15 की है और वह 15:30 तक चलती है —
+        # उसे 15:15 पर ख़त्म मानने से 4h की 13:15 candle पूरे दिन में मिल जाती थी
+        close_s = np.where((last_s == 51300) & (step == 3600), 55800, close_s)
         last_b = pd.Series(bucket).groupby(day).transform("max").to_numpy()
         b_start = anchor + last_b * secs_rule
         stub = (bucket == last_b) & (last_b > 0) & ((close_s - b_start) <= 0.5 * secs_rule)

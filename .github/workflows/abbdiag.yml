@@ -1,0 +1,14 @@
+name: abbdiag
+on:
+  push:
+    branches: [abb-diag]
+jobs:
+  d:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - run: pip install -r requirements.txt websocket-client
+      - run: python tools/abb_diag.py

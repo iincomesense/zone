@@ -115,7 +115,8 @@ TTL = {"1m": 600, "5m": 900, "15m": 1800, "30m": 2700, "60m": 3600,
 
 def _bar_ttl(base: str) -> float:
     """डेटा कब तक ताज़ा माना जाए — बड़ा TF, लंबा कैश (बार-बार डाउनलोड नहीं)।"""
-    return float(TTL.get(base, 1800))
+    ttl = float(TTL.get(base, 1800))
+    return min(ttl, 1800.0) if market_open_now() else ttl     # बाज़ार खुला हो तो 30 मिनट से पुराना डेटा नहीं
 
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
@@ -923,7 +924,7 @@ def _tv_fetch(tvs: str, base: str, n_bars: int) -> Optional[pd.DataFrame]:
 def tv_cash_frame(symbol: str, tf: str) -> Optional[pd.DataFrame]:
     """cash चार्ट (जो Pine में खुलता है — जैसे NSE:LTF) का एक TF, cash जैसे ही base + session resample।"""
     meta = sym_meta(symbol) or {}
-    tvs = meta.get("cash")
+    tvs = _tv_sym(meta.get("cash")) if meta.get("cash") else None   # BAJAJ-AUTO → NSE:BAJAJ_AUTO
     spec = TF_FETCH.get(tf)
     if not tvs or not spec:
         return None
@@ -942,6 +943,7 @@ def tv_cash_frame(symbol: str, tf: str) -> Optional[pd.DataFrame]:
 def tv_future_frame(symbol: str, tf: str) -> Optional[pd.DataFrame]:
     """current-month future का एक TF (cash जैसे ही base + session resample)।"""
     fut = (sym_meta(symbol) or {}).get("fut")
+    fut = _tv_sym(fut) if fut else None                        # BAJAJ-AUTO → NSE:BAJAJ_AUTO1!
     spec = TF_FETCH.get(tf)
     if not fut or not spec:
         return None
@@ -1825,7 +1827,7 @@ def eod_band(df: Optional[pd.DataFrame], tf: str, atr_period: int = 14) -> Optio
     try:
         now = datetime.now(IST)
         closed = (not market_open_now()) and (now.hour * 60 + now.minute) >= 15 * 60 + 30
-        if pstart(idx[-1]) >= pstart(datetime.now(IST)) and not (closed and tf == "1d"):
+        if pstart(idx[-1]) >= pstart(pd.Timestamp(datetime.now(IST))) and not (closed and tf == "1d"):
             i -= 1
     except Exception:                                          # noqa: BLE001
         pass
@@ -1853,9 +1855,11 @@ def _inputs_hash(I: PineInputs) -> str:
 
 
 def _bar_id(df: pd.DataFrame) -> int:
-    """उस TF के आख़िरी बार की पहचान — नया बार बना तो बदल जाएगी।"""
+    """आख़िरी बार की पहचान (समय + OHLC) — चालू candle का भाव बदले तो ज़ोन की स्थिति दोबारा गिनी जाएगी।"""
     try:
-        return int(pd.Timestamp(df.index[-1]).value // 10 ** 9)
+        last = df.iloc[-1]
+        raw = f'{pd.Timestamp(df.index[-1]).value}|{last["open"]}|{last["high"]}|{last["low"]}|{last["close"]}'
+        return int(hashlib.sha1(raw.encode()).hexdigest()[:15], 16)
     except Exception:                                          # noqa: BLE001
         return 0
 
@@ -2100,16 +2104,24 @@ def dhan_cash_zones(symbol: str, tf: str, I: "PineInputs", sec_id: Optional[str]
     return zz
 
 
-def tv_match(z: dict, tzs: List[dict]) -> bool:
-    """TradingView पर भी वही ज़ोन — उसी तरफ़, उसी दिन, proximal 0.15% के भीतर, और अभी live।"""
+def tv_find(z: dict, tzs: List[dict]) -> Optional[dict]:
+    """TradingView पर वही ज़ोन — उसी तरफ़, उसी दिन, proximal 0.15% के भीतर, और अभी live।"""
     zday = datetime.fromtimestamp(int(z["time"]) / 1000, IST).date()
     px = float(z["prox"]) or 1.0
     for t in tzs:
         if (t["demand"] == bool(z["demand"]) and t["state"] in ALIVE_STATES
                 and abs(float(t["prox"]) - px) / px * 100.0 <= 0.15
                 and datetime.fromtimestamp(t["time"] / 1000, IST).date() == zday):
-            return True
-    return False
+            return t
+    return None
+
+
+def tv_match(z: dict, tzs: List[dict]) -> bool:
+    return tv_find(z, tzs) is not None
+
+
+# ✓ वाले ज़ोन की टेबल में ये भाव चार्ट वाले डेटा के हों (स्कैन वही, सिर्फ़ दिखने वाले भाव)
+TV_LEVEL_COLS = ("prox", "dist", "entry", "sl", "tp", "t3", "t5", "xrpt", "risk", "qty", "xrr", "pow_rr", "state", "entries")
 
 
 def tv_future_zones(symbol: str, tf: str, I: "PineInputs") -> List[dict]:
@@ -2336,7 +2348,7 @@ def htf_conf(spans: Optional[dict], demand: bool, top: float, bot: float, ts: pd
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v67 · MTF खंड हटाया · 2026-11-02"
+APP_BUILD = "v68 · bug fixes · Mcap फ़िल्टर · 2026-11-02"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -2347,6 +2359,7 @@ SIDE_HI = {"Demand": "मांग (Demand)", "Supply": "आपूर्ति (
 CAT_HI = {"Reversal": "पलटाव", "Continuation": "निरंतरता"}
 
 UNIVERSES = ["NSE All Futures", "Index", "Global Instruments"]
+MCAP_FILTERS = {"Mcap: All": 0.0, "Mcap ≥ 100K": 100000.0, "Mcap ≥ 60K": 60000.0, "Mcap ≥ 50K": 50000.0, "Mcap ≥ 40K": 40000.0}   # ₹ Cr
 BANDS = ["Daily (EOD)", "Weekly (EOD)", "Monthly (EOD)"]
 BAND_LETTER = {"1d": "D", "1w": "W", "1M": "M"}
 BAND_TF = {"Daily (EOD)": "1d", "Weekly (EOD)": "1w", "Monthly (EOD)": "1M"}
@@ -2547,7 +2560,7 @@ def preset_loose():
 # 1 · ऊपर की एक पंक्ति
 # ---------------------------------------------------------------------------
 def top_bar():
-    c = cols([1.5, 2.0, .8, .85, 1.05, .55, 1.15, .95])
+    c = cols([1.5, 2.0, .8, .85, 1.05, 1.0, .55, 1.15, .95])
     if st.session_state.get("in_band") not in BANDS:          # पुराना विकल्प (v33) → default Weekly
         st.session_state.pop("in_band", None)
     if st.session_state.get("in_uni") not in UNIVERSES:      # पुराना विकल्प (NIFTY 50 / Futures + Global)
@@ -2561,11 +2574,12 @@ def top_bar():
                             label_visibility="collapsed")
     band = c[4].selectbox("EOD रेंज", BANDS, index=1, key="in_band",
                           label_visibility="collapsed")
-    sym_txt = c[6].text_input("स्क्रिप्ट", key="in_symtxt", label_visibility="collapsed",
+    mcap_f = c[5].selectbox("Market cap", list(MCAP_FILTERS), key="in_mcapf", label_visibility="collapsed")
+    sym_txt = c[7].text_input("स्क्रिप्ट", key="in_symtxt", label_visibility="collapsed",
                               placeholder="RELIANCE, SBIN…")
-    go = put(c[7], "button", "⚡ Scan", type="primary", key="btn_scan")
+    go = put(c[8], "button", "⚡ Scan", type="primary", key="btn_scan")
     return dict(universe=uni, tfs=tuple(tfs), side=side, status=status, band=band,
-                symbols_txt=sym_txt.strip(), go=go, settings_slot=c[5])
+                symbols_txt=sym_txt.strip(), go=go, settings_slot=c[6], mcap_filter=mcap_f)
 
 
 # ---------------------------------------------------------------------------
@@ -2703,7 +2717,7 @@ def cached_fno():
         return list(FALLBACK_FNO)
 
 
-@st.cache_resource(ttl=3600, max_entries=4, show_spinner=False)
+@st.cache_resource(ttl=1800, max_entries=4, show_spinner=False)
 def cached_frames(symbols: tuple, tfs: tuple):
     return load_frames(list(symbols), list(tfs))
 
@@ -3234,7 +3248,8 @@ def _main():
         chk, fzm = cache[ekey]
         marks, srcs_c = [], []
         rels, fps, tgs = [], [], []
-        for _, r in f.iterrows():
+        tv_lv: Dict[object, dict] = {}
+        for i_, r in f.iterrows():
             pq = (str(r["symbol"]), str(r["tf"]))
             src, zz = chk.get(pq, ("", None))
             if str(r["symbol"]).upper() in TV_ONLY:
@@ -3244,7 +3259,10 @@ def _main():
             elif zz is None:
                 marks.append("?")
             else:
-                marks.append("✓" if tv_match(r, zz) else "✗")
+                tz_ = tv_find(r, zz)
+                marks.append("✓" if tz_ is not None else "✗")
+                if tz_ is not None:
+                    tv_lv[i_] = {k: tz_[k] for k in TV_LEVEL_COLS if k in tz_}
             srcs_c.append(src)
             fsrc, fz = fzm.get(pq, ("", []))
             rel, fp = fut_rel_of(bool(r["demand"]), float(r["prox"]), int(r["time"]), fz or [])
@@ -3255,6 +3273,13 @@ def _main():
         f = f.copy()
         f["tv_ok"], f["chk_src"] = marks, srcs_c
         f["fut_rel"], f["fut_prox"], f["tags"] = rels, fps, tgs
+        for i_, lv in tv_lv.items():
+            for k, v in lv.items():
+                f.at[i_, k] = v
+            if pd.notna(f.at[i_, "ltp"]) and float(f.at[i_, "ltp"]):
+                f.at[i_, "dist_pct"] = abs(float(lv["prox"]) - float(f.at[i_, "ltp"])) / float(f.at[i_, "ltp"]) * 100.0
+        if tb["status"] != "All":
+            f = f[f["state"] == tb["status"]]
         _tv_ok = marks.count("✓")
         _tv_na = marks.count("?")
         _tv_total = len([m for m in marks if m])
@@ -3275,9 +3300,12 @@ def _main():
             f = sort_df(f, _sc, _sd == "▼")
     if extra_cols and not f.empty:
         try:
-            f["mcap_cr"] = f["symbol"].map(cached_caps(tuple(sorted(f["symbol"].unique())[:120])))
+            f["mcap_cr"] = f["symbol"].map(cached_caps(tuple(sorted(df_all["symbol"].unique()))))
         except Exception:                                        # noqa: BLE001
             f["mcap_cr"] = np.nan
+        _mc_min = MCAP_FILTERS.get(tb.get("mcap_filter"), 0.0)
+        if _mc_min:                                              # Mcap पता न हो तो ज़ोन न छिपे
+            f = f[f["mcap_cr"].isna() | (f["mcap_cr"] >= _mc_min)]
 
     _ss = list(res.get("scanned_syms") or [])
     _n_idx = sum(1 for x in _ss if str(x).upper() in IDX_SYMBOLS or str(x).upper().startswith("NIFTY"))

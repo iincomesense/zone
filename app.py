@@ -2336,7 +2336,7 @@ def htf_conf(spans: Optional[dict], demand: bool, top: float, bot: float, ts: pd
 #  भाग 4 · Streamlit UI — ऊपर एक पंक्ति (toolbar), नीचे Google-Sheets टेबल
 # ═══════════════════════════════════════════════════════════════════════
 
-APP_BUILD = "v63 · निशान + Multi-TF एक कॉलम · ▲▼ क्रम बटन · टेबल अपने-आप फिट · 2026-10-31"
+APP_BUILD = "v67 · MTF खंड हटाया · 2026-11-02"
 
 st.set_page_config(page_title="ज़ोन MTF स्कैनर", page_icon="📐", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -3041,19 +3041,6 @@ def zone_table(df: pd.DataFrame, show_mcap=True, min_mcap=50000.0) -> pd.DataFra
     return d
 
 
-def mtf_panel(snap: dict, tfs, peers):
-    rows = []
-    for tf in tfs:
-        s = snap.get(tf) or {}
-        rows.append({
-            "TF": tf,
-            "मांग proximal": s.get("demand"),
-            "आपूर्ति proximal": s.get("supply"),
-            "MTF में गिना": "✓" if tf in peers else "",
-        })
-    return pd.DataFrame(rows)
-
-
 # ---------------------------------------------------------------------------
 # 5 · यूनिवर्स
 # ---------------------------------------------------------------------------
@@ -3295,7 +3282,7 @@ def _main():
     _ss = list(res.get("scanned_syms") or [])
     _n_idx = sum(1 for x in _ss if str(x).upper() in IDX_SYMBOLS or str(x).upper().startswith("NIFTY"))
     _nod = sorted(k for k, v in (res.get("errs") or {}).items() if v == "डेटा नहीं मिला")
-    st.caption(f"**{sel_band} रेंज के अंदर ज़ोन: {int(res.get('scanned') or 0)} / {len(f)}**"
+    st.caption(f"**{sel_band} रेंज के अंदर ज़ोन: {len(f)} · स्कैन हुई स्क्रिप्ट: {int(res.get('scanned') or 0)}**"
                + (f" · ✓ {_tv_ok}/{_tv_total}"
                   + (" (" + " · ".join(f"{k} {v}" for k, v in _chk_src.items()) + ")" if _chk_src else "")
                   + (f" (? {_tv_na})" if _tv_na else "") if _tv_total else "")
@@ -3315,17 +3302,6 @@ def _main():
             scale = 3.0
         _html(sheet_html(f, uo.get("show_mcap", True), float(uo.get("min_mcap", 50000.0)), extra=extra_cols,
                          range_pct=scale), js=_JS_SORT)
-
-    # ── MTF (बंद खंड) ───────────────────────────────────────────────────
-    with st.expander("🔗 MTF", expanded=False):
-        if res["snaps"]:
-            sym2 = st.selectbox("स्क्रिप्ट", sorted(res["snaps"].keys()), key="m_sym")
-            mdf = mtf_panel(res["snaps"].get(sym2, {}), list(res["opts"]["tfs"]), set(uo["peers"]))
-            stretch(st.dataframe, mdf, hide_index=True, height=460,
-                    column_config={
-                        "मांग proximal": st.column_config.NumberColumn(format="%.2f"),
-                        "आपूर्ति proximal": st.column_config.NumberColumn(format="%.2f"),
-                    })
 
 
 main()
